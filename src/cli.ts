@@ -14,6 +14,7 @@ import {
 } from "./paths.ts";
 import type { OarRequest } from "./protocol.ts";
 import { findSenpiInstall } from "./senpi-install.ts";
+import { buildPanelSnapshot, formatPanelText, formatPanelXbar, type StatusPayload } from "./panel.ts";
 import type { AccountRecord, StoredCredential } from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +39,7 @@ Usage:
   oar report <provider> <profile> <RESULT>
   oar guide second-account
   oar install [-- <install.sh args>]
+  oar panel [--watch [sec]] [--json] [--xbar] [--hours N]
   oar doctor
   oar daemon start|stop|status
 
@@ -387,6 +389,49 @@ async function main(argv: string[]) {
       });
       if (!res.ok) throw new Error(res.error);
       console.log(JSON.stringify(res.data, null, 2));
+      return;
+    }
+    case "panel": {
+      const watchIdx = rest.indexOf("--watch");
+      const json = rest.includes("--json");
+      const xbar = rest.includes("--xbar");
+      let hours = 24;
+      const hoursIdx = rest.indexOf("--hours");
+      if (hoursIdx >= 0 && rest[hoursIdx + 1]) {
+        hours = Number(rest[hoursIdx + 1]);
+        if (!Number.isFinite(hours) || hours <= 0) throw new Error("--hours must be a positive number");
+      }
+      let intervalSec = 0;
+      if (watchIdx >= 0) {
+        const maybe = rest[watchIdx + 1];
+        intervalSec = maybe && !maybe.startsWith("--") ? Number(maybe) : 2;
+        if (!Number.isFinite(intervalSec) || intervalSec <= 0) intervalSec = 2;
+      }
+
+      const renderOnce = async () => {
+        const res = await req({ protocol: 1, action: "status" });
+        if (!res.ok) throw new Error(res.error);
+        const snap = buildPanelSnapshot(res.data as StatusPayload, {
+          windowHours: hours,
+          rootDir: process.env.OAR_HOME ?? defaultOarRoot(),
+        });
+        if (json) console.log(JSON.stringify(snap, null, 2));
+        else if (xbar) console.log(formatPanelXbar(snap));
+        else console.log(formatPanelText(snap));
+      };
+
+      if (intervalSec > 0 && !json && !xbar) {
+        // terminal dashboard loop
+        for (;;) {
+          // clear screen
+          process.stdout.write("\x1b[2J\x1b[H");
+          await renderOnce();
+          console.log(`\nwatching every ${intervalSec}s  ·  Ctrl+C to stop`);
+          await new Promise((r) => setTimeout(r, intervalSec * 1000));
+        }
+      } else {
+        await renderOnce();
+      }
       return;
     }
     case "doctor": {

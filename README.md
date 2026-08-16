@@ -121,3 +121,39 @@ Covers: real Senpi AuthStorage hot-switch, multi-client daemon, AUTH_REVOKED rou
 | `openai-codex` | yes | yes | Preserves `accountId` |
 | `openrouter` | yes | no | Long-lived key shaped as oauth |
 | `opencode-go`, `zai-coding-cn`, others | yes | no | Generic adapter |
+
+## Panel / dashboard (selection + local usage signals)
+
+```bash
+oar panel                 # one-shot table
+oar panel --watch 2       # refresh every 2s
+oar panel --json          # machine readable
+oar panel --hours 48      # event window (default 24h)
+oar panel --xbar          # SwiftBar / xbar menubar output
+```
+
+Columns:
+
+- **★** live/resolved account for that provider (shared by all parallel omo sessions)
+- **MODE / AUTO** manual|auto and failover flag
+- **OK / RL / QUOTA / AF** counts from local `~/.oar/events.jsonl` in the window  
+  (SUCCESS / RATE_LIMITED / QUOTA_EXHAUSTED / auth failures reported by the OMO extension)
+
+This is **not** ChatGPT/Grok/Claude billing dashboards. Provider residual quota/$ APIs are not wired yet (`supportsUsageQuery` is still false). The panel shows **which account is selected** and **local health/usage signals** OAR already observes.
+
+### macOS menu bar (SwiftBar or xbar)
+
+1. Install [SwiftBar](https://github.com/swiftbar/SwiftBar) or xbar
+2. Link the plugin (refresh every 5s via filename):
+
+```bash
+# SwiftBar
+mkdir -p "$HOME/Library/Application Support/SwiftBar"
+ln -sf "$PWD/scripts/oar-xbar.sh" "$HOME/Library/Application Support/SwiftBar/oar.5s.sh"
+
+# xbar
+mkdir -p "$HOME/Library/Application Support/xbar/plugins"
+ln -sf "$PWD/scripts/oar-xbar.sh" "$HOME/Library/Application Support/xbar/plugins/oar.5s.sh"
+```
+
+Menu shows active profiles; click a profile row to `oar use` that account (via plugin action).
