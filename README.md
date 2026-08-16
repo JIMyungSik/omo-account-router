@@ -125,12 +125,25 @@ Covers: real Senpi AuthStorage hot-switch, multi-client daemon, AUTH_REVOKED rou
 ## Panel / dashboard (selection + local usage signals)
 
 ```bash
-oar panel                 # one-shot table
-oar panel --watch 2       # refresh every 2s
-oar panel --json          # machine readable
-oar panel --hours 48      # event window (default 24h)
-oar panel --xbar          # SwiftBar / xbar menubar output
+oar panel                 # selection + local signals + cached remote %
+oar panel --refresh       # force Codex/Grok remaining refresh
+oar panel --watch 2
+oar panel --json
+oar panel --xbar
+oar usage                 # openai-codex + xai remaining windows
+oar usage openai-codex main
+oar usage xai sub --refresh
 ```
+
+Remote remaining columns (when vault oauth works):
+
+| Col | Provider | Meaning |
+|-----|----------|---------|
+| **5H** | openai-codex | Session/5h-class remaining % when API exposes a short window |
+| **WK** | openai-codex | Weekly remaining % |
+| **GROK** | xai | Grok subscription credit remaining % |
+
+If Codex only returns a weekly primary window (no secondary/5h), **5H** shows `—`. Sources: ChatGPT WHAM usage (Codex) and Grok CLI billing proxy (xAI oauth).
 
 Columns:
 

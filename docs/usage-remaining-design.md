@@ -221,3 +221,9 @@ Until Phase 1–2 land:
 3. Revisit Codex/xAI only if they publish a stable remaining endpoint  
 
 Estimate for Phase 1: small (extension + daemon store + panel) — no provider reverse engineering.
+
+## Implementation status (2026-08-16)
+
+- Shipped: `oar usage`, `oar panel` remote columns via `src/usage/*`.
+- Codex: `GET chatgpt.com/backend-api/wham/usage` with vault OAuth (5h when secondary/short window present; weekly primary common).
+- xAI: `GET cli-chat-proxy.grok.com/v1/billing?format=credits` with vault OAuth access (Grok subscription 

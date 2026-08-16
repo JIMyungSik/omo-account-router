@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { oarEventsPath } from "./paths.ts";
+import type { AccountRemoteUsage } from "./usage/types.ts";
 import type { AccountRecord, OarState, ProviderPolicy, ResolveResponse } from "./types.ts";
 
 export type PanelLease = {
@@ -44,6 +45,8 @@ export type PanelRow = {
   until?: string | null;
   reason?: string;
   usage: AccountUsageStats;
+  /** Remote plan windows (Codex 5h/week, Grok subscription, …) */
+  remote?: AccountRemoteUsage;
 };
 
 export type PanelSnapshot = {
@@ -167,12 +170,21 @@ function emptyUsage(provider: string, profile: string): AccountUsageStats {
 
 export function buildPanelSnapshot(
   status: StatusPayload,
-  opts?: { windowHours?: number; eventsPath?: string; rootDir?: string },
+  opts?: {
+    windowHours?: number;
+    eventsPath?: string;
+    rootDir?: string;
+    remoteUsage?: AccountRemoteUsage[];
+  },
 ): PanelSnapshot {
   const windowHours = opts?.windowHours ?? 24;
   const sinceMs = Date.now() - windowHours * 3600_000;
   const eventsPath = opts?.eventsPath ?? (opts?.rootDir ? oarEventsPath(opts.rootDir) : oarEventsPath());
   const usageMap = aggregateUsage(readEventLines(eventsPath, { sinceMs }));
+  const remoteMap = new Map<string, AccountRemoteUsage>();
+  for (const r of opts?.remoteUsage ?? []) {
+    remoteMap.set(`${r.provider}\0${r.profile}`, r);
+  }
 
   const activeByProvider = new Map<string, string>();
   for (const r of status.resolvePreview ?? []) {
@@ -198,6 +210,7 @@ export function buildPanelSnapshot(
       until: account.until,
       reason: account.reason,
       usage,
+      remote: remoteMap.get(`${account.provider}\0${account.profile}`),
     });
   }
 
@@ -226,9 +239,35 @@ export function buildPanelSnapshot(
     totals,
     notes: [
       "ACTIVE ★ = currently preferred/resolved live slot for that provider (shared by all omo sessions).",
-      "ok/rl/quota/auth columns are local OAR signals from events.jsonl in the time window — not provider billing dashboards.",
-      "True remaining quota/$ requires each provider's usage API (not wired yet; adapters.supportsUsageQuery is still false).",
+      "ok/rl/quota/auth = local OAR event signals in the time window.",
+      "5H/WK/GROK% = remote plan windows (Codex WHAM usage; xAI Grok subscription billing). Session/5h shows — when provider only exposes weekly.",
+      "Use: oar usage  |  oar panel --refresh",
     ],
+  };
+}
+
+
+function remoteCols(r: PanelRow): { session: string; weekly: string; grok: string } {
+  const remote = r.remote;
+  if (!remote?.ok) {
+    if (remote && !remote.ok && remote.error) {
+      return { session: "err", weekly: "err", grok: "err" };
+    }
+    return { session: "—", weekly: "—", grok: "—" };
+  }
+  const session = remote.windows.find((w) => w.kind === "session");
+  const weekly = remote.windows.find((w) => w.kind === "weekly");
+  const grok = remote.windows.find((w) => w.label === "grok" || (r.provider === "xai" && (w.kind === "weekly" || w.kind === "period")));
+  const fmt = (w?: { remainingPercent: number | null; usedPercent: number | null }) => {
+    if (!w) return "—";
+    if (w.remainingPercent != null) return `${w.remainingPercent}%`;
+    if (w.usedPercent != null) return `${Math.max(0, 100 - w.usedPercent)}%`;
+    return "—";
+  };
+  return {
+    session: r.provider === "openai-codex" ? fmt(session) : "—",
+    weekly: r.provider === "openai-codex" ? fmt(weekly) : "—",
+    grok: r.provider === "xai" ? fmt(grok) : "—",
   };
 }
 
@@ -253,14 +292,14 @@ export function formatPanelText(snap: PanelSnapshot): string {
   );
   lines.push("");
   lines.push(
-    `${pad("PROV", 14)}${pad("PROFILE", 12)}${pad("AUTH", 8)}${pad("STATUS", 14)}${pad("MODE", 8)}${pad("AUTO", 5)}${pad("OK", 5)}${pad("RL", 4)}${pad("QUOTA", 6)}${pad("AF", 4)}${pad("LAST", 20)}A`,
+    `${pad("PROV", 14)}${pad("PROFILE", 10)}${pad("STATUS", 12)}${pad("MODE", 7)}${pad("5H", 6)}${pad("WK", 6)}${pad("GROK", 6)}${pad("OK", 5)}${pad("RL", 4)}A`,
   );
-  lines.push("-".repeat(110));
+  lines.push("-".repeat(90));
   for (const r of snap.rows) {
-    const mark = r.active ? "★" : r.preferred ? "·" : " ";
-    const auto = r.autoFailover ? "on" : "off";
+    const mark = r.active ? "*" : r.preferred ? "." : " ";
+    const rc = remoteCols(r);
     lines.push(
-      `${pad(r.provider, 14)}${pad(r.profile, 12)}${pad(r.auth, 8)}${pad(r.availability, 14)}${pad(r.mode, 8)}${pad(auto, 5)}${pad(String(r.usage.success), 5)}${pad(String(r.usage.rateLimited), 4)}${pad(String(r.usage.quotaExhausted), 6)}${pad(String(r.usage.authFailed), 4)}${pad(shortTime(r.usage.lastEventAt ?? r.lastUsedAt), 20)}${mark}`,
+      `${pad(r.provider, 14)}${pad(r.profile, 10)}${pad(r.availability, 12)}${pad(r.mode, 7)}${pad(rc.session, 6)}${pad(rc.weekly, 6)}${pad(rc.grok, 6)}${pad(String(r.usage.success), 5)}${pad(String(r.usage.rateLimited), 4)}${mark}`,
     );
   }
   if (snap.leases.length > 0) {
@@ -293,8 +332,15 @@ export function formatPanelXbar(snap: PanelSnapshot): string {
       lines.push(`${r.provider}  mode=${r.mode} auto=${r.autoFailover ? "on" : "off"} | size=12`);
       lastProv = r.provider;
     }
-    const star = r.active ? "★ " : "  ";
-    const stats = `ok=${r.usage.success} rl=${r.usage.rateLimited} q=${r.usage.quotaExhausted}`;
+    const star = r.active ? "* " : "  ";
+    const rc = remoteCols(r);
+    const remote =
+      r.provider === "openai-codex"
+        ? `5h=${rc.session} wk=${rc.weekly}`
+        : r.provider === "xai"
+          ? `grok=${rc.grok}`
+          : "";
+    const stats = `ok=${r.usage.success} rl=${r.usage.rateLimited}${remote ? " " + remote : ""}`;
     lines.push(
       `${star}${r.profile}  ${r.availability}  ${stats} | bash=${shellQuote(process.env.HOME + "/.local/bin/oar")} param1=use param2=${r.provider} param3=${r.profile} terminal=false refresh=true`,
     );

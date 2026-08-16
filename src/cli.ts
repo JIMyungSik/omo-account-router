@@ -15,6 +15,8 @@ import {
 import type { OarRequest } from "./protocol.ts";
 import { findSenpiInstall } from "./senpi-install.ts";
 import { buildPanelSnapshot, formatPanelText, formatPanelXbar, type StatusPayload } from "./panel.ts";
+import { OarStore } from "./store.ts";
+import { fetchRemoteUsage, fetchRemoteUsageForAccounts } from "./usage/fetch.ts";
 import type { AccountRecord, StoredCredential } from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -39,7 +41,8 @@ Usage:
   oar report <provider> <profile> <RESULT>
   oar guide second-account
   oar install [-- <install.sh args>]
-  oar panel [--watch [sec]] [--json] [--xbar] [--hours N]
+  oar panel [--watch [sec]] [--json] [--xbar] [--hours N] [--refresh] [--no-remote]
+  oar usage [provider] [profile] [--refresh]
   oar doctor
   oar daemon start|stop|status
 
@@ -395,6 +398,8 @@ async function main(argv: string[]) {
       const watchIdx = rest.indexOf("--watch");
       const json = rest.includes("--json");
       const xbar = rest.includes("--xbar");
+      const refresh = rest.includes("--refresh");
+      const noRemote = rest.includes("--no-remote");
       let hours = 24;
       const hoursIdx = rest.indexOf("--hours");
       if (hoursIdx >= 0 && rest[hoursIdx + 1]) {
@@ -408,12 +413,28 @@ async function main(argv: string[]) {
         if (!Number.isFinite(intervalSec) || intervalSec <= 0) intervalSec = 2;
       }
 
+      const root = process.env.OAR_HOME ?? defaultOarRoot();
+      const store = new OarStore({ rootDir: root });
+
       const renderOnce = async () => {
         const res = await req({ protocol: 1, action: "status" });
         if (!res.ok) throw new Error(res.error);
-        const snap = buildPanelSnapshot(res.data as StatusPayload, {
+        const status = res.data as StatusPayload;
+        let remoteUsage = undefined as undefined | Awaited<ReturnType<typeof fetchRemoteUsageForAccounts>>;
+        if (!noRemote) {
+          const targets = (status.accounts ?? [])
+            .filter((a) => a.provider === "openai-codex" || a.provider === "xai")
+            .map((a) => ({ provider: a.provider, profile: a.profile }));
+          remoteUsage = await fetchRemoteUsageForAccounts(store, targets, {
+            root,
+            force: refresh,
+            maxAgeMs: refresh ? 0 : 60_000,
+          });
+        }
+        const snap = buildPanelSnapshot(status, {
           windowHours: hours,
-          rootDir: process.env.OAR_HOME ?? defaultOarRoot(),
+          rootDir: root,
+          remoteUsage,
         });
         if (json) console.log(JSON.stringify(snap, null, 2));
         else if (xbar) console.log(formatPanelXbar(snap));
@@ -421,9 +442,7 @@ async function main(argv: string[]) {
       };
 
       if (intervalSec > 0 && !json && !xbar) {
-        // terminal dashboard loop
         for (;;) {
-          // clear screen
           process.stdout.write("\x1b[2J\x1b[H");
           await renderOnce();
           console.log(`\nwatching every ${intervalSec}s  ·  Ctrl+C to stop`);
@@ -431,6 +450,44 @@ async function main(argv: string[]) {
         }
       } else {
         await renderOnce();
+      }
+      return;
+    }
+    case "usage": {
+      const refresh = rest.includes("--refresh");
+      const args = rest.filter((a) => !a.startsWith("--"));
+      const root = process.env.OAR_HOME ?? defaultOarRoot();
+      const store = new OarStore({ rootDir: root });
+      const provider = args[0];
+      const profile = args[1];
+      const targets =
+        provider && profile
+          ? [{ provider, profile }]
+          : store
+              .listAccounts()
+              .filter((a) => a.provider === "openai-codex" || a.provider === "xai")
+              .map((a) => ({ provider: a.provider, profile: a.profile }));
+      if (targets.length === 0) {
+        console.log("no openai-codex / xai accounts in vault");
+        return;
+      }
+      const rows = await fetchRemoteUsageForAccounts(store, targets, {
+        root,
+        force: refresh || true,
+        maxAgeMs: 0,
+      });
+      for (const u of rows) {
+        if (!u.ok) {
+          console.log(`${u.provider}/${u.profile}  ERROR  ${u.error ?? "unknown"}  (${u.source})`);
+          continue;
+        }
+        const parts = u.windows.map((w) => {
+          const rem = w.remainingPercent != null ? `${w.remainingPercent}% left` : "n/a";
+          const used = w.usedPercent != null ? `${w.usedPercent}% used` : "";
+          const reset = w.resetsAt ? ` reset ${w.resetsAt}` : "";
+          return `${w.label ?? w.kind}: ${rem}${used ? ` (${used})` : ""}${reset}`;
+        });
+        console.log(`${u.provider}/${u.profile}  ${parts.join("  |  ")}  [${u.source}]`);
       }
       return;
     }
