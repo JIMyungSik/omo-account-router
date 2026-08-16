@@ -15,7 +15,8 @@ describe("tables", () => {
       ],
     );
     expect(out).toContain("| A");
-    expect(out).toContain("|---");
+    expect(out).toContain("|");
+    expect(out).toMatch(/\|[-: ]+\|/);
     expect(out.split("\n").filter(Boolean).length).toBeGreaterThanOrEqual(4);
   });
 

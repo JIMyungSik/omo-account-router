@@ -239,9 +239,9 @@ export function buildPanelSnapshot(
     leases: status.leases ?? [],
     totals,
     notes: [
-      "ACTIVE ★ = currently preferred/resolved live slot for that provider (shared by all omo sessions).",
+      "ACTIVE * = currently preferred/resolved live slot for that provider (shared by all omo sessions).",
       "ok/rl/quota/auth = local OAR event signals in the time window.",
-      "5H/WK/GROK% = remote plan windows (Codex WHAM usage; xAI Grok subscription billing). Session/5h shows — when provider only exposes weekly.",
+      "5H/WK/GROK% = remote plan windows (Codex WHAM usage; xAI Grok subscription billing). Session/5h shows - when provider only exposes weekly.",
       "Use: oar usage  |  oar panel --refresh",
     ],
   };
@@ -287,7 +287,7 @@ function shortTime(iso?: string | null): string {
 /** Human table for terminal. */
 export function formatPanelText(snap: PanelSnapshot): string {
   const lines: string[] = [];
-  lines.push(`OAR panel  ·  window ${snap.windowHours}h  ·  ${snap.generatedAt}`);
+  lines.push(`OAR panel  -  window ${snap.windowHours}h  -  ${snap.generatedAt}`);
   lines.push(
     `accounts ${snap.totals.accounts}  active ${snap.totals.active}  ok ${snap.totals.success}  rl ${snap.totals.rateLimited}  quota ${snap.totals.quotaExhausted}  authfail ${snap.totals.authFailed}`,
   );
@@ -385,7 +385,7 @@ export function formatPanelXbar(snap: PanelSnapshot): string {
   lines.push("Open status in terminal | bash=" + shellQuote((process.env.HOME || "") + "/.local/bin/oar") + " param1=panel terminal=true");
   lines.push("Doctor | bash=" + shellQuote((process.env.HOME || "") + "/.local/bin/oar") + " param1=doctor terminal=true");
   lines.push("---");
-  lines.push("Local event signals only — not provider $ billing");
+  lines.push("Local event signals only - not provider $ billing");
   return lines.join("\n");
 }
 

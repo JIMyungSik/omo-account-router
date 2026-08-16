@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Senpi-native OMO Account Router (OAR) \u2014 multi-account hot switching without OMO restart",
+  "description": "OAR \u2014 local multi-account hot-switch for OMO/Senpi agents (vault, panel, usage, optional failover)",
   "bin": {
     "oar": "./dist/cli.js"
   },
@@ -22,5 +22,24 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.9.2"
-  }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JIMyungSik/omo-account-router.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JIMyungSik/omo-account-router/issues"
+  },
+  "homepage": "https://github.com/JIMyungSik/omo-account-router#readme",
+  "keywords": [
+    "omo",
+    "senpi",
+    "account",
+    "router",
+    "oauth",
+    "multi-account",
+    "grok",
+    "codex"
+  ]
 }

@@ -114,7 +114,8 @@ describe("panel aggregation", () => {
     expect(snap.totals.success).toBe(1);
     const text = formatPanelText(snap);
     expect(text).toContain("xai");
-    expect(text).toContain("★");
+    expect(text).toContain("*");
+    expect(text).toContain("PROVIDER");
     expect(text.toLowerCase()).not.toContain("access_token");
     const xbar = formatPanelXbar(snap);
     expect(xbar.startsWith("OAR ")).toBe(true);
