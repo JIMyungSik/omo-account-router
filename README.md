@@ -70,14 +70,14 @@ Full guide: [`scripts/second-account.md`](scripts/second-account.md) · CLI: `oa
 oar import-auth xai main
 
 # 2) isolated login via senpi (NOT omo — launcher ignores temp dirs)
-export OAR_TMP_LOGIN_DIR=\"$(mktemp -d)/agent\"
-mkdir -p \"$OAR_TMP_LOGIN_DIR\"
-SENPI_CODING_AGENT_DIR=\"$OAR_TMP_LOGIN_DIR\" senpi
+export OAR_TMP_LOGIN_DIR="$(mktemp -d)/agent"
+mkdir -p "$OAR_TMP_LOGIN_DIR"
+SENPI_CODING_AGENT_DIR="$OAR_TMP_LOGIN_DIR" senpi
 # in TUI: /login → xAI → complete OAuth as the SECOND account → quit
 
 # 3) import + switch
-oar import-auth xai account-b --from \"$OAR_TMP_LOGIN_DIR/auth.json\"
-rm -rf \"$(dirname \"$OAR_TMP_LOGIN_DIR\")\"
+oar import-auth xai account-b --from "$OAR_TMP_LOGIN_DIR/auth.json"
+rm -rf "$(dirname "$OAR_TMP_LOGIN_DIR")"
 oar use xai account-b
 oar status
 ```
