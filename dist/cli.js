@@ -1730,6 +1730,25 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
         maxAgeMs: 0
       });
       rows.sort((a, b) => a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider));
+      for (const u of rows) {
+        if (!u.ok)
+          continue;
+        const primary = u.windows.find((w) => w.remainingPercent != null) ?? u.windows[0];
+        if (!primary || primary.remainingPercent == null)
+          continue;
+        if (primary.remainingPercent <= 0 || primary.limitReached) {
+          try {
+            await req({
+              protocol: 1,
+              action: "report",
+              provider: u.provider,
+              account: u.profile,
+              result: "QUOTA_EXHAUSTED",
+              detail: `remote_usage_${primary.label ?? primary.kind}_0`
+            });
+          } catch {}
+        }
+      }
       console.log(formatUsageTable(rows));
       return;
     }

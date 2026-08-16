@@ -542,6 +542,26 @@ async function main(argv: string[]) {
       rows.sort((a, b) =>
         a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider),
       );
+      // Push remote exhaustion into the *daemon* state (CLI store alone is not enough).
+      for (const u of rows) {
+        if (!u.ok) continue;
+        const primary = u.windows.find((w) => w.remainingPercent != null) ?? u.windows[0];
+        if (!primary || primary.remainingPercent == null) continue;
+        if (primary.remainingPercent <= 0 || primary.limitReached) {
+          try {
+            await req({
+              protocol: 1,
+              action: "report",
+              provider: u.provider,
+              account: u.profile,
+              result: "QUOTA_EXHAUSTED",
+              detail: `remote_usage_${primary.label ?? primary.kind}_0`,
+            });
+          } catch {
+            // daemon may be down; local cache still updated
+          }
+        }
+      }
       console.log(formatUsageTable(rows));
       return;
     }
