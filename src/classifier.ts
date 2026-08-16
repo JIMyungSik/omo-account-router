@@ -47,10 +47,17 @@ export function classifyFailure(input: FailureInput): FailureType {
 
   if (
     status === 402 ||
+    status === 403 ||
     body.includes("quota") ||
     body.includes("insufficient_quota") ||
-    body.includes("usage limit")
+    body.includes("usage limit") ||
+    body.includes("run out of credits") ||
+    body.includes("out of credits") ||
+    body.includes("need a grok subscription") ||
+    body.includes("add credits") ||
+    body.includes("supergrok")
   ) {
+    // 403 from xAI/Grok subscription exhaustion is quota, not auth.
     return "QUOTA_EXHAUSTED";
   }
 

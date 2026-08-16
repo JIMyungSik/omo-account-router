@@ -23,3 +23,13 @@ describe("classifyFailure", () => {
     );
   });
 });
+
+test("classifyFailure > maps xAI 403 out of credits to QUOTA_EXHAUSTED", () => {
+  expect(
+    classifyFailure({
+      provider: "xai",
+      status: 403,
+      body: 'You have run out of credits or need a Grok subscription. Add credits at https://grok.com/',
+    }),
+  ).toBe("QUOTA_EXHAUSTED");
+});

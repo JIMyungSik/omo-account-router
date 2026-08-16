@@ -1064,6 +1064,32 @@ async function fetchXaiGrokSubscriptionUsage(provider, profile, credential, opts
 }
 
 // src/usage/fetch.ts
+function applyUsageToAccountState(store, usage) {
+  const account = store.getAccount(usage.provider, usage.profile);
+  if (!account || !usage.ok)
+    return;
+  const primary = usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
+  if (!primary || primary.remainingPercent == null)
+    return;
+  if (primary.remainingPercent <= 0 || primary.limitReached) {
+    const next = {
+      ...account,
+      availability: "QUOTA_EXHAUSTED",
+      reason: `remote_usage_${primary.label ?? primary.kind}_0`,
+      lastChecked: usage.fetchedAt,
+      until: primary.resetsAt ?? null
+    };
+    store.upsertAccount(next);
+  } else if (account.availability === "QUOTA_EXHAUSTED" && primary.remainingPercent > 5) {
+    store.upsertAccount({
+      ...account,
+      availability: "AVAILABLE",
+      reason: undefined,
+      until: null,
+      lastChecked: usage.fetchedAt
+    });
+  }
+}
 async function fetchRemoteUsage(store, provider, profile, opts) {
   const root = opts?.root ?? store.rootDir ?? defaultOarRoot();
   const maxAgeMs = opts?.maxAgeMs ?? 60000;
@@ -1105,6 +1131,7 @@ async function fetchRemoteUsage(store, provider, profile, opts) {
     };
   }
   putCachedUsage(result, root);
+  applyUsageToAccountState(store, result);
   return result;
 }
 async function fetchRemoteUsageForAccounts(store, accounts, opts) {

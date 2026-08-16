@@ -25,7 +25,7 @@ function classifyFailure(input) {
   if (status === 429 || body.includes("rate limit") || body.includes("rate_limit")) {
     return "RATE_LIMITED";
   }
-  if (status === 402 || body.includes("quota") || body.includes("insufficient_quota") || body.includes("usage limit")) {
+  if (status === 402 || status === 403 || body.includes("quota") || body.includes("insufficient_quota") || body.includes("usage limit") || body.includes("run out of credits") || body.includes("out of credits") || body.includes("need a grok subscription") || body.includes("add credits") || body.includes("supergrok")) {
     return "QUOTA_EXHAUSTED";
   }
   if (status === 404 || body.includes("model_not_found") || body.includes("model not found")) {
@@ -690,6 +690,44 @@ class AuthSlotActivator {
     }
     return { paths: written, via };
   }
+  async ensureActivated(provider, profile) {
+    const cred = this.store.getVaultCredential(provider, profile);
+    if (!cred)
+      throw new Error(`No vault credential for ${provider}/${profile}`);
+    let mismatched = false;
+    for (const path of this.authPaths) {
+      if (!existsSync3(path)) {
+        mismatched = true;
+        break;
+      }
+      try {
+        const data = JSON.parse(readFileSync2(path, "utf8"));
+        const live = data[provider];
+        if (!live || live.type !== cred.type) {
+          mismatched = true;
+          break;
+        }
+        if (cred.type === "oauth" && live.type === "oauth") {
+          if (live.access !== cred.access || live.refresh !== cred.refresh) {
+            mismatched = true;
+            break;
+          }
+        } else if (cred.type === "api_key" && live.type === "api_key") {
+          if (live.key !== cred.key) {
+            mismatched = true;
+            break;
+          }
+        }
+      } catch {
+        mismatched = true;
+        break;
+      }
+    }
+    if (!mismatched)
+      return { paths: [...this.authPaths], via: "already-matched", skipped: true };
+    const act = await this.activate(provider, profile);
+    return { ...act, skipped: false };
+  }
   async writeSlotViaSenpi(authPath, provider, credential) {
     try {
       const storage = await createSenpiAuthStorage(authPath);
@@ -1104,8 +1142,15 @@ class OarDaemon {
     switch (req.action) {
       case "ping":
         return { ok: true, data: { pong: true, pid: process.pid } };
-      case "resolve":
-        return { ok: true, data: this.router.resolve(req) };
+      case "resolve": {
+        const resolved = this.router.resolve(req);
+        if (this.activateOnUse && resolved.status === "available" && resolved.profile) {
+          try {
+            await this.activator.ensureActivated(req.provider, resolved.profile);
+          } catch {}
+        }
+        return { ok: true, data: resolved };
+      }
       case "use": {
         const resolved = this.router.use(req.provider, req.profile);
         this.events.append({
@@ -1166,6 +1211,7 @@ class OarDaemon {
           const next = this.router.resolve({ provider: req.provider });
           if (next.status === "available" && next.profile && next.profile !== req.account) {
             try {
+              this.router.use(req.provider, next.profile);
               await this.activator.activate(req.provider, next.profile);
               this.events.append({
                 ts: new Date().toISOString(),

@@ -137,8 +137,19 @@ export class OarDaemon {
     switch (req.action) {
       case "ping":
         return { ok: true, data: { pong: true, pid: process.pid } };
-      case "resolve":
-        return { ok: true, data: this.router.resolve(req) };
+      case "resolve": {
+        const resolved = this.router.resolve(req);
+        // Keep live auth.json aligned with the resolved profile so external
+        // overwrites (or a prior exhausted main slot) cannot silently stick.
+        if (this.activateOnUse && resolved.status === "available" && resolved.profile) {
+          try {
+            await this.activator.ensureActivated(req.provider, resolved.profile);
+          } catch {
+            // non-fatal: resolve still returns the profile choice
+          }
+        }
+        return { ok: true, data: resolved };
+      }
       case "use": {
         const resolved = this.router.use(req.provider, req.profile);
         this.events.append({
@@ -206,6 +217,7 @@ export class OarDaemon {
           const next = this.router.resolve({ provider: req.provider });
           if (next.status === "available" && next.profile && next.profile !== req.account) {
             try {
+              this.router.use(req.provider, next.profile);
               await this.activator.activate(req.provider, next.profile);
               this.events.append({
                 ts: new Date().toISOString(),

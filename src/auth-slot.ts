@@ -70,6 +70,52 @@ export class AuthSlotActivator {
     return { paths: written, via };
   }
 
+
+  /**
+   * Activate only when the live auth.json slot does not already match the
+   * vault credential for this profile. Prevents silent drift back to another
+   * profile (e.g. exhausted main) written by an external process.
+   */
+  async ensureActivated(
+    provider: ProviderId,
+    profile: ProfileId,
+  ): Promise<{ paths: string[]; via: string; skipped: boolean }> {
+    const cred = this.store.getVaultCredential(provider, profile);
+    if (!cred) throw new Error(`No vault credential for ${provider}/${profile}`);
+    let mismatched = false;
+    for (const path of this.authPaths) {
+      if (!existsSync(path)) {
+        mismatched = true;
+        break;
+      }
+      try {
+        const data = JSON.parse(readFileSync(path, "utf8")) as Record<string, StoredCredential>;
+        const live = data[provider];
+        if (!live || live.type !== cred.type) {
+          mismatched = true;
+          break;
+        }
+        if (cred.type === "oauth" && live.type === "oauth") {
+          if (live.access !== cred.access || live.refresh !== cred.refresh) {
+            mismatched = true;
+            break;
+          }
+        } else if (cred.type === "api_key" && live.type === "api_key") {
+          if (live.key !== cred.key) {
+            mismatched = true;
+            break;
+          }
+        }
+      } catch {
+        mismatched = true;
+        break;
+      }
+    }
+    if (!mismatched) return { paths: [...this.authPaths], via: "already-matched", skipped: true };
+    const act = await this.activate(provider, profile);
+    return { ...act, skipped: false };
+  }
+
   private async writeSlotViaSenpi(
     authPath: string,
     provider: ProviderId,

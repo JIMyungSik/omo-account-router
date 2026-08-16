@@ -71,10 +71,22 @@ async function request(body, retries = 5) {
   throw last;
 }
 
-function classifyStatus(status, headers) {
+function classifyStatus(status, headers, body) {
+  const text = String(body || "").toLowerCase();
   if (status === 429) return "RATE_LIMITED";
   if (status === 401) return "AUTH_EXPIRED";
   if (status === 402) return "QUOTA_EXHAUSTED";
+  // xAI/Grok often returns 403 when subscription credits are exhausted.
+  if (
+    status === 403 ||
+    text.includes("run out of credits") ||
+    text.includes("out of credits") ||
+    text.includes("need a grok subscription") ||
+    text.includes("insufficient_quota") ||
+    text.includes("usage limit")
+  ) {
+    return "QUOTA_EXHAUSTED";
+  }
   if (status >= 500) return "SERVER_ERROR";
   if (status === 400) {
     const retry = headers && (headers["retry-after"] || headers["Retry-After"]);
@@ -122,7 +134,7 @@ export default function (pi) {
         last.leaseId = null;
       }
       if (!last.provider || !last.profile) return;
-      const result = classifyStatus(event?.status, event?.headers);
+      const result = classifyStatus(event?.status, event?.headers, event?.body ?? event?.error ?? event?.message);
       if (!result) {
         await request({
           protocol: 1,
