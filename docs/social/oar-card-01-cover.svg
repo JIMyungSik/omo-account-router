@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1220"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1080" fill="url(#bg)"/>
+  <!-- grid -->
+  <g stroke="#1f2937" stroke-width="1" opacity="0.55">
+    <line x1="0" y1="0" x2="0" y2="1080"/><line x1="60" y1="0" x2="60" y2="1080"/><line x1="120" y1="0" x2="120" y2="1080"/><line x1="180" y1="0" x2="180" y2="1080"/><line x1="240" y1="0" x2="240" y2="1080"/><line x1="300" y1="0" x2="300" y2="1080"/><line x1="360" y1="0" x2="360" y2="1080"/><line x1="420" y1="0" x2="420" y2="1080"/><line x1="480" y1="0" x2="480" y2="1080"/><line x1="540" y1="0" x2="540" y2="1080"/><line x1="600" y1="0" x2="600" y2="1080"/><line x1="660" y1="0" x2="660" y2="1080"/><line x1="720" y1="0" x2="720" y2="1080"/><line x1="780" y1="0" x2="780" y2="1080"/><line x1="840" y1="0" x2="840" y2="1080"/><line x1="900" y1="0" x2="900" y2="1080"/><line x1="960" y1="0" x2="960" y2="1080"/><line x1="1020" y1="0" x2="1020" y2="1080"/><line x1="1080" y1="0" x2="1080" y2="1080"/>
+    <line x1="0" y1="0" x2="1080" y2="0"/><line x1="0" y1="60" x2="1080" y2="60"/><line x1="0" y1="120" x2="1080" y2="120"/><line x1="0" y1="180" x2="1080" y2="180"/><line x1="0" y1="240" x2="1080" y2="240"/><line x1="0" y1="300" x2="1080" y2="300"/><line x1="0" y1="360" x2="1080" y2="360"/><line x1="0" y1="420" x2="1080" y2="420"/><line x1="0" y1="480" x2="1080" y2="480"/><line x1="0" y1="540" x2="1080" y2="540"/><line x1="0" y1="600" x2="1080" y2="600"/><line x1="0" y1="660" x2="1080" y2="660"/><line x1="0" y1="720" x2="1080" y2="720"/><line x1="0" y1="780" x2="1080" y2="780"/><line x1="0" y1="840" x2="1080" y2="840"/><line x1="0" y1="900" x2="1080" y2="900"/><line x1="0" y1="960" x2="1080" y2="960"/><line x1="0" y1="1020" x2="1080" y2="1020"/><line x1="0" y1="1080" x2="1080" y2="1080"/>
+  </g>
+  <rect x="64" y="64" width="952" height="952" rx="36" fill="none" stroke="#334155" stroke-width="2"/>
+  <text x="540" y="280" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="56" fill="#94a3b8" letter-spacing="8">OPEN SOURCE</text>
+  <text x="540" y="430" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="180" font-weight="800" fill="url(#accent)">OAR</text>
+  <text x="540" y="530" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="42" font-weight="600" fill="#f8fafc">Account Router for AI Agents</text>
+  <text x="540" y="600" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="32" fill="#94a3b8">계정 핫스왑 · 재시작 없이 · 잔여 % 표시</text>
+  <!-- chips -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="28" font-weight="700">
+    <rect x="220" y="700" width="140" height="64" rx="16" fill="#164e63"/>
+    <text x="290" y="742" text-anchor="middle" fill="#a5f3fc">A</text>
+    <rect x="400" y="700" width="140" height="64" rx="16" fill="#312e81"/>
+    <text x="470" y="742" text-anchor="middle" fill="#ddd6fe">B</text>
+    <rect x="580" y="700" width="140" height="64" rx="16" fill="#1e3a5f"/>
+    <text x="650" y="742" text-anchor="middle" fill="#93c5fd">C</text>
+    <text x="760" y="742" fill="#64748b">→</text>
+    <rect x="800" y="700" width="120" height="64" rx="16" fill="#0ea5e9"/>
+    <text x="860" y="742" text-anchor="middle" fill="#0f172a">Agent</text>
+  </g>
+  <text x="540" y="860" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" fill="#64748b">github.com/JIMyungSik/omo-account-router</text>
+  <text x="540" y="920" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="24" fill="#475569">1 / 3</text>
+</svg>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <rect width="1080" height="1080" fill="#0b1220"/>
+  <rect x="64" y="64" width="952" height="952" rx="36" fill="#111827" stroke="#334155" stroke-width="2"/>
+  <text x="100" y="160" font-family="ui-sans-serif, system-ui, sans-serif" font-size="28" fill="#22d3ee" letter-spacing="4">WHAT OAR DOES</text>
+  <text x="100" y="230" font-family="ui-sans-serif, system-ui, sans-serif" font-size="52" font-weight="800" fill="#f8fafc">모델이 아니라</text>
+  <text x="100" y="300" font-family="ui-sans-serif, system-ui, sans-serif" font-size="52" font-weight="800" fill="#22d3ee">계정 레이어</text>
+  <!-- two columns -->
+  <rect x="100" y="360" width="400" height="420" rx="24" fill="#1f2937"/>
+  <text x="130" y="420" font-family="ui-sans-serif, system-ui, sans-serif" font-size="30" font-weight="700" fill="#f87171">Before</text>
+  <text x="130" y="480" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" fill="#e2e8f0">· 계정마다 재로그인</text>
+  <text x="130" y="530" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" fill="#e2e8f0">· 에이전트 재시작</text>
+  <text x="130" y="580" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" fill="#e2e8f0">· 한도 소진 모름</text>
+  <text x="130" y="630" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" fill="#e2e8f0">· 병렬 세션 혼란</text>
+  <rect x="540" y="360" width="400" height="420" rx="24" fill="#0f766e"/>
+  <text x="570" y="420" font-family="ui-sans-serif, system-ui, sans-serif" font-size="30" font-weight="700" fill="#a7f3d0">With OAR</text>
+  <text x="570" y="480" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" fill="#ecfdf5">· vault에 계정 보관</text>
+  <text x="570" y="530" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" fill="#ecfdf5">· oar use 한 줄 전환</text>
+  <text x="570" y="580" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" fill="#ecfdf5">· usage / recommend</text>
+  <text x="570" y="630" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" fill="#ecfdf5">· 다음 요청부터 반영</text>
+  <text x="540" y="860" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" fill="#94a3b8">OMO/Senpi 1순위 · 다른 ADE는 단계적 지원</text>
+  <text x="540" y="920" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="24" fill="#475569">2 / 3</text>
+</svg>
