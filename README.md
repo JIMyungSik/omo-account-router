@@ -2,85 +2,122 @@
 
 Senpi-native **runtime AI account routing** for **omo-ai 5.x** (`5.0.0-0.beta.7` / engine `senpi@2026.8.12-4`).
 
-This is not an OpenCode plugin, not a restart-required profile switcher, and not a model router. OMO/Senpi still chooses **member + provider/model**. OAR chooses **which account** of that provider is in the live Senpi auth slot.
+OMO/Senpi still chooses **member + provider/model**. OAR chooses **which account** of that provider sits in the live Senpi `auth.json` slot — without restarting OMO.
 
 ## Why hot-switch does not restart OMO
 
-Verified against installed files (not guessed):
+Verified against installed engine files:
 
-1. `omo` → `omo-ai/bin/lib/launcher.js` spawns `senpi/dist/cli.js --extension omo-ai/plugin` with `SENPI_CODING_AGENT_DIR=~/.omo/agent`
-2. `ModelRuntime.stream` → `prepareRequest` → **`getAuth` on every request** (`senpi/dist/core/model-runtime.js`)
-3. `AuthStorage.read` / `readLatestData` reloads `auth.json` when file revision `dev:ino:size:mtimeNs:ctimeNs` changes (`senpi/dist/core/auth-storage.js`)
-4. xAI HTTP clients are **created per stream**, not a process singleton (`pi-ai/dist/api/openai-completions.js`)
-
-So: vault many accounts in OAR, activate one into the provider slot in `~/.omo/agent/auth.json`. The next model call in the **same Senpi session** picks it up. Conversation / task / memory / worktree files are not touched.
+1. `omo` → launcher spawns senpi with `SENPI_CODING_AGENT_DIR=~/.omo/agent` (**always forced by launcher**)
+2. `ModelRuntime.stream` → `prepareRequest` → **`getAuth` on every request**
+3. `AuthStorage` reloads `auth.json` when file revision changes
+4. Provider HTTP clients are built per stream from that auth (xAI and similar)
 
 ```
-USER → omo-ai 5.x → Senpi Runtime → Member (model already chosen)
-                                      ↓
-                                 ModelRuntime.getAuth (per request)
-                                      ↑ revision-aware read
-                                 ~/.omo/agent/auth.json  (one slot / provider)
-                                      ↑ atomic activate
+USER → omo-ai 5.x → Senpi → ModelRuntime.getAuth (per request)
+                              ↑ revision-aware read
+                         ~/.omo/agent/auth.json  (one slot / provider)
+                              ↑ atomic activate
 OAR CLI ──UDS ~/.oar/oar.sock── OAR Daemon ── vault + state (~/.oar)
 ```
 
-## Phase 1 answer
-
-**Can the same Senpi session keep running while the provider account changes at runtime?**
-
-**YES** for xAI/Grok (and any provider whose client is built from `getAuth` per request). Mechanism: auth.json slot + AuthStorage revision reload.
-
-**Live Grok Account A → Account B API proof** needs a second imported xAI credential. This machine currently has **one** `xai` slot. Import a second profile, then `oar use xai account-b`.
-
-## Install / run
+## Install (P0 ops)
 
 ```bash
 cd omo-account-router
-bun test
+bash scripts/install.sh --import-auth
+# or: bun run src/cli.ts install -- --import-auth
 
-export OAR_HOME=~/.oar
-bun run src/cli.ts daemon start
-bun run src/cli.ts doctor
-bun run src/cli.ts add xai account-a
-bun run src/cli.ts import-auth xai account-a --from ~/.omo/agent/auth.json
-# after logging a second Grok account into a temp auth.json:
-bun run src/cli.ts import-auth xai account-b --from /path/to/other/auth.json
-bun run src/cli.ts use xai account-b
-```
+oar doctor
+oar status
+```bash
 
-Optional Senpi commands: link `extensions/oar-senpi.js` into `~/.omo/agent/extensions/`.
+What install does:
 
-## Commands
+1. `bun install` + `bun run build`
+2. Symlink `~/.local/bin/oar` → `bin/oar-wrapper.sh`
+3. Symlink `~/.omo/agent/extensions/oar.js` → `extensions/oar-senpi.js`
+4. Install + load LaunchAgent `com.victor.oar-daemon` (`RunAtLoad` + `KeepAlive`)
+5. Optional: `oar import-auth --all` (skips existing vault profiles unless `--force`)
+
+Uninstall: `bash scripts/uninstall.sh`
+
+## Daily commands
 
 | Command | Purpose |
 |--------|---------|
-| `oar status` | Table of accounts / active |
+| `oar status` | Accounts / active ★ |
 | `oar accounts [provider]` | JSON list |
-| `oar add / remove` | Register / drop profile |
-| `oar import-auth` | Copy current slot into vault |
-| `oar login` | Prints Senpi login + import steps (no token paste) |
-| `oar logout` | Drop vault profile |
-| `oar use <provider> <profile>` | Prefer + activate into auth.json |
-| `oar auto <provider> on\|off` | Mode + autoFailover (default **off**) |
-| `oar test` | Local credential metadata health (no inference) |
-| `oar report` | Event-driven state update |
-| `oar doctor` | Paths + engine versions + daemon |
-| `oar daemon start\|stop\|status` | Daemon lifecycle |
+| `oar import-auth <p> <profile> [--from path]` | Vault one slot |
+| `oar import-auth --all [--from path] [--profile main] [--force]` | Vault every provider in auth.json |
+| `oar use <p> <profile>` | Prefer + activate into live auth.json |
+| `oar auto <p> on|off` | Mode + autoFailover (default **off**) |
+| `oar login <p> <profile>` | Prints login steps (no token paste) |
+| `oar guide second-account` | Second-account procedure |
+| `oar test <p> <profile> [--live]` | Metadata health; `--live` = optional HTTP probe |
+| `oar doctor` | Paths, engine versions, daemon |
+| `oar daemon start|stop|status` | Manual daemon control |
+| `oar install` | Runs `scripts/install.sh` |
+
+## Second account (you must do the browser login)
+
+Full guide: [`scripts/second-account.md`](scripts/second-account.md) · CLI: `oar guide second-account`
+
+**Short version (xAI example):**
+
+```bash
+# 1) vault current live account
+oar import-auth xai main
+
+# 2) isolated login via senpi (NOT omo — launcher ignores temp dirs)
+export OAR_TMP_LOGIN_DIR=\"$(mktemp -d)/agent\"
+mkdir -p \"$OAR_TMP_LOGIN_DIR\"
+SENPI_CODING_AGENT_DIR=\"$OAR_TMP_LOGIN_DIR\" senpi
+# in TUI: /login → xAI → complete OAuth as the SECOND account → quit
+
+# 3) import + switch
+oar import-auth xai account-b --from \"$OAR_TMP_LOGIN_DIR/auth.json\"
+rm -rf \"$(dirname \"$OAR_TMP_LOGIN_DIR\")\"
+oar use xai account-b
+oar status
+```bash
+
+Live A→B API proof is only possible after step 3 succeeds with two vault profiles.
+
+## Design limits (P2)
+
+| Limit | Detail |
+|------|--------|
+| One live slot per provider | Concurrent different accounts of the same provider in one process are not supported |
+| Auto failover default OFF | `oar auto <p> on` only fails over when another vault credential exists |
+| `oar test` vs `--live` | Default = local vault/expiry metadata only. `--live` is best-effort HTTP and does **not** mutate routing state |
+| `omo` vs `senpi` | `omo` always pins agent dir to `~/.omo/agent`. Isolated second login must use `senpi` + env, or temporary `/logout`+`/login` on the live dir |
+| Packaging | `dist/` is gitignored; install/build before relying on LaunchAgent (`dist/daemon-main.js`) |
+| Refresh coverage | xAI / Anthropic / OpenAI-Codex implement OAuth refresh under the daemon lock. OpenRouter / api_key providers: hot-switch only (no invented refresh) |
 
 ## Policy
 
-- Auto multi-account failover **defaults OFF**.
-- No CAPTCHA / fingerprint / abuse bypass.
-- Secrets in `~/.oar/vault` mode `0600` — never logged.
-- IPC does not return raw credentials to CLI status output.
-- Model routing stays in OMO/Senpi.
+- No CAPTCHA / fingerprint / abuse bypass
+- Secrets only under `~/.oar/vault` mode `0600` — never logged
+- IPC status paths never return raw credentials
+- Model routing stays in OMO/Senpi
 
 ## Tests
 
 ```bash
 bun test
 bun run scripts/smoke-hot-switch.ts
-```
+bun run build
+```bash
 
-Covers: real Senpi AuthStorage hot-switch, multi-client daemon, AUTH_REVOKED routing, OAuth refresh single-flight, leases, daemon restart reconnect.
+Covers: real Senpi AuthStorage hot-switch, multi-client daemon, AUTH_REVOKED routing, OAuth refresh single-flight (xAI + mocked Anthropic/Codex), leases, daemon restart reconnect, import-auth --all, generic adapters.
+
+## Adapters
+
+| Provider | Hot-switch | OAR refresh | Notes |
+|----------|------------|-------------|-------|
+| `xai` | yes | yes | Primary target |
+| `anthropic` | yes | yes | Public OAuth client id (same as senpi pi-ai) |
+| `openai-codex` | yes | yes | Preserves `accountId` |
+| `openrouter` | yes | no | Long-lived key shaped as oauth |
+| `opencode-go`, `zai-coding-cn`, others | yes | no | Generic adapter |

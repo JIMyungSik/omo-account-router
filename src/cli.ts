@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OarClient } from "./client.ts";
+import { importAllFromAuthJson } from "./import-all.ts";
 import {
   defaultOarRoot,
   discoverAuthJsonFiles,
@@ -29,11 +30,14 @@ Usage:
   oar use <provider> <profile>
   oar auto <provider> on|off
   oar import-auth <provider> <profile> [--from <auth.json>]
+  oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
   oar login <provider> <profile>
   oar logout <provider> <profile>
   oar activate <provider> <profile>
-  oar test <provider> <profile>
+  oar test <provider> <profile> [--live]
   oar report <provider> <profile> <RESULT>
+  oar guide second-account
+  oar install [-- <install.sh args>]
   oar doctor
   oar daemon start|stop|status
 
@@ -41,6 +45,34 @@ Environment:
   OAR_HOME   state root (default ~/.oar)
   OAR_SOCK   unix socket path
 `;
+}
+
+function secondAccountGuide(): string {
+  return `Second account login guide (see also scripts/second-account.md)
+두 번째 계정 로그인 가이드 (scripts/second-account.md 참고)
+
+IMPORTANT: the \`omo\` launcher ALWAYS forces SENPI_CODING_AGENT_DIR=~/.omo/agent.
+Do NOT use \`omo\` for an isolated second login — it will overwrite the live slot.
+중요: \`omo\` 런처는 항상 SENPI_CODING_AGENT_DIR=~/.omo/agent 로 고정합니다.
+두 번째 계정 격리 로그인에는 \`omo\` 를 쓰지 마세요 (라이브 슬롯을 덮어씁니다).
+
+Method A — isolated senpi dir (recommended):
+  1. oar import-auth <provider> main   # vault the current live account first
+  2. export OAR_TMP_LOGIN_DIR="$(mktemp -d)/agent" && mkdir -p "$OAR_TMP_LOGIN_DIR"
+  3. SENPI_CODING_AGENT_DIR="$OAR_TMP_LOGIN_DIR" senpi
+     # inside TUI: /login  → pick provider → browser OAuth as SECOND account
+  4. oar import-auth <provider> account-b --from "$OAR_TMP_LOGIN_DIR/auth.json"
+  5. rm -rf "$(dirname "$OAR_TMP_LOGIN_DIR")"
+  6. oar use <provider> account-b && oar status
+
+Method B — temporary live swap (if senpi binary unavailable):
+  1. oar import-auth <provider> main
+  2. omo  →  /logout <provider>  →  /login <provider>  (second account)
+  3. oar import-auth <provider> account-b
+  4. oar use <provider> main     # restore first account into the live slot
+
+No OMO restart needed after oar use — next request picks up the new slot.
+oar use 이후 OMO 재시작 불필요 — 다음 요청부터 새 슬롯 사용.`;
 }
 
 async function withClient<T>(fn: (c: OarClient) => Promise<T>): Promise<T> {
@@ -226,12 +258,32 @@ async function main(argv: string[]) {
       return;
     }
     case "import-auth": {
-      const provider = rest[0];
-      const profile = rest[1];
-      if (!provider || !profile) throw new Error("usage: oar import-auth <provider> <profile> [--from path]");
       let from = join(homedir(), ".omo", "agent", "auth.json");
       const fromIdx = rest.indexOf("--from");
       if (fromIdx >= 0 && rest[fromIdx + 1]) from = rest[fromIdx + 1]!;
+
+      if (rest.includes("--all")) {
+        let profile = "main";
+        const profileIdx = rest.indexOf("--profile");
+        if (profileIdx >= 0 && rest[profileIdx + 1]) profile = rest[profileIdx + 1]!;
+        const force = rest.includes("--force");
+        const result = await withClient((c) => importAllFromAuthJson(c, { from, profile, force }));
+        for (const provider of result.imported) console.log(`imported ${provider}/${profile}`);
+        for (const provider of result.skipped) {
+          console.log(`skipped ${provider}/${profile} (already in vault; use --force to overwrite)`);
+        }
+        for (const { provider, error } of result.errors) console.log(`failed ${provider}/${profile}: ${error}`);
+        console.log(
+          `import-auth --all: ${result.imported.length} imported, ${result.skipped.length} skipped, ${result.errors.length} failed (from ${from}; secrets stored under OAR vault, not logged)`,
+        );
+        if (result.errors.length > 0) process.exitCode = 1;
+        return;
+      }
+
+      const [provider, profile] = rest;
+      if (!provider || !profile) {
+        throw new Error("usage: oar import-auth <provider> <profile> [--from path]\n   or: oar import-auth --all [--from path] [--profile name] [--force]");
+      }
       const credential = readCredentialFromAuthJson(from, provider);
       const res = await req({
         protocol: 1,
@@ -249,13 +301,39 @@ async function main(argv: string[]) {
       if (!provider || !profile) throw new Error("usage: oar login <provider> <profile>");
       console.log(
         [
-          `Interactive provider login stays in OMO/Senpi (device-code / OAuth).`,
-          `1. omo auth login ${provider}`,
-          `2. bun run src/cli.ts import-auth ${provider} ${profile}`,
-          `3. bun run src/cli.ts use ${provider} ${profile}`,
+          `Interactive provider login stays in OMO/Senpi (device-code / OAuth) — OAR never automates it.`,
+          `There is no \`omo auth login\` subcommand. Use the TUI \`/login\` command.`,
+          ``,
+          `First account (normal live agent dir ~/.omo/agent):`,
+          `  1. omo`,
+          `  2. /login  → select ${provider} → complete browser/device OAuth`,
+          `  3. oar import-auth ${provider} ${profile}`,
+          `  4. oar use ${provider} ${profile}`,
+          ``,
+          `Adding a SECOND account for the same provider:`,
+          `  oar guide second-account`,
+          ``,
           `Do not paste tokens into the shell.`,
         ].join("\n"),
       );
+      return;
+    }
+    case "guide": {
+      if (rest[0] !== "second-account") throw new Error("usage: oar guide second-account");
+      console.log(secondAccountGuide());
+      return;
+    }
+    case "install": {
+      const scriptPath = join(__dirname, "..", "scripts", "install.sh");
+      if (!existsSync(scriptPath)) {
+        throw new Error(
+          `install script not found at ${scriptPath}. Run scripts/install.sh directly from a full checkout.`,
+        );
+      }
+      const result = spawnSync(scriptPath, rest, { stdio: "inherit" });
+      if (result.status !== 0) {
+        process.exitCode = result.status ?? 1;
+      }
       return;
     }
     case "logout": {
@@ -285,10 +363,16 @@ async function main(argv: string[]) {
     }
     case "test": {
       const [provider, profile] = rest;
-      if (!provider || !profile) throw new Error("usage: oar test <provider> <profile>");
-      const res = await req({ protocol: 1, action: "test", provider, profile });
+      if (!provider || !profile) throw new Error("usage: oar test <provider> <profile> [--live]");
+      const live = rest.includes("--live");
+      const res = await req({ protocol: 1, action: "test", provider, profile, live });
       if (!res.ok) throw new Error(res.error);
       console.log(JSON.stringify(res.data, null, 2));
+      if (live) {
+        console.log(
+          "(--live is a best-effort connectivity probe; it does not update routing state — see README design limits)",
+        );
+      }
       return;
     }
     case "report": {

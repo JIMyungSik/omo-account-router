@@ -50,7 +50,7 @@ export type OarRequest =
     }
   | { protocol: 1; action: "release-lease"; leaseId?: string; holder?: string }
   | { protocol: 1; action: "refresh"; provider: ProviderId; profile: ProfileId }
-  | { protocol: 1; action: "test"; provider: ProviderId; profile: ProfileId }
+  | { protocol: 1; action: "test"; provider: ProviderId; profile: ProfileId; live?: boolean }
   | { protocol: 1; action: "doctor" };
 
 export type OarResponse =

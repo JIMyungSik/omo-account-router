@@ -1,6 +1,6 @@
 import { classifyFailure } from "../classifier.ts";
 import type { AccountRecord, FailureType, StoredCredential } from "../types.ts";
-import type { AccountState, CredentialHandle, ProviderAdapter, RefreshResult } from "./types.ts";
+import type { AccountState, CredentialHandle, LiveCheckResult, ProviderAdapter, RefreshResult } from "./types.ts";
 import type { OarStore } from "../store.ts";
 
 /** Public OAuth client id from installed senpi pi-ai xai.js — not a secret. */
@@ -103,6 +103,24 @@ export class XaiAdapter implements ProviderAdapter {
         expires: Date.now() + expiresInSeconds * 1000 - REFRESH_SKEW_MS,
       },
     };
+  }
+
+  /**
+   * Best-effort connectivity probe (OpenAI-compatible `/v1/models` list).
+   * Does not mutate router state — see LiveCheckResult doc.
+   */
+  async liveCheck(_account: AccountRecord, credential: StoredCredential): Promise<LiveCheckResult> {
+    const token = credential.type === "oauth" ? credential.access : credential.key;
+    try {
+      const response = await fetch("https://api.x.ai/v1/models", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      return { reachable: true, status: response.status };
+    } catch (error) {
+      return { reachable: false, detail: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   classifyFailure(result: unknown): FailureType {

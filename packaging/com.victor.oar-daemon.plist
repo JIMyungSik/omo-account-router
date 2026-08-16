@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for ~/Library/LaunchAgents/com.victor.oar-daemon.plist.
+  scripts/install.sh replaces __OAR_ROOT__ and __BUN_BIN__ with absolute
+  paths and writes the result into ~/Library/LaunchAgents/. Do not load this
+  template file directly — the placeholders are not valid paths.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.victor.oar-daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BUN_BIN__</string>
+    <string>__OAR_ROOT__/dist/daemon-main.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__OAR_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.bun/bin</string>
+    <key>OAR_HOME</key>
+    <string>__HOME__/.oar</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/oar-daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/oar-daemon.error.log</string>
+</dict>
+</plist>

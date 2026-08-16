@@ -370,7 +370,28 @@ export class OarDaemon {
           };
         }
         const health = await adapter.healthCheck(account);
-        return { ok: true, data: { provider: req.provider, profile: req.profile, ...health } };
+        if (!req.live) {
+          return { ok: true, data: { provider: req.provider, profile: req.profile, ...health } };
+        }
+        // --live: best-effort network probe only. Never mutates router/account
+        // state — an unexpected status must not silently mark a working
+        // account as revoked (informational output only).
+        let live: unknown;
+        if (!adapter.liveCheck) {
+          live = { reachable: null, detail: "no live check implemented for this provider" };
+        } else {
+          const cred = this.store.getVaultCredential(req.provider, req.profile);
+          if (!cred) {
+            live = { reachable: false, detail: "missing_vault_credential" };
+          } else {
+            try {
+              live = await adapter.liveCheck(account, cred);
+            } catch (error) {
+              live = { reachable: false, detail: error instanceof Error ? error.message : String(error) };
+            }
+          }
+        }
+        return { ok: true, data: { provider: req.provider, profile: req.profile, ...health, live } };
       }
       case "doctor":
         return {
