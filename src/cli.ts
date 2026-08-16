@@ -25,6 +25,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 function usage(): string {
   return `oar — OMO Account Router
 
+Tip: run \`oar\` with no args for a quick status snapshot.
+
 Usage:
   oar status
   oar accounts [provider]
@@ -208,10 +210,37 @@ function readCredentialFromAuthJson(authPath: string, provider: string): StoredC
   return cred;
 }
 
+function suggestAccounts(provider?: string): string {
+  try {
+    // best-effort; may fail if daemon down
+  } catch {
+    /* ignore */
+  }
+  return provider
+    ? `Try: oar accounts ${provider}   or   oar import-auth ${provider} <profile>`
+    : `Try: oar accounts   or   oar import-auth --all`;
+}
+
 async function main(argv: string[]) {
   const [cmd, ...rest] = argv;
-  if (!cmd || cmd === "-h" || cmd === "--help") {
+  if (cmd === "-h" || cmd === "--help") {
     console.log(usage());
+    return;
+  }
+  // Bare \`oar\` → friendly snapshot (not a wall of help).
+  if (!cmd) {
+    try {
+      const res = await req({ protocol: 1, action: "status" });
+      if (!res.ok) throw new Error(res.error);
+      const data = res.data as Parameters<typeof printStatus>[0];
+      printStatus(data);
+      console.log("Commands: oar panel --refresh | oar usage | oar use <provider> <profile> | oar --help");
+    } catch (error) {
+      console.log(usage());
+      console.error(`\n(daemon tip: ${error instanceof Error ? error.message : error})`);
+      console.error("Start with: oar daemon start");
+      process.exitCode = 1;
+    }
     return;
   }
 
@@ -255,11 +284,34 @@ async function main(argv: string[]) {
     }
     case "use": {
       const [provider, profile] = rest;
-      if (!provider || !profile) throw new Error("usage: oar use <provider> <profile>");
+      if (!provider || !profile) throw new Error("usage: oar use <provider> <profile>\n" + suggestAccounts());
       const res = await req({ protocol: 1, action: "use", provider, profile });
-      if (!res.ok) throw new Error(res.error);
-      const data = res.data as { message?: string; profile?: string };
+      if (!res.ok) {
+        const err = res.error || "use failed";
+        if (/unknown account/i.test(err)) {
+          throw new Error(`${err}\n${suggestAccounts(provider)}`);
+        }
+        throw new Error(err);
+      }
+      const data = res.data as { message?: string; profile?: string; activatedPaths?: string[] };
       console.log(data.message ?? `now using ${provider}/${data.profile ?? profile}`);
+      if (data.activatedPaths?.length) {
+        console.log(`auth slot: ${data.activatedPaths.join(", ")}`);
+      }
+      // soft remaining warning (cached usage, no force network)
+      try {
+        const root = process.env.OAR_HOME ?? defaultOarRoot();
+        const store = new OarStore({ rootDir: root });
+        const u = await fetchRemoteUsage(store, provider, profile, { root, force: false, maxAgeMs: 120_000 });
+        if (u.ok) {
+          const w = u.windows.find((x) => x.remainingPercent != null) ?? u.windows[0];
+          if (w?.remainingPercent != null && w.remainingPercent <= 5) {
+            console.log(`warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}). Consider another profile.`);
+          }
+        }
+      } catch {
+        // ignore
+      }
       return;
     }
     case "auto": {
@@ -514,6 +566,11 @@ async function main(argv: string[]) {
         console.log(`  ${p}`);
       }
       await daemonStatus();
+      console.log("");
+      console.log("tips:");
+      console.log("  oar panel --refresh   # accounts + remaining %");
+      console.log("  oar usage --refresh   # Codex WK/5H + Grok %");
+      console.log("  oar use <p> <profile> # hot-switch live slot");
       return;
     }
     case "daemon": {

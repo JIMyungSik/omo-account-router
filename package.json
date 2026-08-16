@@ -1,8 +1,8 @@
 {
-  "name": "omo-account-router",
-  "version": "0.1.1",
+  "name": "oar-cli",
+  "version": "0.1.2",
   "type": "module",
-  "description": "OAR \u2014 local multi-account hot-switch for OMO/Senpi agents (vault, panel, usage, optional failover)",
+  "description": "OAR (oar-cli) \u2014 local multi-account hot-switch for OMO/Senpi. Command: oar",
   "bin": {
     "oar": "bin/oar.js"
   },

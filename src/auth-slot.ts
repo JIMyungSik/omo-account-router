@@ -50,6 +50,16 @@ export class AuthSlotActivator {
       written.push(path);
     }
     const account = this.store.getAccount(provider, profile);
+    // Only one profile per provider should look ACTIVE in status.
+    for (const other of this.store.listAccounts(provider)) {
+      if (other.profile === profile) continue;
+      if (other.availability === "ACTIVE") {
+        this.store.upsertAccount({
+          ...other,
+          availability: "AVAILABLE",
+        });
+      }
+    }
     if (account) {
       this.store.upsertAccount({
         ...account,

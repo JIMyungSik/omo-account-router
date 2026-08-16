@@ -671,6 +671,16 @@ class AuthSlotActivator {
       written.push(path);
     }
     const account = this.store.getAccount(provider, profile);
+    for (const other of this.store.listAccounts(provider)) {
+      if (other.profile === profile)
+        continue;
+      if (other.availability === "ACTIVE") {
+        this.store.upsertAccount({
+          ...other,
+          availability: "AVAILABLE"
+        });
+      }
+    }
     if (account) {
       this.store.upsertAccount({
         ...account,
@@ -758,47 +768,52 @@ class EventLog {
 }
 
 // src/lease.ts
-import { randomUUID } from "node:crypto";
+var DEFAULT_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
 
 class LeaseManager {
   leases = new Map;
-  list(provider, profile) {
-    return [...this.leases.values()].filter((l) => {
-      if (provider && l.provider !== provider)
-        return false;
-      if (profile && l.profile !== profile)
-        return false;
-      return true;
-    });
+  ttlMs;
+  constructor(opts) {
+    this.ttlMs = opts?.ttlMs ?? DEFAULT_LEASE_TTL_MS;
   }
-  count(provider, profile) {
-    return this.list(provider, profile).length;
+  isExpired(lease, now = Date.now()) {
+    const acquired = Date.parse(lease.acquiredAt);
+    if (!Number.isFinite(acquired))
+      return true;
+    return now - acquired > this.ttlMs;
+  }
+  sweep(now = Date.now()) {
+    let n = 0;
+    for (const [id, lease] of this.leases) {
+      if (this.isExpired(lease, now)) {
+        this.leases.delete(id);
+        n += 1;
+      }
+    }
+    return n;
   }
   acquire(opts) {
-    const holders = this.count(opts.provider, opts.profile);
-    if (opts.maxConcurrent !== undefined && holders >= opts.maxConcurrent) {
-      return {
-        ok: false,
-        queued: true,
-        reason: "max_concurrent",
-        profile: opts.profile,
-        holders
-      };
+    this.sweep();
+    const active = [...this.leases.values()].filter((l) => l.provider === opts.provider && l.profile === opts.profile);
+    if (opts.maxConcurrent != null && active.length >= opts.maxConcurrent) {
+      return { ok: false, reason: "max_concurrent", holders: active.length };
     }
     const lease = {
-      id: randomUUID(),
+      id: crypto.randomUUID(),
       provider: opts.provider,
       profile: opts.profile,
       holder: opts.holder,
       acquiredAt: new Date().toISOString()
     };
     this.leases.set(lease.id, lease);
-    return { ok: true, lease, queued: false };
+    return { ok: true, lease };
   }
-  release(id) {
-    return this.leases.delete(id);
+  release(leaseId) {
+    this.sweep();
+    return this.leases.delete(leaseId);
   }
   releaseHolder(holder) {
+    this.sweep();
     let n = 0;
     for (const [id, lease] of this.leases) {
       if (lease.holder === holder) {
@@ -807,6 +822,14 @@ class LeaseManager {
       }
     }
     return n;
+  }
+  list() {
+    this.sweep();
+    return [...this.leases.values()];
+  }
+  count(provider, profile) {
+    this.sweep();
+    return [...this.leases.values()].filter((l) => l.provider === provider && l.profile === profile).length;
   }
 }
 

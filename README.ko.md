@@ -50,36 +50,39 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 **Node.js 22+** 필요.
 
-```bash
-# GitHub 아카이브 (npm 계정 불필요) — 검증됨
-npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz
+> npm 이름 `oar` 는 무관한 옛 패키지(Observable Array)가 선점하고 있습니다.  
+> **`oar-cli`** 로 설치하세요. 설치 후 명령어는 그대로 **`oar`** 입니다.
 
-# npm 레지스트리 배포 후:
-# npm install -g omo-account-router
+```bash
+# npm 레지스트리 (publish 후)
+npm install -g oar-cli
+
+# GitHub 아카이브 (publish/로그인 없이 가능)
+npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz
 ```
 
-확인:
+그다음:
 
 ```bash
 oar doctor
-oar daemon start          # daemon이 없으면
+oar daemon start
 oar panel --refresh
 ```
 
-macOS에서 재부팅 후에도 daemon + 확장 연결 (선택):
+macOS LaunchAgent + 확장 (선택):
 
 ```bash
-bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
+bash "$(npm root -g)/oar-cli/scripts/install.sh" --skip-build
+# GitHub tarball 설치 시 폴더명이 omo-account-router 일 수 있음:
+# bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
 ```
 
 제거:
 
 ```bash
-npm uninstall -g omo-account-router
+npm uninstall -g oar-cli
+# 또는: npm uninstall -g omo-account-router
 ```
-
-> 참고: `npm install -g github:...` (git 프로토콜)은 일부 npm에서 깨질 수 있습니다.
-> 위 **`.tar.gz` 아카이브 URL** 또는 레지스트리 배포를 권장합니다.
 
 ### B) clone + install 스크립트 (Bun 필요)
 
