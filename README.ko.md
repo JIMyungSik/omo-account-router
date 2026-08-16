@@ -98,7 +98,8 @@ bash scripts/install.sh --import-auth
 
 ```bash
 oar panel --refresh     # 계정 + 로컬 신호 + 원격 잔여 %
-oar usage --refresh     # Codex 주간/5h + Grok 구독 잔여
+oar usage --refresh
+oar recommend --refresh  # ranked accounts by remaining %     # Codex 주간/5h + Grok 구독 잔여
 oar status              # 간단한 활성 표
 ```
 

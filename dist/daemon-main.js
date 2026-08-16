@@ -901,13 +901,34 @@ function isEligible(a, now = Date.now()) {
   if (a.availability === "AUTH_REVOKED" || a.availability === "REQUIRES_LOGIN" || a.availability === "DISABLED") {
     return false;
   }
-  if ((a.availability === "COOLDOWN" || a.availability === "RATE_LIMITED" || a.availability === "QUOTA_EXHAUSTED") && a.until) {
+  if (a.availability === "QUOTA_EXHAUSTED") {
+    return false;
+  }
+  if ((a.availability === "COOLDOWN" || a.availability === "RATE_LIMITED") && a.until) {
     if (Date.parse(a.until) > now)
       return false;
-  } else if (a.availability === "COOLDOWN" || a.availability === "RATE_LIMITED" || a.availability === "QUOTA_EXHAUSTED" || a.availability === "AUTH_EXPIRED") {
+  } else if (a.availability === "COOLDOWN" || a.availability === "RATE_LIMITED" || a.availability === "AUTH_EXPIRED") {
     return false;
   }
   return ELIGIBLE.includes(a.availability) || a.availability === "UNKNOWN";
+}
+function refuseReason(account) {
+  if (account.availability === "QUOTA_EXHAUSTED") {
+    return `quota exhausted (0% / limit)${account.until ? `; resets ~ ${account.until}` : ""}`;
+  }
+  if (account.availability === "RATE_LIMITED") {
+    return `rate limited${account.until ? `; until ${account.until}` : ""}`;
+  }
+  if (account.availability === "AUTH_REVOKED" || account.auth === "revoked") {
+    return "auth revoked — re-login required";
+  }
+  if (account.availability === "AUTH_EXPIRED" || account.auth === "expired") {
+    return "auth expired — refresh/login required";
+  }
+  if (account.disabled || account.availability === "DISABLED") {
+    return "account disabled";
+  }
+  return account.reason ?? account.availability;
 }
 
 class OarRouter {
@@ -927,18 +948,18 @@ class OarRouter {
         reason: "no_accounts"
       };
     }
-    if (policy.mode === "manual" && policy.preferred) {
+    if (policy.preferred) {
       const preferred = accounts.find((a) => a.profile === policy.preferred);
       if (preferred && isEligible(preferred)) {
         return this.toResponse(preferred);
       }
-      if (preferred && !policy.autoFailover) {
+      if (preferred && !isEligible(preferred) && policy.mode === "manual" && !policy.autoFailover) {
         return {
           provider: req.provider,
           profile: preferred.profile,
           status: "unavailable",
           availability: preferred.availability,
-          reason: preferred.reason ?? preferred.availability
+          reason: refuseReason(preferred)
         };
       }
     }
@@ -957,27 +978,34 @@ class OarRouter {
     });
     const pick = eligible[0];
     if (!pick) {
+      const preferred = policy.preferred ? accounts.find((a) => a.profile === policy.preferred) : undefined;
       const anyRevoked = accounts.every((a) => a.availability === "AUTH_REVOKED" || a.availability === "REQUIRES_LOGIN");
       return {
         provider: req.provider,
-        profile: policy.preferred ?? accounts[0]?.profile ?? "",
+        profile: preferred?.profile ?? accounts[0]?.profile ?? "",
         status: "unavailable",
-        availability: anyRevoked ? "REQUIRES_LOGIN" : "UNKNOWN",
-        reason: "no_eligible_accounts"
+        availability: preferred?.availability ?? (anyRevoked ? "REQUIRES_LOGIN" : "QUOTA_EXHAUSTED"),
+        reason: preferred ? refuseReason(preferred) : "no_eligible_accounts"
       };
     }
     return this.toResponse(pick);
   }
-  use(provider, profile) {
+  use(provider, profile, opts) {
     const account = this.store.getAccount(provider, profile);
     if (!account) {
       throw new Error(`Unknown account ${provider}/${profile}`);
+    }
+    if (!opts?.force && !isEligible(account)) {
+      throw new Error(`REFUSED: ${provider}/${profile} is not usable — ${refuseReason(account)}. ` + `Not switching (even if auto is on). Pass force to override.`);
     }
     this.store.setPreferred(provider, profile);
     this.store.upsertAccount({
       ...account,
       lastUsedAt: new Date().toISOString()
     });
+    if (opts?.force) {
+      return this.toResponse(this.store.getAccount(provider, profile) ?? account);
+    }
     return this.resolve({ provider });
   }
   setMode(provider, mode) {
@@ -988,6 +1016,15 @@ class OarRouter {
     if (!account)
       return;
     if (req.result === "SUCCESS") {
+      if (account.availability === "QUOTA_EXHAUSTED") {
+        const kept = {
+          ...account,
+          lastChecked: new Date().toISOString(),
+          lastUsedAt: new Date().toISOString()
+        };
+        this.store.upsertAccount(kept);
+        return kept;
+      }
       const next2 = {
         ...account,
         auth: "valid",
@@ -1001,7 +1038,11 @@ class OarRouter {
       return next2;
     }
     const failure = req.result;
-    const next = { ...account, lastChecked: new Date().toISOString(), reason: req.detail ?? failure };
+    const next = {
+      ...account,
+      lastChecked: new Date().toISOString(),
+      reason: req.detail ?? failure
+    };
     switch (failure) {
       case "AUTH_REVOKED":
         next.auth = "revoked";
@@ -1152,28 +1193,33 @@ class OarDaemon {
         return { ok: true, data: resolved };
       }
       case "use": {
-        const resolved = this.router.use(req.provider, req.profile);
-        this.events.append({
-          ts: new Date().toISOString(),
-          event: "use",
-          provider: req.provider,
-          profile: req.profile,
-          reason: "manual",
-          pid: process.pid
-        });
-        if (this.activateOnUse) {
-          const act = await this.activator.activate(req.provider, req.profile);
-          return {
-            ok: true,
-            data: {
-              ...resolved,
-              activatedPaths: act.paths,
-              via: act.via,
-              message: `${req.provider} ${req.profile} is now preferred. Running OMO sessions will use it on their next eligible request.`
-            }
-          };
+        try {
+          const resolved = this.router.use(req.provider, req.profile, { force: Boolean(req.force) });
+          this.events.append({
+            ts: new Date().toISOString(),
+            event: "use",
+            provider: req.provider,
+            profile: req.profile,
+            reason: req.force ? "manual-force" : "manual",
+            pid: process.pid
+          });
+          if (this.activateOnUse) {
+            const act = await this.activator.activate(req.provider, req.profile);
+            return {
+              ok: true,
+              data: {
+                ...resolved,
+                activatedPaths: act.paths,
+                via: act.via,
+                message: `${req.provider} ${req.profile} is now preferred. Running OMO sessions will use it on their next eligible request.`
+              }
+            };
+          }
+          return { ok: true, data: resolved };
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          return { ok: false, error: msg };
         }
-        return { ok: true, data: resolved };
       }
       case "auto":
         this.store.setProviderMode(req.provider, req.enabled ? "auto" : "manual");

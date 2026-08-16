@@ -18,6 +18,7 @@ import { buildPanelSnapshot, formatPanelText, formatPanelXbar, type StatusPayloa
 import { OarStore } from "./store.ts";
 import { fetchRemoteUsage, fetchRemoteUsageForAccounts } from "./usage/fetch.ts";
 import { formatUsageTable } from "./usage/format.ts";
+import { buildRecommendations, formatRecommendTable } from "./usage/recommend.ts";
 import type { AccountRecord, StoredCredential } from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -33,7 +34,7 @@ Usage:
   oar provider list
   oar add <provider> <profile>
   oar remove <provider> <profile>
-  oar use <provider> <profile>
+  oar use <provider> <profile> [--force]
   oar auto <provider> on|off
   oar import-auth <provider> <profile> [--from <auth.json>]
   oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
@@ -46,6 +47,7 @@ Usage:
   oar install [-- <install.sh args>]
   oar panel [--watch [sec]] [--json] [--xbar] [--hours N] [--refresh] [--no-remote]
   oar usage [provider] [profile] [--refresh]
+  oar recommend [--refresh] [provider...]
   oar doctor
   oar daemon start|stop|status
 
@@ -283,9 +285,61 @@ async function main(argv: string[]) {
       return;
     }
     case "use": {
-      const [provider, profile] = rest;
-      if (!provider || !profile) throw new Error("usage: oar use <provider> <profile>\n" + suggestAccounts());
-      const res = await req({ protocol: 1, action: "use", provider, profile });
+      const force = rest.includes("--force");
+      const args = rest.filter((a) => a !== "--force");
+      const [provider, profile] = args;
+      if (!provider || !profile) {
+        throw new Error("usage: oar use <provider> <profile> [--force]\n" + suggestAccounts());
+      }
+
+      // Refresh usage when possible; block 0% unless --force (even if auto is on).
+      const root = process.env.OAR_HOME ?? defaultOarRoot();
+      const store = new OarStore({ rootDir: root });
+      try {
+        const u = await fetchRemoteUsage(store, provider, profile, {
+          root,
+          force: true,
+          maxAgeMs: 0,
+        });
+        if (u.ok) {
+          const w = u.windows.find((x) => x.remainingPercent != null) ?? u.windows[0];
+          if (w?.remainingPercent != null && w.remainingPercent <= 0) {
+            console.error(
+              `WARNING: ${provider}/${profile} remote remaining is 0% (${w.label ?? w.kind}).`,
+            );
+            if (w.resetsAt) console.error(`  resets ~ ${w.resetsAt}`);
+            // mark daemon exhausted
+            try {
+              await req({
+                protocol: 1,
+                action: "report",
+                provider,
+                account: profile,
+                result: "QUOTA_EXHAUSTED",
+                detail: `remote_usage_${w.label ?? w.kind}_0`,
+              });
+            } catch {
+              /* ignore */
+            }
+            if (!force) {
+              throw new Error(
+                `REFUSED: not switching to ${provider}/${profile} at 0%. ` +
+                  `Auto failover will also skip it. Use another profile, or --force to override.`,
+              );
+            }
+            console.error("  --force set: switching anyway.");
+          } else if (w?.remainingPercent != null && w.remainingPercent <= 5) {
+            console.log(
+              `warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}).`,
+            );
+          }
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("REFUSED:")) throw error;
+        // network usage probe failed — fall through to daemon eligibility
+      }
+
+      const res = await req({ protocol: 1, action: "use", provider, profile, force });
       if (!res.ok) {
         const err = res.error || "use failed";
         if (/unknown account/i.test(err)) {
@@ -297,20 +351,6 @@ async function main(argv: string[]) {
       console.log(data.message ?? `now using ${provider}/${data.profile ?? profile}`);
       if (data.activatedPaths?.length) {
         console.log(`auth slot: ${data.activatedPaths.join(", ")}`);
-      }
-      // soft remaining warning (cached usage, no force network)
-      try {
-        const root = process.env.OAR_HOME ?? defaultOarRoot();
-        const store = new OarStore({ rootDir: root });
-        const u = await fetchRemoteUsage(store, provider, profile, { root, force: false, maxAgeMs: 120_000 });
-        if (u.ok) {
-          const w = u.windows.find((x) => x.remainingPercent != null) ?? u.windows[0];
-          if (w?.remainingPercent != null && w.remainingPercent <= 5) {
-            console.log(`warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}). Consider another profile.`);
-          }
-        }
-      } catch {
-        // ignore
       }
       return;
     }
@@ -563,6 +603,47 @@ async function main(argv: string[]) {
         }
       }
       console.log(formatUsageTable(rows));
+      return;
+    }
+    case "recommend":
+    case "recommand": {
+      // accept common typo "recommand"
+      const refresh = rest.includes("--refresh") || !rest.includes("--cache");
+      const providers = rest.filter((a) => !a.startsWith("--"));
+      const root = process.env.OAR_HOME ?? defaultOarRoot();
+      const store = new OarStore({ rootDir: root });
+      // Prefer daemon account list so eligibility matches runtime
+      try {
+        const st = await req({ protocol: 1, action: "accounts" });
+        if (st.ok && Array.isArray(st.data)) {
+          // hydrate local store view is optional; scoring uses vault+daemon reports via usage side effects
+        }
+      } catch {
+        /* ignore */
+      }
+      const rows = await buildRecommendations(store, {
+        root,
+        force: refresh,
+        providers: providers.length ? providers : undefined,
+      });
+      // push 0% into daemon
+      for (const r of rows) {
+        if (r.remainingPercent != null && r.remainingPercent <= 0) {
+          try {
+            await req({
+              protocol: 1,
+              action: "report",
+              provider: r.provider,
+              account: r.profile,
+              result: "QUOTA_EXHAUSTED",
+              detail: "recommend_remote_0",
+            });
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      console.log(formatRecommendTable(rows));
       return;
     }
     case "doctor": {

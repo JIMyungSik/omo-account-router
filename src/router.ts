@@ -13,7 +13,8 @@ import { isAccountFailoverCandidate } from "./classifier.ts";
 
 const ELIGIBLE: AccountAvailability[] = ["AVAILABLE", "ACTIVE"];
 
-function isEligible(a: AccountRecord, now = Date.now()): boolean {
+/** Accounts that must never be selected for resolve/auto (and default use). */
+export function isEligible(a: AccountRecord, now = Date.now()): boolean {
   if (a.disabled) return false;
   if (a.auth === "revoked") return false;
   if (
@@ -23,22 +24,39 @@ function isEligible(a: AccountRecord, now = Date.now()): boolean {
   ) {
     return false;
   }
-  if (
-    (a.availability === "COOLDOWN" ||
-      a.availability === "RATE_LIMITED" ||
-      a.availability === "QUOTA_EXHAUSTED") &&
-    a.until
-  ) {
+  // Quota exhausted stays blocked until availability is cleared (usage recover / manual force).
+  if (a.availability === "QUOTA_EXHAUSTED") {
+    return false;
+  }
+  if ((a.availability === "COOLDOWN" || a.availability === "RATE_LIMITED") && a.until) {
     if (Date.parse(a.until) > now) return false;
   } else if (
     a.availability === "COOLDOWN" ||
     a.availability === "RATE_LIMITED" ||
-    a.availability === "QUOTA_EXHAUSTED" ||
     a.availability === "AUTH_EXPIRED"
   ) {
     return false;
   }
   return ELIGIBLE.includes(a.availability) || a.availability === "UNKNOWN";
+}
+
+export function refuseReason(account: AccountRecord): string {
+  if (account.availability === "QUOTA_EXHAUSTED") {
+    return `quota exhausted (0% / limit)${account.until ? `; resets ~ ${account.until}` : ""}`;
+  }
+  if (account.availability === "RATE_LIMITED") {
+    return `rate limited${account.until ? `; until ${account.until}` : ""}`;
+  }
+  if (account.availability === "AUTH_REVOKED" || account.auth === "revoked") {
+    return "auth revoked — re-login required";
+  }
+  if (account.availability === "AUTH_EXPIRED" || account.auth === "expired") {
+    return "auth expired — refresh/login required";
+  }
+  if (account.disabled || account.availability === "DISABLED") {
+    return "account disabled";
+  }
+  return account.reason ?? account.availability;
 }
 
 export class OarRouter {
@@ -58,18 +76,25 @@ export class OarRouter {
       };
     }
 
-    if (policy.mode === "manual" && policy.preferred) {
+    if (policy.preferred) {
       const preferred = accounts.find((a) => a.profile === policy.preferred);
       if (preferred && isEligible(preferred)) {
         return this.toResponse(preferred);
       }
-      if (preferred && !policy.autoFailover) {
+      // Manual mode: stick on preferred even if blocked (caller sees unavailable).
+      // Auto mode (or autoFailover): fall through to another eligible profile.
+      if (
+        preferred &&
+        !isEligible(preferred) &&
+        policy.mode === "manual" &&
+        !policy.autoFailover
+      ) {
         return {
           provider: req.provider,
           profile: preferred.profile,
           status: "unavailable",
           availability: preferred.availability,
-          reason: preferred.reason ?? preferred.availability,
+          reason: refuseReason(preferred),
         };
       }
     }
@@ -89,31 +114,45 @@ export class OarRouter {
 
     const pick = eligible[0];
     if (!pick) {
+      const preferred = policy.preferred
+        ? accounts.find((a) => a.profile === policy.preferred)
+        : undefined;
       const anyRevoked = accounts.every(
         (a) => a.availability === "AUTH_REVOKED" || a.availability === "REQUIRES_LOGIN",
       );
       return {
         provider: req.provider,
-        profile: policy.preferred ?? accounts[0]?.profile ?? "",
+        profile: preferred?.profile ?? accounts[0]?.profile ?? "",
         status: "unavailable",
-        availability: anyRevoked ? "REQUIRES_LOGIN" : "UNKNOWN",
-        reason: "no_eligible_accounts",
+        availability: preferred?.availability ?? (anyRevoked ? "REQUIRES_LOGIN" : "QUOTA_EXHAUSTED"),
+        reason: preferred ? refuseReason(preferred) : "no_eligible_accounts",
       };
     }
     return this.toResponse(pick);
   }
 
-  use(provider: ProviderId, profile: ProfileId): ResolveResponse {
+  /**
+   * Prefer + mark last used. Refuses exhausted/ineligible profiles unless force=true.
+   */
+  use(provider: ProviderId, profile: ProfileId, opts?: { force?: boolean }): ResolveResponse {
     const account = this.store.getAccount(provider, profile);
     if (!account) {
       throw new Error(`Unknown account ${provider}/${profile}`);
     }
+    if (!opts?.force && !isEligible(account)) {
+      throw new Error(
+        `REFUSED: ${provider}/${profile} is not usable — ${refuseReason(account)}. ` +
+          `Not switching (even if auto is on). Pass force to override.`,
+      );
+    }
     this.store.setPreferred(provider, profile);
-    // touch lastUsed metadata
     this.store.upsertAccount({
       ...account,
       lastUsedAt: new Date().toISOString(),
     });
+    if (opts?.force) {
+      return this.toResponse(this.store.getAccount(provider, profile) ?? account);
+    }
     return this.resolve({ provider });
   }
 
@@ -126,6 +165,16 @@ export class OarRouter {
     if (!account) return undefined;
 
     if (req.result === "SUCCESS") {
+      // Do not clear QUOTA_EXHAUSTED on SUCCESS — 403 was previously mis-labeled SUCCESS.
+      if (account.availability === "QUOTA_EXHAUSTED") {
+        const kept: AccountRecord = {
+          ...account,
+          lastChecked: new Date().toISOString(),
+          lastUsedAt: new Date().toISOString(),
+        };
+        this.store.upsertAccount(kept);
+        return kept;
+      }
       const next: AccountRecord = {
         ...account,
         auth: "valid",
@@ -140,7 +189,11 @@ export class OarRouter {
     }
 
     const failure = req.result as FailureType;
-    const next = { ...account, lastChecked: new Date().toISOString(), reason: req.detail ?? failure };
+    const next: AccountRecord = {
+      ...account,
+      lastChecked: new Date().toISOString(),
+      reason: req.detail ?? failure,
+    };
 
     switch (failure) {
       case "AUTH_REVOKED":
@@ -164,17 +217,15 @@ export class OarRouter {
           : null;
         break;
       default:
-        // non-account failures: leave routing state alone
         this.store.upsertAccount(next);
         return next;
     }
 
     this.store.upsertAccount(next);
 
-    // Auto-failover only when explicitly enabled for provider (policy-safe default off).
     const policy = this.store.getProviderPolicy(req.provider);
     if (policy.autoFailover && isAccountFailoverCandidate(failure) && policy.mode === "auto") {
-      // next resolve() will skip ineligible
+      // next resolve() skips ineligible
     }
     return next;
   }

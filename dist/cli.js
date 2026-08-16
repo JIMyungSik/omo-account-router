@@ -14,21 +14,21 @@ import { createConnection } from "node:net";
 // src/paths.ts
 import { homedir } from "node:os";
 import { join } from "node:path";
-function defaultOarRoot(env = process.env) {
+function defaultOarRoot2(env = process.env) {
   if (env.OAR_HOME)
     return env.OAR_HOME;
   return join(homedir(), ".oar");
 }
-function oarSocketPath(root = defaultOarRoot()) {
+function oarSocketPath(root = defaultOarRoot2()) {
   return join(root, "oar.sock");
 }
-function oarStatePath(root = defaultOarRoot()) {
+function oarStatePath(root = defaultOarRoot2()) {
   return join(root, "state.json");
 }
-function oarVaultDir(root = defaultOarRoot()) {
+function oarVaultDir(root = defaultOarRoot2()) {
   return join(root, "vault");
 }
-function oarEventsPath(root = defaultOarRoot()) {
+function oarEventsPath(root = defaultOarRoot2()) {
   return join(root, "events.jsonl");
 }
 
@@ -160,12 +160,12 @@ async function importAllFromAuthJson(client, opts) {
 import { existsSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join2 } from "node:path";
-function defaultOarRoot2(env = process.env) {
+function defaultOarRoot3(env = process.env) {
   if (env.OAR_HOME)
     return env.OAR_HOME;
   return join2(homedir2(), ".oar");
 }
-function oarSocketPath2(root = defaultOarRoot2()) {
+function oarSocketPath2(root = defaultOarRoot3()) {
   return join2(root, "oar.sock");
 }
 function unique(paths) {
@@ -618,7 +618,7 @@ class OarStore {
   vaultDir;
   state;
   constructor(opts) {
-    this.rootDir = opts?.rootDir ?? defaultOarRoot();
+    this.rootDir = opts?.rootDir ?? defaultOarRoot2();
     this.statePath = oarStatePath(this.rootDir);
     this.vaultDir = oarVaultDir(this.rootDir);
     mkdirSync(this.rootDir, { recursive: true, mode: 448 });
@@ -717,13 +717,13 @@ class OarStore {
 // src/usage/cache.ts
 import { existsSync as existsSync5, mkdirSync as mkdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2, chmodSync as chmodSync2 } from "node:fs";
 import { dirname as dirname3, join as join5 } from "node:path";
-function usageCachePath(root = defaultOarRoot()) {
+function usageCachePath(root = defaultOarRoot2()) {
   return join5(root, "usage-cache.json");
 }
 function cacheKey(provider, profile) {
   return `${provider}/${profile}`;
 }
-function loadUsageCache(root = defaultOarRoot()) {
+function loadUsageCache(root = defaultOarRoot2()) {
   const path = usageCachePath(root);
   if (!existsSync5(path))
     return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
@@ -737,7 +737,7 @@ function loadUsageCache(root = defaultOarRoot()) {
     return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
   }
 }
-function saveUsageCache(cache, root = defaultOarRoot()) {
+function saveUsageCache(cache, root = defaultOarRoot2()) {
   const path = usageCachePath(root);
   mkdirSync2(dirname3(path), { recursive: true, mode: 448 });
   const tmp = `${path}.${process.pid}.tmp`;
@@ -753,7 +753,7 @@ function saveUsageCache(cache, root = defaultOarRoot()) {
   } catch {}
 }
 function getCachedUsage(provider, profile, opts) {
-  const root = opts?.root ?? defaultOarRoot();
+  const root = opts?.root ?? defaultOarRoot2();
   const maxAgeMs = opts?.maxAgeMs ?? 60000;
   const cache = loadUsageCache(root);
   const entry = cache.entries[cacheKey(provider, profile)];
@@ -764,7 +764,7 @@ function getCachedUsage(provider, profile, opts) {
     return;
   return entry;
 }
-function putCachedUsage(entry, root = defaultOarRoot()) {
+function putCachedUsage(entry, root = defaultOarRoot2()) {
   const cache = loadUsageCache(root);
   cache.entries[cacheKey(entry.provider, entry.profile)] = entry;
   saveUsageCache(cache, root);
@@ -1091,7 +1091,7 @@ function applyUsageToAccountState(store, usage) {
   }
 }
 async function fetchRemoteUsage(store, provider, profile, opts) {
-  const root = opts?.root ?? store.rootDir ?? defaultOarRoot();
+  const root = opts?.root ?? store.rootDir ?? defaultOarRoot2();
   const maxAgeMs = opts?.maxAgeMs ?? 60000;
   if (!opts?.force) {
     const cached = getCachedUsage(provider, profile, { maxAgeMs, root });
@@ -1228,6 +1228,289 @@ function formatUsageTable(rows) {
 `);
 }
 
+// src/router.ts
+var ELIGIBLE = ["AVAILABLE", "ACTIVE"];
+function isEligible(a, now = Date.now()) {
+  if (a.disabled)
+    return false;
+  if (a.auth === "revoked")
+    return false;
+  if (a.availability === "AUTH_REVOKED" || a.availability === "REQUIRES_LOGIN" || a.availability === "DISABLED") {
+    return false;
+  }
+  if (a.availability === "QUOTA_EXHAUSTED") {
+    return false;
+  }
+  if ((a.availability === "COOLDOWN" || a.availability === "RATE_LIMITED") && a.until) {
+    if (Date.parse(a.until) > now)
+      return false;
+  } else if (a.availability === "COOLDOWN" || a.availability === "RATE_LIMITED" || a.availability === "AUTH_EXPIRED") {
+    return false;
+  }
+  return ELIGIBLE.includes(a.availability) || a.availability === "UNKNOWN";
+}
+
+// src/usage/fetch.ts
+function applyUsageToAccountState2(store, usage) {
+  const account = store.getAccount(usage.provider, usage.profile);
+  if (!account || !usage.ok)
+    return;
+  const primary = usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
+  if (!primary || primary.remainingPercent == null)
+    return;
+  if (primary.remainingPercent <= 0 || primary.limitReached) {
+    const next = {
+      ...account,
+      availability: "QUOTA_EXHAUSTED",
+      reason: `remote_usage_${primary.label ?? primary.kind}_0`,
+      lastChecked: usage.fetchedAt,
+      until: primary.resetsAt ?? null
+    };
+    store.upsertAccount(next);
+  } else if (account.availability === "QUOTA_EXHAUSTED" && primary.remainingPercent > 5) {
+    store.upsertAccount({
+      ...account,
+      availability: "AVAILABLE",
+      reason: undefined,
+      until: null,
+      lastChecked: usage.fetchedAt
+    });
+  }
+}
+async function fetchRemoteUsage2(store, provider, profile, opts) {
+  const root = opts?.root ?? store.rootDir ?? defaultOarRoot2();
+  const maxAgeMs = opts?.maxAgeMs ?? 60000;
+  if (!opts?.force) {
+    const cached = getCachedUsage(provider, profile, { maxAgeMs, root });
+    if (cached)
+      return cached;
+  }
+  const cred = store.getVaultCredential(provider, profile);
+  if (!cred) {
+    const miss = {
+      provider,
+      profile,
+      source: "none",
+      fetchedAt: new Date().toISOString(),
+      ok: false,
+      error: "missing vault credential",
+      windows: []
+    };
+    putCachedUsage(miss, root);
+    return miss;
+  }
+  let result;
+  if (provider === "openai-codex") {
+    result = await fetchCodexUsage(provider, profile, cred, { fetchImpl: opts?.fetchImpl });
+  } else if (provider === "xai") {
+    result = await fetchXaiGrokSubscriptionUsage(provider, profile, cred, {
+      fetchImpl: opts?.fetchImpl
+    });
+  } else {
+    result = {
+      provider,
+      profile,
+      source: "unsupported",
+      fetchedAt: new Date().toISOString(),
+      ok: false,
+      error: `no remote usage adapter for ${provider}`,
+      windows: []
+    };
+  }
+  putCachedUsage(result, root);
+  applyUsageToAccountState2(store, result);
+  return result;
+}
+async function fetchRemoteUsageForAccounts2(store, accounts, opts) {
+  const out = [];
+  const queue = [...accounts];
+  const workers = Math.min(3, queue.length || 1);
+  async function worker() {
+    while (queue.length) {
+      const next = queue.shift();
+      if (!next)
+        return;
+      out.push(await fetchRemoteUsage2(store, next.provider, next.profile, opts));
+    }
+  }
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return out;
+}
+
+// src/usage/recommend.ts
+function primaryWindow(u) {
+  if (!u?.ok || u.windows.length === 0) {
+    return { remainingPercent: null, usedPercent: null, label: "-", resetsAt: null };
+  }
+  const ranked = [...u.windows].sort((a, b) => {
+    const ar = a.remainingPercent ?? -1;
+    const br = b.remainingPercent ?? -1;
+    return br - ar;
+  });
+  const w = ranked.find((x) => x.remainingPercent != null) ?? ranked[0];
+  return {
+    remainingPercent: w.remainingPercent,
+    usedPercent: w.usedPercent,
+    label: w.label ?? w.kind,
+    resetsAt: w.resetsAt
+  };
+}
+function scoreAccount(account, usage, preferred) {
+  const win = primaryWindow(usage);
+  let score = 0;
+  const notes = [];
+  if (!isEligible(account)) {
+    score = -1000;
+    notes.push(account.availability === "QUOTA_EXHAUSTED" ? "0%/exhausted" : account.availability);
+  } else {
+    score += 100;
+  }
+  if (win.remainingPercent != null) {
+    score += win.remainingPercent;
+    if (win.remainingPercent <= 0) {
+      score -= 500;
+      notes.push("remote 0%");
+    } else if (win.remainingPercent <= 5) {
+      notes.push("low remaining");
+    }
+  } else if (usage && !usage.ok) {
+    score += 10;
+    notes.push(usage.error ? `usage err` : "no remote %");
+  } else {
+    score += 15;
+    notes.push("no remote %");
+  }
+  if (preferred && account.profile === preferred && isEligible(account)) {
+    score += 5;
+    notes.push("preferred");
+  }
+  if (account.availability === "ACTIVE") {
+    score += 2;
+  }
+  return {
+    score,
+    note: notes.join(", ") || "ok",
+    remainingPercent: win.remainingPercent,
+    usedPercent: win.usedPercent,
+    label: win.label,
+    resetsAt: win.resetsAt
+  };
+}
+async function buildRecommendations(store, opts) {
+  const root = opts?.root ?? defaultOarRoot();
+  let accounts = store.listAccounts();
+  if (opts?.providers?.length) {
+    const set = new Set(opts.providers);
+    accounts = accounts.filter((a) => set.has(a.provider));
+  }
+  const targets = accounts.filter((a) => a.provider === "xai" || a.provider === "openai-codex").map((a) => ({ provider: a.provider, profile: a.profile }));
+  const usageList = targets.length > 0 ? await fetchRemoteUsageForAccounts2(store, targets, {
+    root,
+    force: opts?.force ?? true,
+    maxAgeMs: opts?.force ? 0 : 60000
+  }) : [];
+  const usageMap = new Map(usageList.map((u) => [`${u.provider}\x00${u.profile}`, u]));
+  const preferredByProvider = new Map;
+  for (const a of accounts) {
+    if (!preferredByProvider.has(a.provider)) {
+      preferredByProvider.set(a.provider, store.getProviderPolicy(a.provider).preferred);
+    }
+  }
+  const scored = accounts.map((a) => {
+    const u = usageMap.get(`${a.provider}\x00${a.profile}`);
+    const preferred = preferredByProvider.get(a.provider);
+    const s = scoreAccount(a, u, preferred);
+    const live = preferred === a.profile && a.availability === "ACTIVE";
+    return {
+      provider: a.provider,
+      profile: a.profile,
+      remainingPercent: s.remainingPercent,
+      usedPercent: s.usedPercent,
+      windowLabel: s.label,
+      eligibility: isEligible(a) ? "ok" : a.availability,
+      live,
+      score: s.score,
+      note: s.note,
+      resetsAt: s.resetsAt
+    };
+  });
+  scored.sort((a, b) => {
+    if (b.score !== a.score)
+      return b.score - a.score;
+    const ar = a.remainingPercent ?? -1;
+    const br = b.remainingPercent ?? -1;
+    if (br !== ar)
+      return br - ar;
+    return `${a.provider}/${a.profile}`.localeCompare(`${b.provider}/${b.profile}`);
+  });
+  return scored.map((row, i) => ({ ...row, rank: i + 1 }));
+}
+function fmtPct2(n) {
+  if (n == null || !Number.isFinite(n))
+    return "-";
+  return `${n}%`;
+}
+function shortReset2(iso) {
+  if (!iso)
+    return "-";
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t))
+    return "-";
+  const d = new Date(t);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${mm}-${dd} ${hh}:${mi}`;
+}
+function formatRecommendTable(rows) {
+  if (rows.length === 0)
+    return `OAR recommend
+(no accounts in vault)`;
+  const top = rows.find((r) => r.score > 0 && r.eligibility === "ok");
+  const table = formatMarkdownTable([
+    { key: "rank", header: "RANK", align: "right" },
+    { key: "provider", header: "PROVIDER" },
+    { key: "profile", header: "PROFILE" },
+    { key: "left", header: "LEFT", align: "right" },
+    { key: "used", header: "USED", align: "right" },
+    { key: "window", header: "WINDOW" },
+    { key: "elig", header: "ELIG" },
+    { key: "live", header: "LIVE" },
+    { key: "score", header: "SCORE", align: "right" },
+    { key: "reset", header: "RESET" },
+    { key: "note", header: "NOTE" }
+  ], rows.map((r) => ({
+    rank: r.rank,
+    provider: r.provider,
+    profile: r.profile,
+    left: fmtPct2(r.remainingPercent),
+    used: fmtPct2(r.usedPercent),
+    window: r.windowLabel,
+    elig: r.eligibility,
+    live: r.live ? "*" : "",
+    score: Math.round(r.score),
+    reset: shortReset2(r.resetsAt),
+    note: r.note
+  })));
+  const lines = [
+    "OAR recommend (higher rank = better to use next)",
+    table,
+    ""
+  ];
+  if (top) {
+    lines.push(`top pick: ${top.provider}/${top.profile}` + (top.remainingPercent != null ? `  (${top.remainingPercent}% left)` : ""));
+    lines.push(`switch:   oar use ${top.provider} ${top.profile}`);
+  } else {
+    lines.push("top pick: (none eligible — all exhausted or blocked)");
+  }
+  lines.push("");
+  lines.push("Score = eligibility + remote remaining %. QUOTA_EXHAUSTED / 0% are ranked last and skipped by auto.");
+  lines.push("This does not change the session model — only which account OAR would activate.");
+  return lines.join(`
+`);
+}
+
 // src/cli.ts
 var __dirname2 = dirname4(fileURLToPath(import.meta.url));
 function usage() {
@@ -1241,7 +1524,7 @@ Usage:
   oar provider list
   oar add <provider> <profile>
   oar remove <provider> <profile>
-  oar use <provider> <profile>
+  oar use <provider> <profile> [--force]
   oar auto <provider> on|off
   oar import-auth <provider> <profile> [--from <auth.json>]
   oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
@@ -1254,6 +1537,7 @@ Usage:
   oar install [-- <install.sh args>]
   oar panel [--watch [sec]] [--json] [--xbar] [--hours N] [--refresh] [--no-remote]
   oar usage [provider] [profile] [--refresh]
+  oar recommend [--refresh] [provider...]
   oar doctor
   oar daemon start|stop|status
 
@@ -1322,7 +1606,7 @@ function printStatus(data) {
     console.log(`  ${p}`);
 }
 async function daemonStart() {
-  const root = process.env.OAR_HOME ?? defaultOarRoot2();
+  const root = process.env.OAR_HOME ?? defaultOarRoot3();
   const sock = process.env.OAR_SOCK ?? oarSocketPath2(root);
   if (existsSync6(sock)) {
     try {
@@ -1468,11 +1752,50 @@ async function main(argv) {
       return;
     }
     case "use": {
-      const [provider, profile] = rest;
-      if (!provider || !profile)
-        throw new Error(`usage: oar use <provider> <profile>
+      const force = rest.includes("--force");
+      const args = rest.filter((a) => a !== "--force");
+      const [provider, profile] = args;
+      if (!provider || !profile) {
+        throw new Error(`usage: oar use <provider> <profile> [--force]
 ` + suggestAccounts());
-      const res = await req({ protocol: 1, action: "use", provider, profile });
+      }
+      const root = process.env.OAR_HOME ?? defaultOarRoot3();
+      const store = new OarStore({ rootDir: root });
+      try {
+        const u = await fetchRemoteUsage(store, provider, profile, {
+          root,
+          force: true,
+          maxAgeMs: 0
+        });
+        if (u.ok) {
+          const w = u.windows.find((x) => x.remainingPercent != null) ?? u.windows[0];
+          if (w?.remainingPercent != null && w.remainingPercent <= 0) {
+            console.error(`WARNING: ${provider}/${profile} remote remaining is 0% (${w.label ?? w.kind}).`);
+            if (w.resetsAt)
+              console.error(`  resets ~ ${w.resetsAt}`);
+            try {
+              await req({
+                protocol: 1,
+                action: "report",
+                provider,
+                account: profile,
+                result: "QUOTA_EXHAUSTED",
+                detail: `remote_usage_${w.label ?? w.kind}_0`
+              });
+            } catch {}
+            if (!force) {
+              throw new Error(`REFUSED: not switching to ${provider}/${profile} at 0%. ` + `Auto failover will also skip it. Use another profile, or --force to override.`);
+            }
+            console.error("  --force set: switching anyway.");
+          } else if (w?.remainingPercent != null && w.remainingPercent <= 5) {
+            console.log(`warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}).`);
+          }
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("REFUSED:"))
+          throw error;
+      }
+      const res = await req({ protocol: 1, action: "use", provider, profile, force });
       if (!res.ok) {
         const err = res.error || "use failed";
         if (/unknown account/i.test(err)) {
@@ -1486,17 +1809,6 @@ ${suggestAccounts(provider)}`);
       if (data.activatedPaths?.length) {
         console.log(`auth slot: ${data.activatedPaths.join(", ")}`);
       }
-      try {
-        const root = process.env.OAR_HOME ?? defaultOarRoot2();
-        const store = new OarStore({ rootDir: root });
-        const u = await fetchRemoteUsage(store, provider, profile, { root, force: false, maxAgeMs: 120000 });
-        if (u.ok) {
-          const w = u.windows.find((x) => x.remainingPercent != null) ?? u.windows[0];
-          if (w?.remainingPercent != null && w.remainingPercent <= 5) {
-            console.log(`warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}). Consider another profile.`);
-          }
-        }
-      } catch {}
       return;
     }
     case "auto": {
@@ -1671,7 +1983,7 @@ ${suggestAccounts(provider)}`);
         if (!Number.isFinite(intervalSec) || intervalSec <= 0)
           intervalSec = 2;
       }
-      const root = process.env.OAR_HOME ?? defaultOarRoot2();
+      const root = process.env.OAR_HOME ?? defaultOarRoot3();
       const store = new OarStore({ rootDir: root });
       const renderOnce = async () => {
         const res = await req({ protocol: 1, action: "status" });
@@ -1715,7 +2027,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
     case "usage": {
       const refresh = rest.includes("--refresh");
       const args = rest.filter((a) => !a.startsWith("--"));
-      const root = process.env.OAR_HOME ?? defaultOarRoot2();
+      const root = process.env.OAR_HOME ?? defaultOarRoot3();
       const store = new OarStore({ rootDir: root });
       const provider = args[0];
       const profile = args[1];
@@ -1752,9 +2064,41 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       console.log(formatUsageTable(rows));
       return;
     }
+    case "recommend":
+    case "recommand": {
+      const refresh = rest.includes("--refresh") || !rest.includes("--cache");
+      const providers = rest.filter((a) => !a.startsWith("--"));
+      const root = process.env.OAR_HOME ?? defaultOarRoot3();
+      const store = new OarStore({ rootDir: root });
+      try {
+        const st = await req({ protocol: 1, action: "accounts" });
+        if (st.ok && Array.isArray(st.data)) {}
+      } catch {}
+      const rows = await buildRecommendations(store, {
+        root,
+        force: refresh,
+        providers: providers.length ? providers : undefined
+      });
+      for (const r of rows) {
+        if (r.remainingPercent != null && r.remainingPercent <= 0) {
+          try {
+            await req({
+              protocol: 1,
+              action: "report",
+              provider: r.provider,
+              account: r.profile,
+              result: "QUOTA_EXHAUSTED",
+              detail: "recommend_remote_0"
+            });
+          } catch {}
+        }
+      }
+      console.log(formatRecommendTable(rows));
+      return;
+    }
     case "doctor": {
       console.log("OAR doctor");
-      console.log(`root: ${process.env.OAR_HOME ?? defaultOarRoot2()}`);
+      console.log(`root: ${process.env.OAR_HOME ?? defaultOarRoot3()}`);
       console.log(`sock: ${process.env.OAR_SOCK ?? oarSocketPath2()}`);
       const install = findSenpiInstall();
       if (install) {

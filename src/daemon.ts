@@ -151,28 +151,33 @@ export class OarDaemon {
         return { ok: true, data: resolved };
       }
       case "use": {
-        const resolved = this.router.use(req.provider, req.profile);
-        this.events.append({
-          ts: new Date().toISOString(),
-          event: "use",
-          provider: req.provider,
-          profile: req.profile,
-          reason: "manual",
-          pid: process.pid,
-        });
-        if (this.activateOnUse) {
-          const act = await this.activator.activate(req.provider, req.profile);
-          return {
-            ok: true,
-            data: {
-              ...resolved,
-              activatedPaths: act.paths,
-              via: act.via,
-              message: `${req.provider} ${req.profile} is now preferred. Running OMO sessions will use it on their next eligible request.`,
-            },
-          };
+        try {
+          const resolved = this.router.use(req.provider, req.profile, { force: Boolean(req.force) });
+          this.events.append({
+            ts: new Date().toISOString(),
+            event: "use",
+            provider: req.provider,
+            profile: req.profile,
+            reason: req.force ? "manual-force" : "manual",
+            pid: process.pid,
+          });
+          if (this.activateOnUse) {
+            const act = await this.activator.activate(req.provider, req.profile);
+            return {
+              ok: true,
+              data: {
+                ...resolved,
+                activatedPaths: act.paths,
+                via: act.via,
+                message: `${req.provider} ${req.profile} is now preferred. Running OMO sessions will use it on their next eligible request.`,
+              },
+            };
+          }
+          return { ok: true, data: resolved };
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          return { ok: false, error: msg };
         }
-        return { ok: true, data: resolved };
       }
       case "auto":
         this.store.setProviderMode(req.provider, req.enabled ? "auto" : "manual");

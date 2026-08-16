@@ -98,7 +98,8 @@ bash scripts/install.sh --import-auth
 
 ```bash
 oar panel --refresh     # accounts + local signals + remote remaining %
-oar usage --refresh     # Codex week/5h + Grok subscription remaining
+oar usage --refresh
+oar recommend --refresh  # ranked accounts by remaining %     # Codex week/5h + Grok subscription remaining
 oar status              # simple active table
 ```
 

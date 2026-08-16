@@ -11,7 +11,7 @@ import type {
 export type OarRequest =
   | { protocol: 1; action: "ping" }
   | { protocol: 1; action: "resolve"; provider: ProviderId; model?: string; member?: string }
-  | { protocol: 1; action: "use"; provider: ProviderId; profile: ProfileId }
+  | { protocol: 1; action: "use"; provider: ProviderId; profile: ProfileId; force?: boolean }
   | { protocol: 1; action: "auto"; provider: ProviderId; enabled: boolean }
   | { protocol: 1; action: "mode"; provider: ProviderId; mode: ProviderMode }
   | {
