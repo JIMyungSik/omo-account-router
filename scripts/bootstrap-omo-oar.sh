@@ -23,8 +23,17 @@ echo "    $EXT_DIR/cursor-omo.js"
 echo "==> cursor-bridge wrapper"
 cat > "$BIN_DIR/oar-cursor-bridge" <<EOF
 #!/usr/bin/env bash
-exec env PATH="\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH" \\
-  node "$ROOT/scripts/cursor-bridge.mjs" "\$@"
+set -euo pipefail
+if [[ -z "\${CURSOR_API_KEY:-}" && -f "\${HOME}/.config/oar/cursor.env" ]]; then
+  set -a
+  source "\${HOME}/.config/oar/cursor.env"
+  set +a
+fi
+if [[ -z "\${CURSOR_API_KEY:-}" && -f "\${HOME}/.zshrc" ]]; then
+  eval "\$(grep -E '^[[:space:]]*export[[:space:]]+CURSOR_API_KEY=' "\${HOME}/.zshrc" | head -n 1)" || true
+fi
+export PATH="\${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:\${PATH:-/usr/bin:/bin}"
+exec node "$ROOT/scripts/cursor-bridge.mjs" "\$@"
 EOF
 chmod +x "$BIN_DIR/oar-cursor-bridge"
 

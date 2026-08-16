@@ -81,7 +81,12 @@ function messagesToPrompt(messages) {
 
 function runCursorAgent(model, prompt, signal) {
   return new Promise((resolve, reject) => {
-    const args = [
+    const args = [];
+    // LaunchAgents do not load ~/.zshrc — pass key explicitly when present.
+    if (process.env.CURSOR_API_KEY) {
+      args.push("--api-key", process.env.CURSOR_API_KEY);
+    }
+    args.push(
       "--print",
       "--output-format",
       "text",
@@ -90,7 +95,7 @@ function runCursorAgent(model, prompt, signal) {
       "--force",
       "--trust",
       prompt,
-    ];
+    );
     const child = spawn(AGENT, args, {
       env: { ...process.env },
       stdio: ["ignore", "pipe", "pipe"],
