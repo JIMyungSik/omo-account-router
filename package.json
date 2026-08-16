@@ -14,8 +14,7 @@
     "install:oar": "bash scripts/install.sh",
     "uninstall:oar": "bash scripts/uninstall.sh",
     "smoke": "bun run scripts/smoke-hot-switch.ts",
-    "prepack": "npm run build",
-    "postinstall": "node -e \"console.log(\\\"oar: run `oar doctor` then `oar daemon start` (or scripts/install.sh --skip-build)\\\")\""
+    "prepack": "npm run build"
   },
   "engines": {
     "node": ">=22"
