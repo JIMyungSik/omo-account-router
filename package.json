@@ -15,7 +15,7 @@
     "uninstall:oar": "bash scripts/uninstall.sh",
     "smoke": "bun run scripts/smoke-hot-switch.ts",
     "prepack": "npm run build",
-    "prepare": "node -e \"const fs=require('fs'); if(!fs.existsSync('dist/cli.js')){console.error('dist/ missing; run npm run build (needs bun)'); process.exit(1)}\""
+    "postinstall": "node -e \"console.log(\\\"oar: run `oar doctor` then `oar daemon start` (or scripts/install.sh --skip-build)\\\")\""
   },
   "engines": {
     "node": ">=22"
