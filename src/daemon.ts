@@ -211,32 +211,41 @@ export class OarDaemon {
           reason: String(req.result),
         });
         const policy = this.store.getProviderPolicy(req.provider);
+        const failoverResults = new Set([
+          "AUTH_REVOKED",
+          "AUTH_EXPIRED",
+          "RATE_LIMITED",
+          "QUOTA_EXHAUSTED",
+        ]);
+        const autoOn =
+          policy.autoFailover &&
+          (policy.mode === "auto" || process.env.OAR_FORCE_AUTO === "1");
+        let failover: { from: string; to: string } | undefined;
         if (
           this.activateOnUse &&
-          policy.autoFailover &&
-          policy.mode === "auto" &&
-          (req.result === "AUTH_REVOKED" ||
-            req.result === "RATE_LIMITED" ||
-            req.result === "QUOTA_EXHAUSTED")
+          autoOn &&
+          typeof req.result === "string" &&
+          failoverResults.has(req.result)
         ) {
           const next = this.router.resolve({ provider: req.provider });
           if (next.status === "available" && next.profile && next.profile !== req.account) {
             try {
               this.router.use(req.provider, next.profile);
               await this.activator.activate(req.provider, next.profile);
+              failover = { from: req.account, to: next.profile };
               this.events.append({
                 ts: new Date().toISOString(),
                 event: "failover",
                 provider: req.provider,
                 profile: next.profile,
-                reason: `from ${req.account}`,
+                reason: `from ${req.account} (${String(req.result)})`,
               });
             } catch {
               // vault may be missing for the next profile
             }
           }
         }
-        return { ok: true, data: updated };
+        return { ok: true, data: { account: updated, failover } };
       }
       case "status": {
         const state = this.store.getState();
@@ -409,6 +418,40 @@ export class OarDaemon {
           }
         }
         return { ok: true, data: { provider: req.provider, profile: req.profile, ...health, live } };
+      }
+      case "bootstrap-auto": {
+        const state = this.store.getState();
+        const byProvider = new Map<string, typeof state.accounts>();
+        for (const a of state.accounts) {
+          const list = byProvider.get(a.provider) ?? [];
+          list.push(a);
+          byProvider.set(a.provider, list);
+        }
+        const enabled: Array<{ provider: string; profiles: number; preferred?: string }> = [];
+        for (const [provider, accounts] of byProvider) {
+          if (accounts.length < 2) continue;
+          this.store.setProviderMode(provider, "auto");
+          this.store.setAutoFailover(provider, true);
+          const preferred =
+            this.store.getProviderPolicy(provider).preferred ??
+            [...accounts].sort((a, b) => a.priority - b.priority)[0]?.profile;
+          if (preferred && this.activateOnUse) {
+            try {
+              await this.activator.ensureActivated(provider, preferred);
+              this.router.use(provider, preferred);
+            } catch {
+              // vault missing — still enable auto for later import
+            }
+          }
+          enabled.push({ provider, profiles: accounts.length, preferred });
+          this.events.append({
+            ts: new Date().toISOString(),
+            event: "bootstrap-auto",
+            provider,
+            reason: `profiles=${accounts.length}`,
+          });
+        }
+        return { ok: true, data: { enabled, forceAuto: process.env.OAR_FORCE_AUTO === "1" } };
       }
       case "doctor":
         return {

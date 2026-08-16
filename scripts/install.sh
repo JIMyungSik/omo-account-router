@@ -77,12 +77,14 @@ case ":$PATH:" in
   *) echo "    NOTE: $LOCAL_BIN is not on PATH. Add: export PATH=\"$LOCAL_BIN:\$PATH\"" ;;
 esac
 
-echo "==> link Senpi extension"
+echo "==> link Senpi/OMO extensions"
 EXT_DIR="$HOME_DIR/.omo/agent/extensions"
 if [ -d "$HOME_DIR/.omo/agent" ]; then
   mkdir -p "$EXT_DIR"
   ln -sf "$ROOT/extensions/oar-senpi.js" "$EXT_DIR/oar.js"
+  ln -sf "$ROOT/extensions/cursor-omo.js" "$EXT_DIR/cursor-omo.js"
   echo "    linked $EXT_DIR/oar.js -> $ROOT/extensions/oar-senpi.js"
+  echo "    linked $EXT_DIR/cursor-omo.js (Cursor provider via local bridge)"
 else
   echo "    skipped: $HOME_DIR/.omo/agent not found (OMO not installed for this user yet)"
 fi
@@ -119,5 +121,13 @@ else
   echo "==> skipped import-auth (pass --import-auth to enable; never overwrites existing vault profiles unless --force)"
 fi
 
+echo "==> bootstrap multi-profile auto failover"
+if [ -x "$LOCAL_BIN/oar" ]; then
+  "$LOCAL_BIN/oar" daemon start >/dev/null 2>&1 || true
+  "$LOCAL_BIN/oar" bootstrap-auto >/dev/null 2>&1 || true
+fi
+
 echo "==> done"
 echo "Run: oar doctor"
+echo "Full OMO+Cursor wire-up: bash $ROOT/scripts/bootstrap-omo-oar.sh"
+echo "Auto account switch runs inside OMO (extension); manual oar use is optional."

@@ -51,7 +51,9 @@ export type OarRequest =
   | { protocol: 1; action: "release-lease"; leaseId?: string; holder?: string }
   | { protocol: 1; action: "refresh"; provider: ProviderId; profile: ProfileId }
   | { protocol: 1; action: "test"; provider: ProviderId; profile: ProfileId; live?: boolean }
-  | { protocol: 1; action: "doctor" };
+  | { protocol: 1; action: "doctor" }
+  /** Enable auto+failover for every provider that has 2+ vault profiles. */
+  | { protocol: 1; action: "bootstrap-auto" };
 
 export type OarResponse =
   | { ok: true; data: unknown }

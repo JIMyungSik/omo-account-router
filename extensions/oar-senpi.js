@@ -1,18 +1,21 @@
 /**
- * Thin Senpi extension for OAR.
+ * OAR ↔ OMO/Senpi integration (no manual `oar` required for day-to-day use).
  *
- * Model routing stays in OMO/Senpi. This extension:
- *  - exposes /account commands
- *  - reconnects to the daemon (OAR restart must not require OMO restart)
- *  - reports provider HTTP failures so the daemon can mark AUTH_REVOKED / RATE_LIMITED
- *  - acquires a request-scoped lease (same provider account is shared; see architecture)
+ * On session start:
+ *   - bootstrap-auto (multi-profile providers → mode=auto + autoFailover)
+ *   - preferred vault profile is ensureActivated into live auth.json
  *
- * Hot switch itself is auth.json slot activation. getAuth already ran before
- * before_provider_request, so a switch applies to the *next* eligible request.
+ * Every provider request:
+ *   - resolve preferred/eligible profile (daemon activates slot)
+ *   - lease for concurrency accounting
  *
- * Install:
- *   mkdir -p ~/.omo/agent/extensions
- *   ln -sf /absolute/path/to/omo-account-router/extensions/oar-senpi.js ~/.omo/agent/extensions/oar.js
+ * After provider response:
+ *   - SUCCESS / AUTH_* / RATE_LIMIT / QUOTA reported to daemon
+ *   - AUTH_EXPIRED tries daemon refresh first, then report (triggers failover)
+ *   - automatic profile switch applies to the *next* request (getAuth runs first)
+ *
+ * Install (also done by scripts/install.sh / bootstrap-omo-oar.sh):
+ *   ln -sf .../extensions/oar-senpi.js ~/.omo/agent/extensions/oar.js
  */
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
@@ -59,7 +62,7 @@ async function request(body, retries = 5) {
   let last;
   for (let i = 0; i <= retries; i++) {
     try {
-      return await requestOnce(body, 4000);
+      return await requestOnce(body, 5000);
     } catch (error) {
       last = error;
       const msg = error instanceof Error ? error.message : String(error);
@@ -76,7 +79,13 @@ function classifyStatus(status, headers, body) {
   if (status === 429) return "RATE_LIMITED";
   if (status === 401) return "AUTH_EXPIRED";
   if (status === 402) return "QUOTA_EXHAUSTED";
-  // xAI/Grok often returns 403 when subscription credits are exhausted.
+  if (
+    text.includes("invalid_grant") ||
+    text.includes("refresh token has been revoked") ||
+    text.includes("token has been revoked")
+  ) {
+    return "AUTH_REVOKED";
+  }
   if (
     status === 403 ||
     text.includes("run out of credits") ||
@@ -91,18 +100,48 @@ function classifyStatus(status, headers, body) {
   if (status === 400) {
     const retry = headers && (headers["retry-after"] || headers["Retry-After"]);
     if (retry) return "RATE_LIMITED";
+    if (text.includes("invalid_grant")) return "AUTH_REVOKED";
     return null;
   }
   return null;
 }
 
+async function bootstrapAuto(pi) {
+  try {
+    const res = await request({ protocol: 1, action: "bootstrap-auto" });
+    if (!res.ok) {
+      if (process.env.OAR_DEBUG) pi.notify?.(`OAR bootstrap: ${res.error}`, "warning");
+      return;
+    }
+    const enabled = res.data?.enabled || [];
+    if (enabled.length && process.env.OAR_DEBUG) {
+      const summary = enabled.map((e) => `${e.provider}(${e.profiles})`).join(", ");
+      pi.notify?.(`OAR auto-on: ${summary}`, "info");
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (process.env.OAR_DEBUG) pi.notify?.(`OAR daemon offline (${msg})`, "warning");
+  }
+}
+
 export default function (pi) {
   const holder = `omo:${process.pid}:${process.env.SENPI_TASK_ID || process.env.OMO_MEMBER || "session"}`;
   let last = { provider: null, profile: null, leaseId: null };
+  let bootstrapped = false;
 
+  pi.on("session_start", async () => {
+    bootstrapped = true;
+    await bootstrapAuto(pi);
+  });
+
+  // Some hosts skip session_start for short tasks — still bootstrap once.
   pi.on("before_provider_request", async (event) => {
+    if (!bootstrapped) {
+      bootstrapped = true;
+      await bootstrapAuto(pi);
+    }
     const provider = event?.model?.provider;
-    if (!provider) return;
+    if (!provider || provider === "cursor") return;
     try {
       const resolved = await request({ protocol: 1, action: "resolve", provider, member: holder });
       if (!resolved.ok) {
@@ -111,8 +150,12 @@ export default function (pi) {
         }
         return;
       }
+      const nextProfile = resolved.data?.profile;
+      if (last.provider === provider && last.profile && nextProfile && last.profile !== nextProfile) {
+        pi.notify?.(`OAR auto-switch ${provider}: ${last.profile} → ${nextProfile}`, "info");
+      }
       last.provider = provider;
-      last.profile = resolved.data?.profile;
+      last.profile = nextProfile;
       const lease = await request({
         protocol: 1,
         action: "acquire-lease",
@@ -134,7 +177,38 @@ export default function (pi) {
         last.leaseId = null;
       }
       if (!last.provider || !last.profile) return;
-      const result = classifyStatus(event?.status, event?.headers, event?.body ?? event?.error ?? event?.message);
+      const body = event?.body ?? event?.error ?? event?.message;
+      let result = classifyStatus(event?.status, event?.headers, body);
+
+      // Try daemon-mediated OAuth refresh before giving up / failing over.
+      if (result === "AUTH_EXPIRED") {
+        try {
+          const refreshed = await request({
+            protocol: 1,
+            action: "refresh",
+            provider: last.provider,
+            profile: last.profile,
+          });
+          if (refreshed.ok) {
+            pi.notify?.(
+              `OAR refreshed ${last.provider}/${last.profile}${refreshed.data?.skipped ? " (fresh)" : ""}`,
+              "info",
+            );
+            await request({
+              protocol: 1,
+              action: "report",
+              provider: last.provider,
+              account: last.profile,
+              result: "SUCCESS",
+              detail: "refresh_recovered",
+            });
+            return;
+          }
+        } catch {
+          // fall through to report AUTH_EXPIRED → failover
+        }
+      }
+
       if (!result) {
         await request({
           protocol: 1,
@@ -146,20 +220,34 @@ export default function (pi) {
         return;
       }
       if (result === "SERVER_ERROR") return;
-      await request({
+
+      const reported = await request({
         protocol: 1,
         action: "report",
         provider: last.provider,
         account: last.profile,
         result,
+        detail: typeof body === "string" ? body.slice(0, 240) : undefined,
       });
+      const failover = reported?.data?.failover;
+      if (failover?.to) {
+        last.profile = failover.to;
+        pi.notify?.(
+          `OAR auto-failover ${last.provider}: ${failover.from} → ${failover.to} (${result})`,
+          "warning",
+        );
+      } else if (result !== "SUCCESS") {
+        if (process.env.OAR_DEBUG) {
+          pi.notify?.(`OAR ${last.provider}/${last.profile}: ${result}`, "warning");
+        }
+      }
     } catch {
       // never break the agent loop
     }
   });
 
   pi.registerCommand("account", {
-    description: "OAR account router (status|use|auto|doctor)",
+    description: "OAR account router (status|use|auto|doctor|bootstrap)",
     handler: async (args, ctx) => {
       const parts = (args || "").trim().split(/\s+/).filter(Boolean);
       const sub = parts[0] || "status";
@@ -176,6 +264,12 @@ export default function (pi) {
             return `${star} ${a.provider}/${a.profile} ${a.auth} ${a.availability}`;
           });
           ctx.ui.notify(lines.join("\n") || "no accounts", "info");
+          return;
+        }
+        if (sub === "bootstrap") {
+          const res = await request({ protocol: 1, action: "bootstrap-auto" });
+          if (!res.ok) throw new Error(res.error);
+          ctx.ui.notify(JSON.stringify(res.data, null, 2), "info");
           return;
         }
         if (sub === "use") {
@@ -213,10 +307,10 @@ export default function (pi) {
           ctx.ui.notify(JSON.stringify(res.data, null, 2), "info");
           return;
         }
-        ctx.ui.notify("usage: /account status|use|auto|doctor", "warning");
+        ctx.ui.notify("usage: /account status|bootstrap|use|auto|doctor", "warning");
       } catch (error) {
         ctx.ui.notify(
-          `OAR: ${error instanceof Error ? error.message : String(error)}. Is daemon running? oar daemon start`,
+          `OAR: ${error instanceof Error ? error.message : String(error)}. Daemon auto-starts via LaunchAgent; check: oar doctor`,
           "error",
         );
       }

@@ -72,6 +72,11 @@ COMMANDS
   oar auto <provider> on|off
       Enable/disable automatic failover to another eligible profile on failures.
 
+  oar bootstrap-auto
+      One-shot: for every provider with 2+ vault profiles, set mode=auto +
+      autoFailover, and ensureActivated the preferred profile. OMO extension
+      also runs this on session_start so daily use needs no manual oar.
+
   oar import-auth <provider> <profile> [--from <auth.json>]
       Copy one provider credential from auth.json (default ~/.omo/agent/auth.json)
       into the OAR vault. Secrets stay in the vault; nothing is printed.
@@ -749,6 +754,12 @@ async function main(argv: string[]) {
       console.log(formatRecommendTable(rows));
       return;
     }
+    case "bootstrap-auto": {
+      const res = await req({ protocol: 1, action: "bootstrap-auto" });
+      if (!res.ok) throw new Error(res.error);
+      console.log(JSON.stringify(res.data, null, 2));
+      return;
+    }
     case "doctor": {
       console.log("OAR doctor");
       console.log(`root: ${process.env.OAR_HOME ?? defaultOarRoot()}`);
@@ -775,6 +786,8 @@ async function main(argv: string[]) {
       console.log("  oar panel --refresh   # accounts + remaining %");
       console.log("  oar usage --refresh   # Codex WK/5H + Grok %");
       console.log("  oar use <p> <profile> # hot-switch live slot");
+      console.log("  oar bootstrap-auto   # enable multi-profile auto failover");
+      console.log("  bash scripts/bootstrap-omo-oar.sh  # OMO+Cursor wire-up");
       return;
     }
     case "daemon": {
