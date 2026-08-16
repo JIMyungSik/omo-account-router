@@ -225,5 +225,9 @@ Estimate for Phase 1: small (extension + daemon store + panel) — no provider r
 ## Implementation status (2026-08-16)
 
 - Shipped: `oar usage`, `oar panel` remote columns via `src/usage/*`.
-- Codex: `GET chatgpt.com/backend-api/wham/usage` with vault OAuth (5h when secondary/short window present; weekly primary common).
-- xAI: `GET cli-chat-proxy.grok.com/v1/billing?format=credits` with vault OAuth access (Grok subscription 
+- Codex: ChatGPT WHAM usage with vault OAuth.
+  - Maps short windows (<=6h) to **5H**, long windows (>=6d) to **WK**.
+  - Current live accounts often only expose weekly primary (`secondary_window: null`) so **5H** shows as —.
+- xAI: Grok subscription billing (`cli-chat-proxy.grok.com/.../billing?format=credits`) with vault OAuth access token.
+  - Shows **GROK** remaining % (subscription credits), not Management API prepaid.
+- Cache: `~/.oar/usage-cache.json` (default TTL 60s; `--refresh` forces network).
