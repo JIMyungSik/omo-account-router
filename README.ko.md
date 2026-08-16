@@ -145,6 +145,30 @@ oar use xai main
 
 ---
 
+
+## 다른 ADE (Claude Code, Codex, Cursor, Orca, pi, gjc 등)
+
+OAR이 가장 깊게 붙는 곳은 **OMO / Senpi** 입니다. 나머지는 단계가 다릅니다.
+
+| 단계 | ADE | OAR 역할 |
+|------|-----|----------|
+| 1순위 | OMO, Senpi | 핫스왑, extension, usage, recommend |
+| 실험적 | pi, omp, gjc, OpenCode* | `auth.json` 쓰면 `OAR_AUTH_PATH` / `OAR_ACTIVATE_ALL` |
+| 부분 | Codex CLI, Claude Code | usage/vault 또는 향후 어댑터 (홈 디렉터리 다름) |
+| 별도 | Cursor, Copilot, Orca, Gemini CLI, Aider, Cline… | 자체 계정 UI; OAR은 모니터 정도 |
+
+\*Senpi형 auth 공유 설정 시
+
+**전체 표·설치 레시피·인기 ADE 메모:**  
+→ **[docs/ades.ko.md](docs/ades.ko.md)** · [English](docs/ades.md)
+
+```bash
+# 예: 다른 Senpi형 agent dir 지정
+export OAR_AUTH_PATH="$HOME/.pi/agent/auth.json"
+oar daemon stop; oar daemon start
+oar use xai sub
+```
+
 ## 동작 요약 (중요)
 
 ### 핫스왑

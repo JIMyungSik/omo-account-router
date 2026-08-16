@@ -150,6 +150,30 @@ Environment: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`
 
 ---
 
+
+## Other ADEs (Claude Code, Codex, Cursor, Orca, pi, gjc, …)
+
+OAR is deepest on **OMO / Senpi**. Other tools vary.
+
+| Tier | ADEs | OAR role |
+|------|------|----------|
+| First-class | OMO, Senpi | Hot-switch, extension, usage, recommend |
+| Experimental | pi, omp, gjc, OpenCode* | `OAR_AUTH_PATH` / `OAR_ACTIVATE_ALL` if they use `auth.json` |
+| Partial | Codex CLI, Claude Code | Usage/vault or future adapter; different home dirs |
+| Separate | Cursor, Copilot, Orca, Gemini CLI, Aider, Cline… | Native account UI; OAR optional for monitoring only |
+
+\*if configured for shared Senpi-style auth
+
+**Full matrix, setup recipes, and popularity notes:**  
+→ **[docs/ades.md](docs/ades.md)** · [한국어](docs/ades.ko.md)
+
+```bash
+# Example: point OAR at another Senpi-like agent dir
+export OAR_AUTH_PATH="$HOME/.pi/agent/auth.json"
+oar daemon stop; oar daemon start
+oar use xai sub
+```
+
 ## Behavior notes (important)
 
 ### Hot-switch
