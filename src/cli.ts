@@ -26,34 +26,137 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 function usage(): string {
   return `oar — OMO Account Router
 
-Tip: run \`oar\` with no args for a quick status snapshot.
+Local multi-account hot-switch for OMO/Senpi. OAR stores credentials in a vault,
+copies the active profile into live auth.json slot(s), and tracks routing state.
+OAR routes and copies credentials; it does NOT automate OAuth login and does NOT
+revoke provider refresh tokens.
 
-Usage:
+Tip: run \`oar\` with no args for a quick status snapshot (not this help text).
+
+STATUS TABLE (oar / oar status)
+  AUTH     Local/vault metadata from import or last check (valid|expired|revoked|unknown).
+           Can stay "valid" after the live access token expires until test/usage updates it.
+  STATUS   Routing eligibility in the daemon (AVAILABLE, ACTIVE, QUOTA_EXHAUSTED, …).
+  ACTIVE   ★ marks the profile selected for that provider (target of the live auth slot).
+  MODE     Provider policy: manual pick or auto failover.
+
+  Separate from the status table:
+  - \`oar usage\` OK column = latest remote usage API request succeeded (yes/no), not AUTH.
+  - Routing STATUS and usage OK can disagree (e.g. AUTH valid but usage HTTP 401).
+
+COMMANDS
+
+  oar
+      Quick status snapshot when the daemon is up; same table as \`oar status\`.
+      On daemon failure, prints this help plus a start hint.
+
   oar status
-  oar accounts [provider]
-  oar provider list
-  oar add <provider> <profile>
-  oar remove <provider> <profile>
-  oar use <provider> <profile> [--force]
-  oar auto <provider> on|off
-  oar import-auth <provider> <profile> [--from <auth.json>]
-  oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
-  oar login <provider> <profile>
-  oar logout <provider> <profile>
-  oar activate <provider> <profile>
-  oar test <provider> <profile> [--live]
-  oar report <provider> <profile> <RESULT>
-  oar guide second-account
-  oar install [-- <install.sh args>]
-  oar panel [--watch [sec]] [--json] [--xbar] [--hours N] [--refresh] [--no-remote]
-  oar usage [provider] [profile] [--refresh]
-  oar recommend [--refresh] [provider...]
-  oar doctor
-  oar daemon start|stop|status
+      Full account table: provider, profile, AUTH, STATUS, MODE, ACTIVE (★).
 
-Environment:
-  OAR_HOME   state root (default ~/.oar)
-  OAR_SOCK   unix socket path
+  oar accounts [provider]
+      JSON list of vault accounts; optional filter by provider id.
+
+  oar provider list
+      One provider id per line from registered accounts.
+
+  oar add <provider> <profile>
+      Register a named profile slot (no credential yet).
+
+  oar remove <provider> <profile>
+      Remove profile from vault and daemon state.
+
+  oar use <provider> <profile> [--force]
+      Switch live auth slot to this vault profile. Refreshes remote usage first;
+      refuses switch at 0% remaining unless --force. No OMO restart needed.
+
+  oar auto <provider> on|off
+      Enable/disable automatic failover to another eligible profile on failures.
+
+  oar import-auth <provider> <profile> [--from <auth.json>]
+      Copy one provider credential from auth.json (default ~/.omo/agent/auth.json)
+      into the OAR vault. Secrets stay in the vault; nothing is printed.
+
+  oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
+      Import every provider found in auth.json under one profile name (default main).
+      Skips existing entries unless --force.
+
+  oar login <provider> <profile>
+      Print safe TUI login instructions only. OAuth stays in OMO/Senpi (/login);
+      OAR never runs browser or device-code flows for you.
+
+  oar logout <provider> <profile>
+      Mark AUTH_REVOKED, remove vault entry. Does not restart Senpi.
+
+  oar activate <provider> <profile>
+      Low-level activate (JSON result); prefer \`oar use\` for hot-switch.
+
+  oar test <provider> <profile> [--live]
+      Probe stored credential. --live adds a best-effort remote call; does not
+      change routing state.
+
+  oar report <provider> <profile> <RESULT>
+      Report runtime outcome to update STATUS (SUCCESS, AUTH_EXPIRED, AUTH_REVOKED,
+      RATE_LIMITED, QUOTA_EXHAUSTED, NETWORK_ERROR, …).
+
+  oar guide second-account
+      Step-by-step for logging in a second account without clobbering the live slot.
+
+  oar install [-- <install.sh args>]
+      Run scripts/install.sh (symlink oar, daemon setup). Pass extra args after --.
+
+  oar panel [--watch [sec]] [--json] [--xbar] [--hours N] [--refresh] [--no-remote]
+      Rich dashboard: accounts, events, remote usage (openai-codex / xai).
+      --watch [sec]  Refresh loop (default 2s). --json / --xbar for machine output.
+      --hours N      Event window (default 24). --refresh  Bypass usage cache.
+      --no-remote    Skip remote usage fetches.
+
+  oar usage [provider] [profile] [--refresh]
+      Remote quota table for openai-codex and xai (5H/WK/Grok %). OK = request ok.
+      Omit args to list all supported accounts. Updates daemon on 0% exhaustion.
+
+  oar recommend [--refresh] [provider...]
+      Rank profiles by eligibility + remote remaining %. Optional provider filter.
+      --refresh  Fetch fresh usage (default). Daemon must be running for full sync.
+
+  oar doctor
+      Local diagnostics: paths, Senpi install, auth.json discovery, daemon JSON.
+
+  oar daemon start|stop|status
+      Background unix-socket daemon (required for most commands).
+      start   Detach daemon.  stop   SIGTERM.  status   JSON doctor payload.
+
+ENVIRONMENT
+  OAR_HOME   State root and vault (default ~/.oar)
+  OAR_SOCK   Unix socket path (default under OAR_HOME)
+
+OAUTH TROUBLESHOOTING
+  Symptoms: Senpi \`invalid_grant\`, refresh token revoked, HTTP 401/403 on usage or
+  --live test, or AUTH/usage OK out of sync after long idle / reboot.
+
+  v0.1.5+: resolve/ensureActivated pulls vault UP from a fresher live OAuth token
+  (Senpi refresh) instead of overwriting live with a stale vault copy. Explicit
+  \`oar use\` still pushes the preferred vault profile into the live slot.
+
+  If refresh is already revoked at the provider, re-authenticate:
+
+    1. oar login <provider> <profile>     # read the steps
+    2. omo  →  /login  →  pick provider  →  complete browser OAuth
+    3. oar import-auth <provider> <profile>
+    4. oar use <provider> <profile>
+    5. oar test <provider> <profile> --live
+       oar usage <provider> <profile> --refresh
+
+  Second account on same provider: oar guide second-account
+
+EXAMPLES
+  oar daemon start
+  oar import-auth --all
+  oar status
+  oar use xai main
+  oar panel --refresh
+  oar usage --refresh
+  oar recommend xai openai-codex
+  oar auto xai on
 `;
 }
 

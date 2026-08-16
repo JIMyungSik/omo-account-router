@@ -670,6 +670,75 @@ class AuthSlotActivator {
         via = "senpi-auth-storage";
       written.push(path);
     }
+    this.markProfileActive(provider, profile);
+    return { paths: written, via };
+  }
+  async ensureActivated(provider, profile) {
+    const cred = this.store.getVaultCredential(provider, profile);
+    if (!cred)
+      throw new Error(`No vault credential for ${provider}/${profile}`);
+    let sawMissing = false;
+    let sawOtherKnownProfile = false;
+    let fresherLive;
+    for (const path of this.authPaths) {
+      if (!existsSync3(path)) {
+        sawMissing = true;
+        continue;
+      }
+      let live;
+      try {
+        const data = JSON.parse(readFileSync2(path, "utf8"));
+        live = data[provider];
+      } catch {
+        sawMissing = true;
+        continue;
+      }
+      if (!live) {
+        sawMissing = true;
+        continue;
+      }
+      if (credentialsSameIdentity(live, cred)) {
+        continue;
+      }
+      if (this.matchesOtherVaultProfile(provider, profile, live)) {
+        sawOtherKnownProfile = true;
+        continue;
+      }
+      if (isFresherOAuth(live, cred)) {
+        if (!fresherLive || isFresherOAuth(live, fresherLive)) {
+          fresherLive = live;
+        }
+        continue;
+      }
+      sawMissing = true;
+    }
+    if (fresherLive && !sawOtherKnownProfile) {
+      this.store.putVaultCredential(provider, profile, fresherLive);
+      this.markProfileActive(provider, profile);
+      const act2 = await this.activate(provider, profile);
+      return { ...act2, via: `${act2.via}+vault-pull-up`, skipped: false };
+    }
+    if (!sawMissing && !sawOtherKnownProfile && !fresherLive) {
+      return { paths: [...this.authPaths], via: "already-matched", skipped: true };
+    }
+    const act = await this.activate(provider, profile);
+    return {
+      ...act,
+      via: sawOtherKnownProfile ? `${act.via}+profile-realign` : act.via,
+      skipped: false
+    };
+  }
+  matchesOtherVaultProfile(provider, profile, live) {
+    for (const other of this.store.listAccounts(provider)) {
+      if (other.profile === profile)
+        continue;
+      const otherCred = this.store.getVaultCredential(provider, other.profile);
+      if (otherCred && credentialsSameIdentity(live, otherCred))
+        return true;
+    }
+    return false;
+  }
+  markProfileActive(provider, profile) {
     const account = this.store.getAccount(provider, profile);
     for (const other of this.store.listAccounts(provider)) {
       if (other.profile === profile)
@@ -688,45 +757,6 @@ class AuthSlotActivator {
         availability: "ACTIVE"
       });
     }
-    return { paths: written, via };
-  }
-  async ensureActivated(provider, profile) {
-    const cred = this.store.getVaultCredential(provider, profile);
-    if (!cred)
-      throw new Error(`No vault credential for ${provider}/${profile}`);
-    let mismatched = false;
-    for (const path of this.authPaths) {
-      if (!existsSync3(path)) {
-        mismatched = true;
-        break;
-      }
-      try {
-        const data = JSON.parse(readFileSync2(path, "utf8"));
-        const live = data[provider];
-        if (!live || live.type !== cred.type) {
-          mismatched = true;
-          break;
-        }
-        if (cred.type === "oauth" && live.type === "oauth") {
-          if (live.access !== cred.access || live.refresh !== cred.refresh) {
-            mismatched = true;
-            break;
-          }
-        } else if (cred.type === "api_key" && live.type === "api_key") {
-          if (live.key !== cred.key) {
-            mismatched = true;
-            break;
-          }
-        }
-      } catch {
-        mismatched = true;
-        break;
-      }
-    }
-    if (!mismatched)
-      return { paths: [...this.authPaths], via: "already-matched", skipped: true };
-    const act = await this.activate(provider, profile);
-    return { ...act, skipped: false };
   }
   async writeSlotViaSenpi(authPath, provider, credential) {
     try {
@@ -757,6 +787,28 @@ class AuthSlotActivator {
       chmodSync(authPath, 384);
     } catch {}
   }
+}
+function credentialsSameIdentity(a, b) {
+  if (a.type !== b.type)
+    return false;
+  if (a.type === "api_key" && b.type === "api_key") {
+    return a.key === b.key;
+  }
+  if (a.type === "oauth" && b.type === "oauth") {
+    return a.access === b.access && a.refresh === b.refresh && (a.accountId ?? undefined) === (b.accountId ?? undefined);
+  }
+  return false;
+}
+function isFresherOAuth(candidate, baseline) {
+  if (candidate.type !== "oauth" || baseline.type !== "oauth")
+    return false;
+  if (candidate.accountId && baseline.accountId && candidate.accountId !== baseline.accountId) {
+    return false;
+  }
+  if (credentialsSameIdentity(candidate, baseline) && candidate.expires === baseline.expires) {
+    return false;
+  }
+  return candidate.expires > baseline.expires;
 }
 
 // src/events.ts
