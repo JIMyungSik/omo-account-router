@@ -30,7 +30,7 @@ bash scripts/install.sh --import-auth
 
 oar doctor
 oar status
-```bash
+```
 
 What install does:
 
@@ -80,7 +80,7 @@ oar import-auth xai account-b --from \"$OAR_TMP_LOGIN_DIR/auth.json\"
 rm -rf \"$(dirname \"$OAR_TMP_LOGIN_DIR\")\"
 oar use xai account-b
 oar status
-```bash
+```
 
 Live A→B API proof is only possible after step 3 succeeds with two vault profiles.
 
@@ -108,7 +108,7 @@ Live A→B API proof is only possible after step 3 succeeds with two vault profi
 bun test
 bun run scripts/smoke-hot-switch.ts
 bun run build
-```bash
+```
 
 Covers: real Senpi AuthStorage hot-switch, multi-client daemon, AUTH_REVOKED routing, OAuth refresh single-flight (xAI + mocked Anthropic/Codex), leases, daemon restart reconnect, import-auth --all, generic adapters.
 
