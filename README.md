@@ -2,10 +2,11 @@
 
 **Languages:** [English](README.md) · [한국어](README.ko.md)
 
-Local **multi-account hot-switch** for AI coding agents (OMO / Senpi first-class).
+Local **multi-account hot-switch** for AI coding agents (**OMO / Senpi** first-class).
 
-OAR does **not** pick models. Your agent still chooses provider/model.  
-OAR chooses **which account** sits in the live auth slot — often **without restarting** the agent.
+- Your agent still picks **provider + model**
+- OAR picks **which account** sits in the live auth slot
+- Usually **no agent restart** (next request picks up the new slot)
 
 ```text
 YOU  →  omo / senpi  →  model request
@@ -17,232 +18,179 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 | | |
 |--|--|
-| Status | Early public / personal toolkit |
+| Package | **`oar-cli`** on npm path (command is still **`oar`**) |
+| Version | `0.1.4` |
 | License | [MIT](LICENSE) |
-| Runtime | [Bun](https://bun.sh) 1.3+ (Node 22+ ok for built `dist/`) |
+| Runtime | Node.js **22+** (Bun optional for dev) |
+| Tests | `bun test` — 47 pass |
 | Compliance | [docs/compliance.md](docs/compliance.md) (**not legal advice**) |
+| Repo | https://github.com/JIMyungSik/omo-account-router |
+
+> npm name bare `oar` is taken by an unrelated 2013 package. Install **`oar-cli`**; the binary is **`oar`**.
 
 ---
 
-## Why OAR?
+## Install (no git clone)
 
-| Pain | OAR |
-|------|-----|
-| Several Grok / Codex / Claude logins, painful re-login | Vault many profiles, `oar use` to activate one |
-| Restart agent after every account change | Hot-switch via auth.json revision reload (Senpi/OMO) |
-| “Which account is live? How much quota left?” | `oar panel` / `oar usage` tables |
-| Hit limit mid-work | Optional `oar auto` failover (**off by default**, see compliance) |
-
----
-
-## Requirements
-
-- macOS or Linux
-- [Bun](https://bun.sh) installed (`curl -fsSL https://bun.sh/install | bash`)
-- OMO / Senpi (or another agent that reads the same `auth.json` style) for hot-switch
-- Accounts you **legitimately own** (never share credentials)
-
----
-
-## Install
-
-### A) npm — no git clone (recommended)
-
-Requires **Node.js 22+**.
-
-> The bare npm name `oar` is already taken by an unrelated package (Observable Array, 2013).  
-> Install **`oar-cli`** — the shell command is still **`oar`**.
+### Recommended — GitHub archive
 
 ```bash
-# npm registry (after publish)
-npm install -g oar-cli
-
-# GitHub archive (works without npm publish / login)
 npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz
 ```
 
-Then:
+Requires **Node.js 22+**.
 
 ```bash
 oar doctor
 oar daemon start
 oar panel --refresh
+oar recommend --refresh
 ```
 
-Optional macOS LaunchAgent + extension:
+### After npm registry publish
 
 ```bash
-bash "$(npm root -g)/oar-cli/scripts/install.sh" --skip-build
-# if installed from GitHub tarball the folder may still be named omo-account-router:
-# bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
+npm install -g oar-cli
 ```
 
-Uninstall:
+### Optional macOS always-on daemon + Senpi extension
+
+```bash
+# folder name depends on install source:
+bash "$(npm root -g)/oar-cli/scripts/install.sh" --skip-build
+# or:
+bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
+```
+
+### Uninstall
 
 ```bash
 npm uninstall -g oar-cli
-# or: npm uninstall -g omo-account-router
+# or
+npm uninstall -g omo-account-router
 ```
 
-### B) Clone + install script (needs Bun)
+### Dev clone (Bun)
 
 ```bash
 git clone https://github.com/JIMyungSik/omo-account-router.git
 cd omo-account-router
+bun install && bun test && bun run build
 bash scripts/install.sh --import-auth
 ```
 
-## Quick start (everyday)
+---
 
-### See everything
-
-```bash
-oar panel --refresh     # accounts + local signals + remote remaining %
-oar usage --refresh
-oar recommend --refresh  # ranked accounts by remaining %     # Codex week/5h + Grok subscription remaining
-oar status              # simple active table
-```
-
-Example `oar usage` table:
-
-```text
-| PROVIDER     | PROFILE | OK  | 5H left | WK left | GROK left | USED | RESET         | SOURCE        |
-|--------------|---------|-----|--------:|--------:|----------:|-----:|---------------|--------------|
-| openai-codex | main    | yes |       - |      9% |         - |  91% | 08-20 12:37   | codex-wham   |
-| xai          | sub     | yes |       - |       - |       97% |   3% | 08-22 10:32   | grok-billing |
-```
-
-- **5H** = Codex short/session window when the API exposes one (else `-`)
-- **WK** = Codex weekly remaining
-- **GROK** = xAI Grok **subscription** credit remaining (not Management API prepaid $)
-
-### Switch account (no OMO restart)
+## Quick start
 
 ```bash
-oar use xai main
+# snapshot
+oar                         # quick status (no args)
+oar status
+oar panel --refresh         # table: live slot + local signals + remote %
+oar usage --refresh         # Codex 5h/week + Grok subscription remaining
+oar recommend --refresh     # ranked “what to use next”
+
+# vault current logins
+oar import-auth --all
+
+# switch account (hot)
 oar use xai sub
 oar use openai-codex main
-```
 
-Running OMO sessions pick up the new slot on the **next** request.  
-All parallel OMO windows share the **same** provider slot (global, not per-terminal).
+# 0% accounts are refused (even if auto is on)
+oar use xai main            # REFUSED if remote remaining is 0%
+oar use xai main --force    # override (not recommended)
 
-### Import current login into vault
-
-```bash
-# one provider
-oar import-auth xai main --from ~/.omo/agent/auth.json
-
-# every provider currently in auth.json
-oar import-auth --all
+# auto failover within a provider (off by default — read compliance)
+oar auto xai on
+oar auto xai off
 ```
 
 ### Second account (same provider)
 
-**Important:** the `omo` launcher always forces `SENPI_CODING_AGENT_DIR=~/.omo/agent`.  
-Isolated second login must use **`senpi`**, not `omo`.
+**Do not use `omo` for isolated login** — the launcher forces `~/.omo/agent`.
 
 ```bash
-# 1) vault current account first
 oar import-auth xai main
-
-# 2) login account B in a temp dir
-export OAR_TMP="$(mktemp -d)/agent"
-mkdir -p "$OAR_TMP"
+export OAR_TMP="$(mktemp -d)/agent" && mkdir -p "$OAR_TMP"
 SENPI_CODING_AGENT_DIR="$OAR_TMP" senpi
-# in TUI: /login → xAI → complete OAuth as account B → quit
-
-# 3) import + restore live slot
+# TUI: /login → provider → second account → quit
 oar import-auth xai sub --from "$OAR_TMP/auth.json"
 rm -rf "$(dirname "$OAR_TMP")"
-oar use xai main
-oar status
-```
-
-`omo`-only path (temporarily overwrites live slot):
-
-```bash
-oar import-auth xai main
-omo
-# /logout xai → /login xai (account B) → quit
-oar import-auth xai sub
 oar use xai main
 ```
 
 Full guide: `oar guide second-account` · [scripts/second-account.md](scripts/second-account.md)
 
-### Optional auto-failover
-
-```bash
-oar auto xai on          # enable (OFF by default — read compliance!)
-oar auto xai off
-```
-
-When enabled, classified failures (`RATE_LIMITED`, `QUOTA_EXHAUSTED`, `AUTH_REVOKED`, …) can activate another vaulted profile.  
-This may conflict with provider Terms if used to pool subscription limits — **your responsibility**.
-
 ---
 
 ## Command reference
 
-| Command | What it does |
-|---------|----------------|
-| `oar status` | Table of profiles + active `*` |
-| `oar panel [--refresh] [--watch N] [--json] [--xbar]` | Full dashboard |
+| Command | Description |
+|---------|-------------|
+| `oar` | Quick status snapshot |
+| `oar status` | Profiles + active `*` |
+| `oar panel [--refresh] [--watch N] [--json] [--xbar]` | Full dashboard table |
 | `oar usage [provider] [profile] [--refresh]` | Remaining % table |
+| `oar recommend [--refresh] [provider...]` | Ranked accounts by remaining % |
 | `oar accounts [provider]` | JSON list |
-| `oar add / remove <provider> <profile>` | Register metadata |
-| `oar import-auth <p> <profile> [--from path]` | Copy auth.json slot → vault |
-| `oar import-auth --all [--force]` | Import all providers |
-| `oar use <p> <profile>` | Prefer + activate into live auth.json |
+| `oar import-auth <p> <profile> [--from path]` | auth.json → vault |
+| `oar import-auth --all [--force]` | Import every provider |
+| `oar use <p> <profile> [--force]` | Prefer + activate (blocks 0%) |
 | `oar auto <p> on\|off` | Auto mode + failover flag |
-| `oar login <p> <profile>` | Prints safe login steps (no token paste) |
-| `oar logout <p> <profile>` | Mark revoked + remove vault entry |
-| `oar test <p> <profile> [--live]` | Local health; optional live probe |
-| `oar doctor` | Paths, engine versions, daemon |
+| `oar login` / `oar logout` | Login guide / remove vault |
+| `oar test <p> <profile> [--live]` | Health check |
+| `oar doctor` | Paths, engine, daemon tips |
 | `oar daemon start\|stop\|status` | Daemon lifecycle |
 | `oar install` | Runs `scripts/install.sh` |
 | `oar guide second-account` | Second-account howto |
 
-Environment:
-
-| Var | Meaning |
-|-----|---------|
-| `OAR_HOME` | State root (default `~/.oar`) |
-| `OAR_SOCK` | Unix socket path |
-| `OAR_AUTH_PATH` | Single auth.json to write |
-| `OAR_ACTIVATE_ALL=1` | Write all discovered auth.json files |
+Environment: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`
 
 ---
 
-## How hot-switch works (OMO / Senpi)
+## Behavior notes (important)
 
-Verified against omo-ai 5.x / senpi engine:
+### Hot-switch
+Parallel OMO windows share **one live slot per provider**.  
+`oar use` applies on the **next** request (no restart).
 
-1. Launcher sets `SENPI_CODING_AGENT_DIR=~/.omo/agent`
-2. Each model call → `getAuth` → reads `auth.json`
-3. AuthStorage reloads when file revision changes
-4. OAR activates vault credential into the provider key only (other providers untouched)
+### 0% / exhausted protection
+- Remote usage 0% (Grok credits, etc.) → **warn + refuse** `oar use`
+- Auto failover **skips** `QUOTA_EXHAUSTED` accounts
+- Grok **403 out of credits** is classified as quota exhausted (not success)
+- Live `auth.json` is **re-aligned** on resolve if it drifted to another profile
 
-**Limits**
+### `oar recommend`
+Ranks vault accounts (remote remaining % + eligibility).  
+Prints a markdown table and:
 
-- One live slot per provider (not concurrent different accounts of the same provider in one process)
-- Some providers (e.g. long-lived sockets) may need an extra request or reconnect
-- Other agents (Orca, etc.) may use **different** account stores — OAR does not control those by default
+```text
+top pick: openai-codex/main  (100% left)
+switch:   oar use openai-codex main
+```
+
+Does **not** change the session model — only which **account** OAR would activate.
+
+### Scope
+| In scope | Out of scope |
+|----------|----------------|
+| Account vault + hot-switch | Picking models for you |
+| Usage % (Codex / Grok) | Orca’s own multi-account UI |
+| Optional auto account failover | Guaranteed provider ToS compliance |
 
 ---
 
 ## macOS menu bar (optional)
 
-Install [SwiftBar](https://github.com/swiftbar/SwiftBar) or xbar, then:
+[SwiftBar](https://github.com/swiftbar/SwiftBar) / xbar:
 
 ```bash
 mkdir -p "$HOME/Library/Application Support/SwiftBar"
-ln -sf "$PWD/scripts/oar-xbar.sh" \
+ln -sf "$(npm root -g)/oar-cli/scripts/oar-xbar.sh" \
   "$HOME/Library/Application Support/SwiftBar/oar.5s.sh"
 ```
-
-Refresh every 5s; click a profile row to `oar use` it.
 
 ---
 
@@ -250,36 +198,29 @@ Refresh every 5s; click a profile row to `oar use` it.
 
 ```bash
 bun install
-bun test                 # unit + integration
+bun test
 bun run scripts/smoke-hot-switch.ts
-bun run build            # dist/cli.js + dist/daemon-main.js
+bun run build
 ```
-
-Layout:
 
 ```text
-src/           CLI, daemon, router, adapters, usage fetchers
+src/           CLI, daemon, router, adapters, usage, recommend
 tests/         bun test
-extensions/    thin Senpi extension (report + /account)
-scripts/       install, uninstall, xbar, second-account guide
-docs/          compliance, usage design notes
+extensions/    Senpi extension (report + /account)
+scripts/       install, xbar, guides
+docs/          compliance, design, npm publish notes
+dist/          shipped Node build (for npm install without Bun)
 ```
 
----
-
-## Security
-
-- Vault and socket use restrictive file modes
-- Status/usage output must not print raw tokens
-- See [SECURITY.md](SECURITY.md)
+Publish notes: [docs/npm-publish.md](docs/npm-publish.md)
 
 ---
 
-## Compliance
+## Security & compliance
 
-Using multiple subscriptions and auto-failover can conflict with provider Terms  
-(e.g. circumventing rate limits). Read [docs/compliance.md](docs/compliance.md).  
-**Not legal advice.**
+- Vault/socket use restrictive permissions; never log raw tokens  
+- [SECURITY.md](SECURITY.md)  
+- Multi-subscription auto-rotation may conflict with provider Terms — [docs/compliance.md](docs/compliance.md)
 
 ---
 
