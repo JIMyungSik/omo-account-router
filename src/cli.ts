@@ -17,6 +17,7 @@ import { findSenpiInstall } from "./senpi-install.ts";
 import { buildPanelSnapshot, formatPanelText, formatPanelXbar, type StatusPayload } from "./panel.ts";
 import { OarStore } from "./store.ts";
 import { fetchRemoteUsage, fetchRemoteUsageForAccounts } from "./usage/fetch.ts";
+import { formatUsageTable } from "./usage/format.ts";
 import type { AccountRecord, StoredCredential } from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -476,19 +477,11 @@ async function main(argv: string[]) {
         force: refresh || true,
         maxAgeMs: 0,
       });
-      for (const u of rows) {
-        if (!u.ok) {
-          console.log(`${u.provider}/${u.profile}  ERROR  ${u.error ?? "unknown"}  (${u.source})`);
-          continue;
-        }
-        const parts = u.windows.map((w) => {
-          const rem = w.remainingPercent != null ? `${w.remainingPercent}% left` : "n/a";
-          const used = w.usedPercent != null ? `${w.usedPercent}% used` : "";
-          const reset = w.resetsAt ? ` reset ${w.resetsAt}` : "";
-          return `${w.label ?? w.kind}: ${rem}${used ? ` (${used})` : ""}${reset}`;
-        });
-        console.log(`${u.provider}/${u.profile}  ${parts.join("  |  ")}  [${u.source}]`);
-      }
+      // stable sort: provider then profile
+      rows.sort((a, b) =>
+        a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider),
+      );
+      console.log(formatUsageTable(rows));
       return;
     }
     case "doctor": {

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { oarEventsPath } from "./paths.ts";
+import { formatMarkdownTable } from "./table.ts";
 import type { AccountRemoteUsage } from "./usage/types.ts";
 import type { AccountRecord, OarState, ProviderPolicy, ResolveResponse } from "./types.ts";
 
@@ -253,21 +254,21 @@ function remoteCols(r: PanelRow): { session: string; weekly: string; grok: strin
     if (remote && !remote.ok && remote.error) {
       return { session: "err", weekly: "err", grok: "err" };
     }
-    return { session: "—", weekly: "—", grok: "—" };
+    return { session: "-", weekly: "-", grok: "-" };
   }
   const session = remote.windows.find((w) => w.kind === "session");
   const weekly = remote.windows.find((w) => w.kind === "weekly");
   const grok = remote.windows.find((w) => w.label === "grok" || (r.provider === "xai" && (w.kind === "weekly" || w.kind === "period")));
   const fmt = (w?: { remainingPercent: number | null; usedPercent: number | null }) => {
-    if (!w) return "—";
+    if (!w) return "-";
     if (w.remainingPercent != null) return `${w.remainingPercent}%`;
     if (w.usedPercent != null) return `${Math.max(0, 100 - w.usedPercent)}%`;
-    return "—";
+    return "-";
   };
   return {
-    session: r.provider === "openai-codex" ? fmt(session) : "—",
-    weekly: r.provider === "openai-codex" ? fmt(weekly) : "—",
-    grok: r.provider === "xai" ? fmt(grok) : "—",
+    session: r.provider === "openai-codex" ? fmt(session) : "-",
+    weekly: r.provider === "openai-codex" ? fmt(weekly) : "-",
+    grok: r.provider === "xai" ? fmt(grok) : "-",
   };
 }
 
@@ -292,22 +293,57 @@ export function formatPanelText(snap: PanelSnapshot): string {
   );
   lines.push("");
   lines.push(
-    `${pad("PROV", 14)}${pad("PROFILE", 10)}${pad("STATUS", 12)}${pad("MODE", 7)}${pad("5H", 6)}${pad("WK", 6)}${pad("GROK", 6)}${pad("OK", 5)}${pad("RL", 4)}A`,
+    formatMarkdownTable(
+      [
+        { key: "active", header: "" },
+        { key: "provider", header: "PROVIDER" },
+        { key: "profile", header: "PROFILE" },
+        { key: "status", header: "STATUS" },
+        { key: "mode", header: "MODE" },
+        { key: "auto", header: "AUTO" },
+        { key: "session", header: "5H left", align: "right" },
+        { key: "weekly", header: "WK left", align: "right" },
+        { key: "grok", header: "GROK left", align: "right" },
+        { key: "ok", header: "OK", align: "right" },
+        { key: "rl", header: "RL", align: "right" },
+      ],
+      snap.rows.map((r) => {
+        const rc = remoteCols(r);
+        return {
+          active: r.active ? "*" : r.preferred ? "." : "",
+          provider: r.provider,
+          profile: r.profile,
+          status: r.availability,
+          mode: r.mode,
+          auto: r.autoFailover ? "on" : "off",
+          session: rc.session,
+          weekly: rc.weekly,
+          grok: rc.grok,
+          ok: r.usage.success,
+          rl: r.usage.rateLimited,
+        };
+      }),
+    ),
   );
-  lines.push("-".repeat(90));
-  for (const r of snap.rows) {
-    const mark = r.active ? "*" : r.preferred ? "." : " ";
-    const rc = remoteCols(r);
-    lines.push(
-      `${pad(r.provider, 14)}${pad(r.profile, 10)}${pad(r.availability, 12)}${pad(r.mode, 7)}${pad(rc.session, 6)}${pad(rc.weekly, 6)}${pad(rc.grok, 6)}${pad(String(r.usage.success), 5)}${pad(String(r.usage.rateLimited), 4)}${mark}`,
-    );
-  }
   if (snap.leases.length > 0) {
     lines.push("");
     lines.push("leases:");
-    for (const l of snap.leases) {
-      lines.push(`  ${l.provider}/${l.profile}  holder=${l.holder}  since=${l.acquiredAt}`);
-    }
+    lines.push(
+      formatMarkdownTable(
+        [
+          { key: "provider", header: "PROVIDER" },
+          { key: "profile", header: "PROFILE" },
+          { key: "holder", header: "HOLDER" },
+          { key: "since", header: "SINCE" },
+        ],
+        snap.leases.map((l) => ({
+          provider: l.provider,
+          profile: l.profile,
+          holder: l.holder,
+          since: l.acquiredAt,
+        })),
+      ),
+    );
   }
   lines.push("");
   lines.push("auth paths:");
