@@ -46,36 +46,42 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 ## Install
 
-### A) npm (recommended — no clone)
+### A) npm — no git clone (recommended)
+
+Requires **Node.js 22+**.
 
 ```bash
-# from GitHub (works today, no npm login required)
-npm install -g github:JIMyungSik/omo-account-router
+# GitHub archive (no npm account needed) — verified
+npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz
 
-# after the package is published to the npm registry:
+# After the package is published to the npm registry:
 # npm install -g omo-account-router
 ```
 
-Requires **Node.js 22+**. Then:
+Check:
 
 ```bash
 oar doctor
-oar daemon start          # or use scripts via: npx --yes ... 
-# optional macOS always-on daemon:
-# clone once OR run the install script from the global package path
+oar daemon start          # if daemon is not already running
+oar panel --refresh
 ```
 
-Find the global package path and optional LaunchAgent:
+Optional macOS always-on daemon + extension link (uses global package files):
 
 ```bash
-npm root -g
-# e.g. $(npm root -g)/omo-account-router
 bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
 ```
 
-`install.sh --skip-build` links `~/.local/bin/oar`, extension, and LaunchAgent using the already-built `dist/`.
+Uninstall:
 
-### B) Clone + install script
+```bash
+npm uninstall -g omo-account-router
+```
+
+> Note: `npm install -g github:JIMyungSik/omo-account-router` (git protocol) can break on some npm versions.
+> Prefer the **archive `.tar.gz` URL** above, or a registry publish.
+
+### B) Clone + install script (needs Bun)
 
 ```bash
 git clone https://github.com/JIMyungSik/omo-account-router.git
