@@ -1,0 +1,23 @@
+{
+  "name": "omo-account-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Senpi-native OMO Account Router (OAR) — multi-account hot switching without OMO restart",
+  "bin": {
+    "oar": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "bun build ./src/cli.ts --outdir dist --target node --format esm && bun build ./src/daemon-main.ts --outdir dist --target node --format esm --outfile dist/daemon-main.js",
+    "test": "bun test",
+    "oar": "bun run src/cli.ts",
+    "daemon": "bun run src/daemon-main.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.2"
+  }
+}
