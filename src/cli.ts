@@ -138,11 +138,20 @@ async function daemonStart(): Promise<void> {
     }
   }
 
-  const daemonEntry = existsSync(join(__dirname, "daemon-main.ts"))
-    ? join(__dirname, "daemon-main.ts")
-    : join(__dirname, "daemon-main.js");
+  const daemonTs = join(__dirname, "daemon-main.ts");
+  const daemonJs = join(__dirname, "daemon-main.js");
+  const daemonEntry = existsSync(daemonTs) ? daemonTs : daemonJs;
 
-  const child = spawn("bun", [daemonEntry], {
+  // Prefer current runtime (node or bun). Fall back to bun on PATH for .ts dev entry.
+  const runtimeBin =
+    typeof process.execPath === "string" && process.execPath.length > 0
+      ? process.execPath
+      : "node";
+  const useBunForTs = daemonEntry.endsWith(".ts") && !runtimeBin.includes("bun");
+  const spawnBin = useBunForTs ? "bun" : runtimeBin;
+  const spawnArgs = useBunForTs ? [daemonEntry] : [daemonEntry];
+
+  const child = spawn(spawnBin, spawnArgs, {
     detached: true,
     stdio: "ignore",
     env: { ...process.env, OAR_HOME: root, OAR_SOCK: sock },

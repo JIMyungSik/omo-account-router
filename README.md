@@ -44,59 +44,44 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 ---
 
-## Install (5 minutes)
+## Install
 
-### 1) Clone
+### A) npm (recommended — no clone)
+
+```bash
+# from GitHub (works today, no npm login required)
+npm install -g github:JIMyungSik/omo-account-router
+
+# after the package is published to the npm registry:
+# npm install -g omo-account-router
+```
+
+Requires **Node.js 22+**. Then:
+
+```bash
+oar doctor
+oar daemon start          # or use scripts via: npx --yes ... 
+# optional macOS always-on daemon:
+# clone once OR run the install script from the global package path
+```
+
+Find the global package path and optional LaunchAgent:
+
+```bash
+npm root -g
+# e.g. $(npm root -g)/omo-account-router
+bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
+```
+
+`install.sh --skip-build` links `~/.local/bin/oar`, extension, and LaunchAgent using the already-built `dist/`.
+
+### B) Clone + install script
 
 ```bash
 git clone https://github.com/JIMyungSik/omo-account-router.git
 cd omo-account-router
-```
-
-### 2) Install + LaunchAgent (macOS)
-
-```bash
 bash scripts/install.sh --import-auth
 ```
-
-This will:
-
-1. `bun install` + `bun run build`
-2. Symlink `~/.local/bin/oar`
-3. Link Senpi extension `~/.omo/agent/extensions/oar.js` (if `~/.omo/agent` exists)
-4. Install LaunchAgent `com.victor.oar-daemon` (rename label in plist if you fork)
-5. Optionally import every provider in `~/.omo/agent/auth.json` as profile `main`
-
-Ensure `~/.local/bin` is on your `PATH`:
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-### 3) Verify
-
-```bash
-oar doctor
-oar status
-```
-
-### Uninstall
-
-```bash
-bash scripts/uninstall.sh
-```
-
-### Dev without install
-
-```bash
-bun install
-bun test
-bun run src/cli.ts doctor
-bun run src/cli.ts daemon start
-```
-
----
 
 ## Quick start (everyday)
 

@@ -44,59 +44,38 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 ---
 
-## 설치 (5분)
+## 설치
 
-### 1) 클론
+### A) npm (권장 — clone 불필요)
+
+```bash
+# GitHub에서 바로 전역 설치 (npm 계정 로그인 불필요)
+npm install -g github:JIMyungSik/omo-account-router
+
+# npm 레지스트리에 배포된 뒤:
+# npm install -g omo-account-router
+```
+
+**Node.js 22+** 필요. 설치 후:
+
+```bash
+oar doctor
+oar daemon start
+```
+
+macOS에서 재부팅 후에도 daemon을 쓰려면 (선택):
+
+```bash
+bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
+```
+
+### B) clone + install 스크립트
 
 ```bash
 git clone https://github.com/JIMyungSik/omo-account-router.git
 cd omo-account-router
-```
-
-### 2) 설치 + macOS LaunchAgent
-
-```bash
 bash scripts/install.sh --import-auth
 ```
-
-하는 일:
-
-1. `bun install` + `bun run build`
-2. `~/.local/bin/oar` 심볼릭 링크
-3. Senpi 확장 `~/.omo/agent/extensions/oar.js` 연결 (`~/.omo/agent` 있을 때)
-4. LaunchAgent `com.victor.oar-daemon` 등록 (포크 시 plist 라벨 변경 권장)
-5. 선택: `~/.omo/agent/auth.json`의 모든 provider를 `main` 프로필로 import
-
-PATH:
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-### 3) 확인
-
-```bash
-oar doctor
-oar status
-```
-
-### 제거
-
-```bash
-bash scripts/uninstall.sh
-```
-
-### 설치 없이 개발 실행
-
-```bash
-bun install
-bun test
-bun run src/cli.ts doctor
-bun run src/cli.ts daemon start
-```
-
----
 
 ## 매일 쓰는 방법
 

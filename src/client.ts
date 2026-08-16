@@ -32,7 +32,7 @@ export class OarClient {
       } catch (error) {
         lastError = error;
         if (attempt === this.retries || !isRetryable(error)) throw error;
-        await Bun.sleep(50 * 2 ** attempt);
+        await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
       }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));

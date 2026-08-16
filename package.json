@@ -1,20 +1,21 @@
 {
   "name": "omo-account-router",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
   "type": "module",
   "description": "OAR \u2014 local multi-account hot-switch for OMO/Senpi agents (vault, panel, usage, optional failover)",
   "bin": {
-    "oar": "./dist/cli.js"
+    "oar": "bin/oar.js"
   },
   "scripts": {
-    "build": "bun build ./src/cli.ts --outdir dist --target node --format esm && bun build ./src/daemon-main.ts --outdir dist --target node --format esm --outfile dist/daemon-main.js",
+    "build": "bun build ./src/cli.ts --outdir dist --target node --format esm --packages=bundle && bun build ./src/daemon-main.ts --outdir dist --target node --format esm --outfile dist/daemon-main.js --packages=bundle && node scripts/fix-shebang.mjs",
     "test": "bun test",
     "oar": "bun run src/cli.ts",
     "daemon": "bun run src/daemon-main.ts",
     "install:oar": "bash scripts/install.sh",
     "uninstall:oar": "bash scripts/uninstall.sh",
-    "smoke": "bun run scripts/smoke-hot-switch.ts"
+    "smoke": "bun run scripts/smoke-hot-switch.ts",
+    "prepack": "npm run build",
+    "prepare": "node -e \"const fs=require('fs'); if(!fs.existsSync('dist/cli.js')){console.error('dist/ missing; run npm run build (needs bun)'); process.exit(1)}\""
   },
   "engines": {
     "node": ">=22"
@@ -41,5 +42,17 @@
     "multi-account",
     "grok",
     "codex"
+  ],
+  "files": [
+    "dist",
+    "bin",
+    "extensions",
+    "scripts",
+    "docs",
+    "README.md",
+    "README.ko.md",
+    "LICENSE",
+    "SECURITY.md",
+    "package.json"
   ]
 }
