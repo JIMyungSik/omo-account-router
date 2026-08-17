@@ -630,15 +630,22 @@ function resolveActiveAuthPaths(env = process.env, home = homedir2()) {
     return existing.length > 0 ? existing : [known[0]];
   }
   const omoAgent = join2(home, ".omo", "agent", "auth.json");
+  const remoteAgent = join2(home, ".senpi", "remote-agent", "auth.json");
+  const targets = [];
   if (existsSync2(omoAgent) || existsSync2(join2(home, ".omo")))
-    return [omoAgent];
+    targets.push(omoAgent);
+  if (existsSync2(join2(home, ".senpi", "remote-agent")))
+    targets.push(remoteAgent);
+  if (targets.length > 0)
+    return unique(targets);
   return [join2(home, ".senpi", "agent", "auth.json")];
 }
 function knownAuthJsonCandidates(home) {
   return unique([
     join2(home, ".omo", "agent", "auth.json"),
     join2(home, ".omo", "auth.json"),
-    join2(home, ".senpi", "agent", "auth.json")
+    join2(home, ".senpi", "agent", "auth.json"),
+    join2(home, ".senpi", "remote-agent", "auth.json")
   ]);
 }
 
@@ -1589,15 +1596,22 @@ function resolveActiveAuthPaths2(env = process.env, home = homedir3()) {
     return existing.length > 0 ? existing : [known[0]];
   }
   const omoAgent = join3(home, ".omo", "agent", "auth.json");
+  const remoteAgent = join3(home, ".senpi", "remote-agent", "auth.json");
+  const targets = [];
   if (existsSync6(omoAgent) || existsSync6(join3(home, ".omo")))
-    return [omoAgent];
+    targets.push(omoAgent);
+  if (existsSync6(join3(home, ".senpi", "remote-agent")))
+    targets.push(remoteAgent);
+  if (targets.length > 0)
+    return unique2(targets);
   return [join3(home, ".senpi", "agent", "auth.json")];
 }
 function knownAuthJsonCandidates2(home) {
   return unique2([
     join3(home, ".omo", "agent", "auth.json"),
     join3(home, ".omo", "auth.json"),
-    join3(home, ".senpi", "agent", "auth.json")
+    join3(home, ".senpi", "agent", "auth.json"),
+    join3(home, ".senpi", "remote-agent", "auth.json")
   ]);
 }
 

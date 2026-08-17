@@ -193,15 +193,22 @@ function resolveActiveAuthPaths(env = process.env, home = homedir2()) {
     return existing.length > 0 ? existing : [known[0]];
   }
   const omoAgent = join2(home, ".omo", "agent", "auth.json");
+  const remoteAgent = join2(home, ".senpi", "remote-agent", "auth.json");
+  const targets = [];
   if (existsSync(omoAgent) || existsSync(join2(home, ".omo")))
-    return [omoAgent];
+    targets.push(omoAgent);
+  if (existsSync(join2(home, ".senpi", "remote-agent")))
+    targets.push(remoteAgent);
+  if (targets.length > 0)
+    return unique(targets);
   return [join2(home, ".senpi", "agent", "auth.json")];
 }
 function knownAuthJsonCandidates(home) {
   return unique([
     join2(home, ".omo", "agent", "auth.json"),
     join2(home, ".omo", "auth.json"),
-    join2(home, ".senpi", "agent", "auth.json")
+    join2(home, ".senpi", "agent", "auth.json"),
+    join2(home, ".senpi", "remote-agent", "auth.json")
   ]);
 }
 function discoverAuthJsonFiles(env = process.env, home = homedir2()) {

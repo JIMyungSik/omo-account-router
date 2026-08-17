@@ -56,7 +56,13 @@ export function resolveActiveAuthPaths(env: NodeJS.ProcessEnv = process.env, hom
   }
 
   const omoAgent = join(home, ".omo", "agent", "auth.json");
-  if (existsSync(omoAgent) || existsSync(join(home, ".omo"))) return [omoAgent];
+  const remoteAgent = join(home, ".senpi", "remote-agent", "auth.json");
+  const targets: string[] = [];
+  if (existsSync(omoAgent) || existsSync(join(home, ".omo"))) targets.push(omoAgent);
+  // When OmO Remote runtime exists, dual-write vault activations there too so the
+  // phone path does not need a forbidden cp of native auth.json.
+  if (existsSync(join(home, ".senpi", "remote-agent"))) targets.push(remoteAgent);
+  if (targets.length > 0) return unique(targets);
   return [join(home, ".senpi", "agent", "auth.json")];
 }
 
@@ -65,6 +71,8 @@ function knownAuthJsonCandidates(home: string): string[] {
     join(home, ".omo", "agent", "auth.json"),
     join(home, ".omo", "auth.json"),
     join(home, ".senpi", "agent", "auth.json"),
+    // OmO Remote dedicated app-server runtime (iPhone track)
+    join(home, ".senpi", "remote-agent", "auth.json"),
   ]);
 }
 
