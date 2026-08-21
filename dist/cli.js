@@ -264,8 +264,11 @@ function findSenpiInstall() {
 import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
 
 // src/table.ts
+function stripAnsi(s) {
+  return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
 function cellWidth(s) {
-  return [...s].length;
+  return [...stripAnsi(s)].length;
 }
 function padCell(s, width, align) {
   const w = cellWidth(s);
@@ -285,7 +288,7 @@ function formatMarkdownTable(columns, rows) {
     return String(v);
   }));
   const widths = columns.map((c, i) => {
-    let w = Math.max(c.minWidth ?? 0, cellWidth(c.header));
+    let w = Math.max(3, c.minWidth ?? 0, cellWidth(c.header));
     for (const r of data)
       w = Math.max(w, cellWidth(r[i] ?? ""));
     return w;
@@ -589,6 +592,174 @@ function shortProv(p) {
 }
 function shellQuote(s) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+// src/status-format.ts
+var PROBLEMATIC_AVAIL = new Set([
+  "QUOTA_EXHAUSTED",
+  "AUTH_EXPIRED",
+  "AUTH_REVOKED",
+  "RATE_LIMITED"
+]);
+var ANSI = {
+  reset: "\x1B[0m",
+  dim: "\x1B[2m",
+  red: "\x1B[31m",
+  green: "\x1B[32m",
+  yellow: "\x1B[33m"
+};
+function isProblematicAccount(account) {
+  if (PROBLEMATIC_AVAIL.has(account.availability))
+    return true;
+  return account.auth === "expired" || account.auth === "revoked";
+}
+function shortUntil(iso) {
+  if (!iso)
+    return;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t))
+    return iso;
+  const d = new Date(t);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${mm}-${dd} ${hh}:${mi}`;
+}
+function buildNote(account) {
+  const until = shortUntil(account.until);
+  const reason = account.reason?.trim() || undefined;
+  if (reason && until)
+    return `${reason} · until ${until}`;
+  if (reason)
+    return reason;
+  if (until)
+    return `until ${until}`;
+  return "";
+}
+function buildStatusView(data) {
+  const activeByProvider = new Map(data.resolvePreview.map((r) => [r.provider, r.profile]));
+  const rows = data.accounts.map((account) => {
+    const pol = data.state.providers[account.provider];
+    const active = activeByProvider.get(account.provider) === account.profile;
+    return {
+      active,
+      provider: account.provider,
+      profile: account.profile,
+      auth: account.auth,
+      availability: account.availability,
+      mode: pol?.mode ?? "manual",
+      autoFailover: Boolean(pol?.autoFailover),
+      preferred: pol?.preferred === account.profile,
+      until: account.until ?? null,
+      reason: account.reason,
+      note: buildNote(account)
+    };
+  });
+  rows.sort((a, b) => {
+    if (a.provider !== b.provider)
+      return a.provider.localeCompare(b.provider);
+    if (a.active !== b.active)
+      return a.active ? -1 : 1;
+    return a.profile.localeCompare(b.profile);
+  });
+  return {
+    summary: {
+      accounts: rows.length,
+      active: rows.filter((r) => r.active).length,
+      problematic: rows.filter((r) => isProblematicAccount(r)).length
+    },
+    rows,
+    authPaths: data.authPaths ?? []
+  };
+}
+function statusViewToJson(view) {
+  return {
+    summary: view.summary,
+    rows: view.rows.map((r) => ({
+      active: r.active,
+      provider: r.provider,
+      profile: r.profile,
+      auth: r.auth,
+      status: r.availability,
+      mode: r.mode,
+      auto: r.autoFailover,
+      preferred: r.preferred,
+      note: r.note,
+      until: r.until ?? null,
+      reason: r.reason ?? null
+    })),
+    authPaths: view.authPaths
+  };
+}
+function paint(enabled, code, text) {
+  if (!enabled || text === "")
+    return text;
+  return `${code}${text}${ANSI.reset}`;
+}
+function colorAuth(enabled, auth) {
+  if (auth === "valid")
+    return paint(enabled, ANSI.green, auth);
+  if (auth === "expired" || auth === "revoked")
+    return paint(enabled, ANSI.red, auth);
+  return paint(enabled, ANSI.dim, auth);
+}
+function colorStatus(enabled, availability) {
+  if (PROBLEMATIC_AVAIL.has(availability))
+    return paint(enabled, ANSI.red, availability);
+  if (availability === "AVAILABLE" || availability === "ACTIVE") {
+    return paint(enabled, ANSI.green, availability);
+  }
+  if (availability === "COOLDOWN" || availability === "REQUIRES_LOGIN") {
+    return paint(enabled, ANSI.yellow, availability);
+  }
+  return availability;
+}
+function wantStatusColor(env = process.env, stdout = process.stdout) {
+  return Boolean(stdout.isTTY) && !env.NO_COLOR;
+}
+function formatStatusText(view, opts) {
+  const color = opts?.color ?? false;
+  const lines = [];
+  const { accounts, active, problematic } = view.summary;
+  lines.push(`OAR status  ·  accounts ${accounts}  active ${active}  problematic ${problematic}`);
+  lines.push("");
+  lines.push(formatMarkdownTable([
+    { key: "active", header: "" },
+    { key: "provider", header: "PROVIDER" },
+    { key: "profile", header: "PROFILE" },
+    { key: "auth", header: "AUTH" },
+    { key: "status", header: "STATUS" },
+    { key: "mode", header: "MODE" },
+    { key: "auto", header: "AUTO" },
+    { key: "note", header: "NOTE" }
+  ], view.rows.map((r) => ({
+    active: r.active ? "*" : "",
+    provider: r.provider,
+    profile: r.profile,
+    auth: colorAuth(color, r.auth),
+    status: colorStatus(color, r.availability),
+    mode: r.mode,
+    auto: r.autoFailover ? "on" : "off",
+    note: r.note
+  }))));
+  lines.push("");
+  lines.push("Legend:");
+  lines.push("  AUTH    Vault/import health (valid | expired | revoked | unknown).");
+  lines.push("  STATUS  Routing eligibility (AVAILABLE, QUOTA_EXHAUSTED, RATE_LIMITED, …).");
+  lines.push("  ACTIVE  * = live auth slot for that provider (target of oar use).");
+  lines.push("");
+  lines.push("Next: oar panel --refresh | oar usage | oar use <provider> <profile>");
+  lines.push("");
+  lines.push("auth paths (active slot writes):");
+  if (view.authPaths.length === 0) {
+    lines.push("  (none)");
+  } else {
+    for (const p of view.authPaths)
+      lines.push(`  ${p}`);
+  }
+  return lines.join(`
+`);
 }
 
 // src/store.ts
@@ -1534,7 +1705,7 @@ STATUS TABLE (oar / oar status)
   AUTH     Local/vault metadata from import or last check (valid|expired|revoked|unknown).
            Can stay "valid" after the live access token expires until test/usage updates it.
   STATUS   Routing eligibility in the daemon (AVAILABLE, ACTIVE, QUOTA_EXHAUSTED, \u2026).
-  ACTIVE   \u2605 marks the profile selected for that provider (target of the live auth slot).
+  ACTIVE   * marks the profile selected for that provider (target of the live auth slot).
   MODE     Provider policy: manual pick or auto failover.
 
   Separate from the status table:
@@ -1547,8 +1718,10 @@ COMMANDS
       Quick status snapshot when the daemon is up; same table as \`oar status\`.
       On daemon failure, prints this help plus a start hint.
 
-  oar status
-      Full account table: provider, profile, AUTH, STATUS, MODE, ACTIVE (\u2605).
+  oar status [--json]
+      Markdown table: * PROVIDER PROFILE AUTH STATUS MODE AUTO NOTE.
+      Header counts accounts / active / problematic. No remote usage fetch.
+      --json  Structured rows + summary (exit 0).
 
   oar accounts [provider]
       JSON list of vault accounts; optional filter by provider id.
@@ -1706,19 +1879,13 @@ async function withClient(fn) {
 async function req(request) {
   return withClient((c) => c.request(request));
 }
-function printStatus(data) {
-  const active = new Map(data.resolvePreview.map((r) => [`${r.provider}`, r.profile]));
-  console.log("PROVIDER   PROFILE            AUTH       STATUS            MODE     ACTIVE");
-  for (const a of data.accounts) {
-    const pol = data.state.providers[a.provider];
-    const mode = pol?.mode ?? "manual";
-    const star = active.get(a.provider) === a.profile ? "\u2605" : "";
-    console.log(`${a.provider.padEnd(10)} ${a.profile.padEnd(18)} ${a.auth.padEnd(10)} ${a.availability.padEnd(16)} ${mode.padEnd(8)} ${star}`);
+function printStatus(data, opts) {
+  const view = buildStatusView(data);
+  if (opts?.json) {
+    console.log(JSON.stringify(statusViewToJson(view), null, 2));
+    return;
   }
-  console.log("");
-  console.log("auth paths (active slot writes):");
-  for (const p of data.authPaths)
-    console.log(`  ${p}`);
+  console.log(formatStatusText(view, { color: wantStatusColor() }));
 }
 async function daemonStart() {
   const root = process.env.OAR_HOME ?? defaultOarRoot3();
@@ -1809,7 +1976,6 @@ async function main(argv) {
         throw new Error(res.error);
       const data = res.data;
       printStatus(data);
-      console.log("Commands: oar panel --refresh | oar usage | oar use <provider> <profile> | oar --help");
     } catch (error) {
       console.log(usage());
       console.error(`
@@ -1824,7 +1990,7 @@ async function main(argv) {
       const res = await req({ protocol: 1, action: "status" });
       if (!res.ok)
         throw new Error(res.error);
-      printStatus(res.data);
+      printStatus(res.data, { json: rest.includes("--json") });
       return;
     }
     case "accounts": {

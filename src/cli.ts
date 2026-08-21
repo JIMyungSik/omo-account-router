@@ -15,6 +15,7 @@ import {
 import type { OarRequest } from "./protocol.ts";
 import { findSenpiInstall } from "./senpi-install.ts";
 import { buildPanelSnapshot, formatPanelText, formatPanelXbar, type StatusPayload } from "./panel.ts";
+import { buildStatusView, formatStatusText, statusViewToJson, wantStatusColor } from "./status-format.ts";
 import { OarStore } from "./store.ts";
 import { fetchRemoteUsage, fetchRemoteUsageForAccounts } from "./usage/fetch.ts";
 import { formatUsageTable } from "./usage/format.ts";
@@ -37,7 +38,7 @@ STATUS TABLE (oar / oar status)
   AUTH     Local/vault metadata from import or last check (valid|expired|revoked|unknown).
            Can stay "valid" after the live access token expires until test/usage updates it.
   STATUS   Routing eligibility in the daemon (AVAILABLE, ACTIVE, QUOTA_EXHAUSTED, …).
-  ACTIVE   ★ marks the profile selected for that provider (target of the live auth slot).
+  ACTIVE   * marks the profile selected for that provider (target of the live auth slot).
   MODE     Provider policy: manual pick or auto failover.
 
   Separate from the status table:
@@ -50,8 +51,10 @@ COMMANDS
       Quick status snapshot when the daemon is up; same table as \`oar status\`.
       On daemon failure, prints this help plus a start hint.
 
-  oar status
-      Full account table: provider, profile, AUTH, STATUS, MODE, ACTIVE (★).
+  oar status [--json]
+      Markdown table: * PROVIDER PROFILE AUTH STATUS MODE AUTO NOTE.
+      Header counts accounts / active / problematic. No remote usage fetch.
+      --json  Structured rows + summary (exit 0).
 
   oar accounts [provider]
       JSON list of vault accounts; optional filter by provider id.
@@ -213,25 +216,21 @@ async function req(request: OarRequest) {
   return withClient((c) => c.request(request));
 }
 
-function printStatus(data: {
-  accounts: AccountRecord[];
-  resolvePreview: Array<{ provider: string; profile: string; status: string }>;
-  authPaths: string[];
-  state: { providers: Record<string, { mode: string; preferred?: string; autoFailover: boolean }> };
-}) {
-  const active = new Map(data.resolvePreview.map((r) => [`${r.provider}`, r.profile]));
-  console.log("PROVIDER   PROFILE            AUTH       STATUS            MODE     ACTIVE");
-  for (const a of data.accounts) {
-    const pol = data.state.providers[a.provider];
-    const mode = pol?.mode ?? "manual";
-    const star = active.get(a.provider) === a.profile ? "★" : "";
-    console.log(
-      `${a.provider.padEnd(10)} ${a.profile.padEnd(18)} ${a.auth.padEnd(10)} ${a.availability.padEnd(16)} ${mode.padEnd(8)} ${star}`,
-    );
+function printStatus(
+  data: {
+    accounts: AccountRecord[];
+    resolvePreview: Array<{ provider: string; profile: string; status: string }>;
+    authPaths: string[];
+    state: { providers: Record<string, { mode: string; preferred?: string; autoFailover: boolean }> };
+  },
+  opts?: { json?: boolean },
+) {
+  const view = buildStatusView(data);
+  if (opts?.json) {
+    console.log(JSON.stringify(statusViewToJson(view), null, 2));
+    return;
   }
-  console.log("");
-  console.log("auth paths (active slot writes):");
-  for (const p of data.authPaths) console.log(`  ${p}`);
+  console.log(formatStatusText(view, { color: wantStatusColor() }));
 }
 
 async function daemonStart(): Promise<void> {
@@ -344,7 +343,6 @@ async function main(argv: string[]) {
       if (!res.ok) throw new Error(res.error);
       const data = res.data as Parameters<typeof printStatus>[0];
       printStatus(data);
-      console.log("Commands: oar panel --refresh | oar usage | oar use <provider> <profile> | oar --help");
     } catch (error) {
       console.log(usage());
       console.error(`\n(daemon tip: ${error instanceof Error ? error.message : error})`);
@@ -358,7 +356,7 @@ async function main(argv: string[]) {
     case "status": {
       const res = await req({ protocol: 1, action: "status" });
       if (!res.ok) throw new Error(res.error);
-      printStatus(res.data as Parameters<typeof printStatus>[0]);
+      printStatus(res.data as Parameters<typeof printStatus>[0], { json: rest.includes("--json") });
       return;
     }
     case "accounts": {

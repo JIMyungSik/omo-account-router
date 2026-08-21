@@ -9,9 +9,13 @@ export type TableColumn = {
   minWidth?: number;
 };
 
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 function cellWidth(s: string): number {
   // Basic width: treat each code unit as 1 (good enough for ASCII % tables).
-  return [...s].length;
+  return [...stripAnsi(s)].length;
 }
 
 function padCell(s: string, width: number, align: TableAlign): string {
@@ -43,7 +47,8 @@ export function formatMarkdownTable(
   );
 
   const widths = columns.map((c, i) => {
-    let w = Math.max(c.minWidth ?? 0, cellWidth(c.header));
+    // GFM separator is at least 3 dashes; keep header/body the same width.
+    let w = Math.max(3, c.minWidth ?? 0, cellWidth(c.header));
     for (const r of data) w = Math.max(w, cellWidth(r[i] ?? ""));
     return w;
   });

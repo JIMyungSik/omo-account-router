@@ -20,6 +20,15 @@ describe("tables", () => {
     expect(out.split("\n").filter(Boolean).length).toBeGreaterThanOrEqual(4);
   });
 
+  test("formatMarkdownTable ignores ANSI when measuring width", () => {
+    const out = formatMarkdownTable(
+      [{ key: "a", header: "A" }],
+      [{ a: "\x1b[31mhi\x1b[0m" }],
+    );
+    expect(out).toContain("\x1b[31mhi\x1b[0m");
+    expect(out.split("\n")[1]).toMatch(/\| ---+ \|/);
+  });
+
   test("formatUsageTable renders header and remaining columns", () => {
     const out = formatUsageTable([
       {
