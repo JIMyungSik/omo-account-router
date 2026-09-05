@@ -33,3 +33,27 @@ test("classifyFailure > maps xAI 403 out of credits to QUOTA_EXHAUSTED", () => {
     }),
   ).toBe("QUOTA_EXHAUSTED");
 });
+
+test("classifyFailure > header-only invalid_grant is AUTH_REVOKED (no body)", () => {
+  expect(
+    classifyFailure({
+      provider: "xai",
+      status: 400,
+      headers: { "www-authenticate": 'Bearer error="invalid_grant"' },
+    }),
+  ).toBe("AUTH_REVOKED");
+});
+
+test("classifyFailure > header-only invalid_token is AUTH_EXPIRED", () => {
+  expect(
+    classifyFailure({
+      provider: "openai-codex",
+      status: 401,
+      headers: { "www-authenticate": 'Bearer error="invalid_token"' },
+    }),
+  ).toBe("AUTH_EXPIRED");
+});
+
+test("classifyFailure > 400 with empty headers stays BAD_REQUEST", () => {
+  expect(classifyFailure({ provider: "xai", status: 400 })).toBe("BAD_REQUEST");
+});

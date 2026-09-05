@@ -172,7 +172,9 @@ export class AuthSlotActivator {
     try {
       const storage = await createSenpiAuthStorage(authPath);
       if (!storage) return false;
-      await storage.modify(provider, async () => credential);
+      await storage.modify(provider, async (current) => {
+        return mergeProviderSlot(current, credential) as StoredCredential;
+      });
       return true;
     } catch {
       return false;
@@ -189,8 +191,9 @@ export class AuthSlotActivator {
         data = {};
       }
     }
-    // Preserve other providers; replace only the target provider slot.
-    data[provider] = credential;
+    // Preserve other providers; merge target slot so Senpi native
+    // multi-account fields (accounts, extra oauth keys) are not wiped.
+    data[provider] = mergeProviderSlot(data[provider], credential);
     const tmp = `${authPath}.oar.${process.pid}.${Date.now()}.tmp`;
     writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
     renameSync(tmp, authPath);
@@ -200,6 +203,40 @@ export class AuthSlotActivator {
       // ignore
     }
   }
+}
+
+/**
+ * Overlay vault credential onto a live Senpi provider slot.
+ * Same-identity writes keep native extras (`accounts`, unknown oauth keys).
+ * Profile switches drop `accounts` so Codex/cursor-cli-oauth pools do not mix logins.
+ */
+export function mergeProviderSlot(
+  existing: unknown,
+  credential: StoredCredential,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...credential };
+  if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+    return next;
+  }
+  const prev = existing as Record<string, unknown>;
+  const same =
+    (prev.type === "oauth" || prev.type === "api_key") &&
+    credentialsSameSecrets(prev as unknown as StoredCredential, credential);
+
+  for (const [key, value] of Object.entries(prev)) {
+    if (key in next) continue;
+    if (!same && key === "accounts") continue;
+    next[key] = value;
+  }
+  if (
+    credential.type === "oauth" &&
+    !credential.accountId &&
+    same &&
+    typeof prev.accountId === "string"
+  ) {
+    next.accountId = prev.accountId;
+  }
+  return next;
 }
 
 /** Exact credential equality including expires (tests / strict compare). */
@@ -224,6 +261,16 @@ export function credentialsSameIdentity(a: StoredCredential, b: StoredCredential
       a.refresh === b.refresh &&
       (a.accountId ?? undefined) === (b.accountId ?? undefined)
     );
+  }
+  return false;
+}
+
+/** Token/key match only. Ignores accountId so live native extras can be kept. */
+export function credentialsSameSecrets(a: StoredCredential, b: StoredCredential): boolean {
+  if (a.type !== b.type) return false;
+  if (a.type === "api_key" && b.type === "api_key") return a.key === b.key;
+  if (a.type === "oauth" && b.type === "oauth") {
+    return a.access === b.access && a.refresh === b.refresh;
   }
   return false;
 }

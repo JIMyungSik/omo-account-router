@@ -19,14 +19,17 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 | | |
 |--|--|
 | Package | **`oar-cli`** on npm path (command is still **`oar`**) |
-| Version | `0.1.4` |
+| Version | `0.1.7` |
 | License | [MIT](LICENSE) |
 | Runtime | Node.js **22+** (Bun optional for dev) |
-| Tests | `bun test` — 47 pass |
+| Tests | `bun test` |
 | Compliance | [docs/compliance.md](docs/compliance.md) (**not legal advice**) |
 | Repo | https://github.com/JIMyungSik/omo-account-router |
 
 > npm name bare `oar` is taken by an unrelated 2013 package. Install **`oar-cli`**; the binary is **`oar`**.
+
+Verified against **OMO `5.0.0-0.beta.42` / Senpi `2026.9.4-3`**: header-only `after_provider_response` classification, and live `auth.json` writes merge instead of replacing native multi-account fields (`accounts`).
+
 
 ---
 

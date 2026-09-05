@@ -74,10 +74,37 @@ async function request(body, retries = 5) {
   throw last;
 }
 
+function headerText(headers) {
+  if (!headers || typeof headers !== "object") return "";
+  return Object.entries(headers)
+    .flatMap(([key, value]) => {
+      if (value == null) return [];
+      return [key, Array.isArray(value) ? value.join(" ") : String(value)];
+    })
+    .join(" ")
+    .toLowerCase();
+}
+
+function headerValue(headers, name) {
+  if (!headers) return undefined;
+  const needle = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === needle) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Senpi 2026.9.4 after_provider_response is status + headers only (no body).
+ * Scan header haystack so invalid_grant / invalid_token still fail over.
+ */
 function classifyStatus(status, headers, body) {
-  const text = String(body || "").toLowerCase();
+  const text = `${String(body || "")} ${headerText(headers)}`.toLowerCase();
   if (status === 429) return "RATE_LIMITED";
-  if (status === 401) return "AUTH_EXPIRED";
+  if (status === 401) {
+    if (text.includes("invalid_grant") || text.includes("revok")) return "AUTH_REVOKED";
+    return "AUTH_EXPIRED";
+  }
   if (status === 402) return "QUOTA_EXHAUSTED";
   if (
     text.includes("invalid_grant") ||
@@ -98,9 +125,9 @@ function classifyStatus(status, headers, body) {
   }
   if (status >= 500) return "SERVER_ERROR";
   if (status === 400) {
-    const retry = headers && (headers["retry-after"] || headers["Retry-After"]);
+    const retry = headerValue(headers, "retry-after");
     if (retry) return "RATE_LIMITED";
-    if (text.includes("invalid_grant")) return "AUTH_REVOKED";
+    if (text.includes("invalid_grant") || text.includes("invalid_token")) return "AUTH_REVOKED";
     return null;
   }
   return null;

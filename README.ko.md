@@ -19,14 +19,17 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 | | |
 |--|--|
 | 패키지명 | **`oar-cli`** (실행 명령은 **`oar`**) |
-| 버전 | `0.1.4` |
+| 버전 | `0.1.7` |
 | 라이선스 | [MIT](LICENSE) |
 | 런타임 | Node.js **22+** (개발 시 Bun 선택) |
-| 테스트 | `bun test` — 47 pass |
+| 테스트 | `bun test` |
 | 약관 메모 | [docs/compliance.md](docs/compliance.md) (**법률 자문 아님**) |
 | 저장소 | https://github.com/JIMyungSik/omo-account-router |
 
 > npm 이름 `oar` 는 무관한 옛 패키지가 선점 중입니다. **`oar-cli`** 로 설치하고, 명령은 **`oar`** 를 쓰세요.
+
+**OMO `5.0.0-0.beta.42` / Senpi `2026.9.4-3`** 기준: `after_provider_response`는 status+headers만 오므로 헤더에서 `invalid_grant`를 읽고, live `auth.json` 기록은 native `accounts` 필드를 덮어쓰지 않습니다.
+
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "oar-cli",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "module",
   "description": "OAR (oar-cli) \u2014 local multi-account hot-switch for OMO/Senpi. Command: oar",
   "bin": {

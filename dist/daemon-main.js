@@ -10,25 +10,38 @@ import { dirname as dirname4 } from "node:path";
 function norm(s) {
   return (s ?? "").toLowerCase();
 }
+function headerHaystack(headers) {
+  if (!headers)
+    return "";
+  const parts = [];
+  for (const [key, value] of Object.entries(headers)) {
+    if (value == null)
+      continue;
+    parts.push(key, Array.isArray(value) ? value.join(" ") : String(value));
+  }
+  return parts.join(" ").toLowerCase();
+}
 function classifyFailure(input) {
   const body = norm(input.body);
+  const headersText = headerHaystack(input.headers);
+  const text = `${body} ${headersText}`.trim();
   const code = norm(input.code);
   const status = input.status;
-  if (body.includes("invalid_grant") || body.includes("refresh token has been revoked") || body.includes("refresh_token_revoked") || code === "invalid_grant") {
+  if (text.includes("invalid_grant") || text.includes("refresh token has been revoked") || text.includes("refresh_token_revoked") || code === "invalid_grant") {
     return "AUTH_REVOKED";
   }
-  if (status === 401 || body.includes("unauthorized") || body.includes("token expired") || body.includes("auth_expired")) {
-    if (body.includes("revok"))
+  if (status === 401 || text.includes("unauthorized") || text.includes("token expired") || text.includes("auth_expired") || text.includes("invalid_token")) {
+    if (text.includes("revok"))
       return "AUTH_REVOKED";
     return "AUTH_EXPIRED";
   }
-  if (status === 429 || body.includes("rate limit") || body.includes("rate_limit")) {
+  if (status === 429 || text.includes("rate limit") || text.includes("rate_limit")) {
     return "RATE_LIMITED";
   }
-  if (status === 402 || status === 403 || body.includes("quota") || body.includes("insufficient_quota") || body.includes("usage limit") || body.includes("run out of credits") || body.includes("out of credits") || body.includes("need a grok subscription") || body.includes("add credits") || body.includes("supergrok")) {
+  if (status === 402 || status === 403 || text.includes("quota") || text.includes("insufficient_quota") || text.includes("usage limit") || text.includes("run out of credits") || text.includes("out of credits") || text.includes("need a grok subscription") || text.includes("add credits") || text.includes("supergrok")) {
     return "QUOTA_EXHAUSTED";
   }
-  if (status === 404 || body.includes("model_not_found") || body.includes("model not found")) {
+  if (status === 404 || text.includes("model_not_found") || text.includes("model not found")) {
     return "MODEL_NOT_FOUND";
   }
   if (status !== undefined && status >= 500) {
@@ -40,7 +53,7 @@ function classifyFailure(input) {
   if (status === 422) {
     return "INVALID_ARGUMENT";
   }
-  if (body.includes("network") || body.includes("econnreset") || body.includes("fetch failed")) {
+  if (text.includes("network") || text.includes("econnreset") || text.includes("fetch failed")) {
     return "NETWORK_ERROR";
   }
   return "UNKNOWN";
@@ -770,7 +783,9 @@ class AuthSlotActivator {
       const storage = await createSenpiAuthStorage(authPath);
       if (!storage)
         return false;
-      await storage.modify(provider, async () => credential);
+      await storage.modify(provider, async (current) => {
+        return mergeProviderSlot(current, credential);
+      });
       return true;
     } catch {
       return false;
@@ -786,7 +801,7 @@ class AuthSlotActivator {
         data = {};
       }
     }
-    data[provider] = credential;
+    data[provider] = mergeProviderSlot(data[provider], credential);
     const tmp = `${authPath}.oar.${process.pid}.${Date.now()}.tmp`;
     writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 384 });
     renameSync(tmp, authPath);
@@ -794,6 +809,25 @@ class AuthSlotActivator {
       chmodSync(authPath, 384);
     } catch {}
   }
+}
+function mergeProviderSlot(existing, credential) {
+  const next = { ...credential };
+  if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+    return next;
+  }
+  const prev = existing;
+  const same = (prev.type === "oauth" || prev.type === "api_key") && credentialsSameSecrets(prev, credential);
+  for (const [key, value] of Object.entries(prev)) {
+    if (key in next)
+      continue;
+    if (!same && key === "accounts")
+      continue;
+    next[key] = value;
+  }
+  if (credential.type === "oauth" && !credential.accountId && same && typeof prev.accountId === "string") {
+    next.accountId = prev.accountId;
+  }
+  return next;
 }
 function credentialsSameIdentity(a, b) {
   if (a.type !== b.type)
@@ -803,6 +837,16 @@ function credentialsSameIdentity(a, b) {
   }
   if (a.type === "oauth" && b.type === "oauth") {
     return a.access === b.access && a.refresh === b.refresh && (a.accountId ?? undefined) === (b.accountId ?? undefined);
+  }
+  return false;
+}
+function credentialsSameSecrets(a, b) {
+  if (a.type !== b.type)
+    return false;
+  if (a.type === "api_key" && b.type === "api_key")
+    return a.key === b.key;
+  if (a.type === "oauth" && b.type === "oauth") {
+    return a.access === b.access && a.refresh === b.refresh;
   }
   return false;
 }
