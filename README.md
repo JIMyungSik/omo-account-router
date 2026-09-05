@@ -126,6 +126,76 @@ oar use xai main
 
 Full guide: `oar guide second-account` · [scripts/second-account.md](scripts/second-account.md)
 
+## Attach Argo and Buzz
+
+OAR is not forked. One vault; `oar use` dual-writes the Senpi slot **and** existing Argo/Codex files. Design: [docs/sinks.md](docs/sinks.md)
+
+Prerequisites:
+
+1. `oar daemon start` (or LaunchAgent — `oar doctor`)
+2. Profile already in the vault (`oar import-auth` / `oar status`)
+3. **Log into the target app once yourself.** OAR never creates Argo/Codex installs.
+
+### Argo (Grok / xAI)
+
+Argo Grok does not read `~/.omo/agent/auth.json`. It stores:
+
+`~/Library/Application Support/com.beyondworks.argo/workspaces/.account-secrets-local.json`  
+plus per-workspace `…/workspaces/<id>/.secrets.json`
+
+```json
+"runners": {
+  "grok": { "type": "oauth", "value": "{\"access_token\",\"refresh_token\",\"expires_at\"}" },
+  "codex": { "type": "host", "value": "auto" }
+}
+```
+
+```bash
+oar import-auth xai main
+# second account: oar guide second-account, then import as `sub`
+
+oar status
+oar use xai sub
+
+# Restart Argo if it cached secrets at launch
+```
+
+Disable: `OAR_ARGO_SINK=0` or `OAR_SINKS=0`, then restart the daemon.
+
+Argo **Codex** is `type: host` — it uses host Codex (`~/.codex`), same as Buzz Codex below.
+
+### Buzz (Codex only)
+
+Buzz Codex agents here use `runtime: codex` / `codex-acp` with **no** `CODEX_HOME`. They inherit **`~/.codex/auth.json`**.
+
+Buzz **Grok** is `runtime: cursor` (Cursor pool + `CURSOR_API_KEY`). That is not the OAR xAI slot.
+
+```bash
+oar import-auth openai-codex main
+oar use openai-codex sub
+# new Buzz Codex turn; restart Buzz if it does not pick up
+```
+
+If Buzz sets a private `CODEX_HOME`:
+
+```bash
+export CODEX_HOME=/path/to/that/home
+# or OAR_CODEX_HOME
+oar daemon stop; oar daemon start
+oar use openai-codex sub
+```
+
+| Env | Effect |
+|------|--------|
+| `OAR_SINKS=0` | Disable Argo + Codex sinks |
+| `OAR_ARGO_SINK=0` | Argo off |
+| `OAR_CODEX_SINK=0` | Codex home off |
+| `OAR_ARGO_SECRETS_PATH` | Single Argo secrets JSON |
+| `OAR_CODEX_AUTH_PATH` | Explicit Codex `auth.json` |
+| `CODEX_HOME` / `OAR_CODEX_HOME` | Parent of `auth.json` |
+
+Sink failures do not roll back the OMO slot. Missing files are skipped, not created.
+
 ---
 
 ## Command reference
@@ -149,7 +219,7 @@ Full guide: `oar guide second-account` · [scripts/second-account.md](scripts/se
 | `oar install` | Runs `scripts/install.sh` |
 | `oar guide second-account` | Second-account howto |
 
-Environment: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`
+Environment: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`, `OAR_SINKS`, `OAR_ARGO_SINK`, `OAR_CODEX_SINK`, `OAR_ARGO_SECRETS_PATH`, `OAR_CODEX_HOME`, `OAR_CODEX_AUTH_PATH`
 
 ---
 
@@ -162,8 +232,8 @@ OAR is deepest on **OMO / Senpi**. Other tools vary.
 |------|------|----------|
 | First-class | OMO, Senpi | Hot-switch, extension, usage, recommend |
 | Experimental | pi, omp, gjc, OpenCode* | `OAR_AUTH_PATH` / `OAR_ACTIVATE_ALL` if they use `auth.json` |
-| Partial | Codex CLI, Claude Code | Usage/vault or future adapter; different home dirs |
-| Separate | Cursor, Copilot, Orca, Gemini CLI, Aider, Cline… | Native account UI; OAR optional for monitoring only |
+| Partial | Codex CLI, Argo Grok, Buzz Codex | `oar use` sinks — [docs/sinks.md](docs/sinks.md) |
+| Separate | Cursor, Copilot, Orca, Buzz Grok, Gemini CLI, Aider, Cline… | Native UI; Buzz Grok is the Cursor pool |
 
 \*if configured for shared Senpi-style auth
 

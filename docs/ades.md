@@ -35,6 +35,8 @@ OAR vault  →  activates one profile into the ADE’s auth file/slot
 | **Gemini CLI** | Rising (Google) | **No / TBD** | Separate Google auth |
 | **Aider** | Established OSS | **No / TBD** | Env API keys / own config |
 | **Orca** | Niche desktop multi-agent | **No (own multi-account)** | Orca keeps per-profile homes under Application Support — not `~/.omo/agent` |
+| **Argo** | Local multi-agent | **Sink (`xai`→`runners.grok`)** | See `docs/sinks.md`. `oar use xai` dual-writes Argo secrets |
+| **Buzz** | Block desktop | **Sink (Codex home only)** | Buzz Codex uses `~/.codex/auth.json`. Buzz Grok is Cursor pool |
 | **Cline / Continue / Windsurf** | Popular IDE extensions | **No** | Each has its own secret store |
 
 **Popularity sources (indicative, not a single “market share” number):**

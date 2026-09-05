@@ -11,6 +11,7 @@ import { createSenpiAuthStorage } from "./senpi-auth.ts";
 import type { OarStore } from "./store.ts";
 import type { ProfileId, ProviderId, StoredCredential } from "./types.ts";
 import { resolveActiveAuthPaths } from "./paths.ts";
+import type { AccountSink, SinkApplyResult } from "./sinks/types.ts";
 
 /**
  * Activates an OAR vault credential into Senpi/OMO auth.json provider slot(s).
@@ -32,18 +33,39 @@ export class AuthSlotActivator {
   private readonly store: OarStore;
   private readonly authPaths: string[];
   private readonly preferSenpiLock: boolean;
+  private readonly sinks: readonly AccountSink[];
 
-  constructor(opts: { store: OarStore; authPaths?: string[]; preferSenpiLock?: boolean }) {
+  constructor(opts: {
+    store: OarStore;
+    authPaths?: string[];
+    preferSenpiLock?: boolean;
+    sinks?: readonly AccountSink[];
+  }) {
     this.store = opts.store;
     this.authPaths = opts.authPaths ?? resolveActiveAuthPaths();
     this.preferSenpiLock = opts.preferSenpiLock ?? true;
+    this.sinks = opts.sinks ?? [];
+  }
+
+  private applySinks(provider: ProviderId, credential: StoredCredential): SinkApplyResult[] {
+    const results: SinkApplyResult[] = [];
+    for (const sink of this.sinks) {
+      if (!sink.providers.includes(provider)) continue;
+      try {
+        results.push(sink.apply(credential));
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        results.push({ id: sink.id, status: "error", detail });
+      }
+    }
+    return results;
   }
 
   getAuthPaths(): string[] {
     return [...this.authPaths];
   }
 
-  async activate(provider: ProviderId, profile: ProfileId): Promise<{ paths: string[]; via: string }> {
+  async activate(provider: ProviderId, profile: ProfileId): Promise<{ paths: string[]; via: string; sinks: SinkApplyResult[] }> {
     const cred = this.store.getVaultCredential(provider, profile);
     if (!cred) {
       throw new Error(`No vault credential for ${provider}/${profile}`);
@@ -57,7 +79,8 @@ export class AuthSlotActivator {
       written.push(path);
     }
     this.markProfileActive(provider, profile);
-    return { paths: written, via };
+    const sinks = this.applySinks(provider, cred);
+    return { paths: written, via, sinks };
   }
 
   /**
@@ -67,7 +90,7 @@ export class AuthSlotActivator {
   async ensureActivated(
     provider: ProviderId,
     profile: ProfileId,
-  ): Promise<{ paths: string[]; via: string; skipped: boolean }> {
+  ): Promise<{ paths: string[]; via: string; skipped: boolean; sinks?: SinkApplyResult[] }> {
     const cred = this.store.getVaultCredential(provider, profile);
     if (!cred) throw new Error(`No vault credential for ${provider}/${profile}`);
 
@@ -120,7 +143,8 @@ export class AuthSlotActivator {
     }
 
     if (!sawMissing && !sawOtherKnownProfile && !fresherLive) {
-      return { paths: [...this.authPaths], via: "already-matched", skipped: true };
+      const sinks = this.applySinks(provider, cred);
+      return { paths: [...this.authPaths], via: "already-matched", skipped: true, sinks };
     }
 
     const act = await this.activate(provider, profile);

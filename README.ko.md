@@ -125,6 +125,101 @@ oar use xai main
 
 전체 가이드: `oar guide second-account` · [scripts/second-account.md](scripts/second-account.md)
 
+## Argo · Buzz에 붙이기
+
+OAR을 복제하지 않습니다. vault는 하나이고, `oar use`가 OMO `auth.json` 외에 **이미 있는** Argo/Codex 파일만 이중기록합니다. 설계: [docs/sinks.md](docs/sinks.md)
+
+전제:
+
+1. `oar daemon start` (LaunchAgent면 이미 켜져 있음 → `oar doctor`)
+2. 쓸 계정이 vault에 있음 (`oar import-auth` / `oar status`)
+3. **대상 앱을 한 번은 직접 로그인**해 둔 상태. OAR은 설치·로그인 파일을 새로 만들지 않습니다.
+
+### Argo (Grok / xAI)
+
+Argo Grok runner는 Senpi `auth.json`이 아니라 이런 JSON입니다.
+
+`~/Library/Application Support/com.beyondworks.argo/workspaces/.account-secrets-local.json`  
+워크스페이스 `…/workspaces/<id>/.secrets.json`
+
+```json
+"runners": {
+  "grok": { "type": "oauth", "value": "{\"access_token\",\"refresh_token\",\"expires_at\"}" },
+  "codex": { "type": "host", "value": "auto" }
+}
+```
+
+절차:
+
+```bash
+# 1) OMO에 로그인된 xAI를 vault에 넣기
+oar import-auth xai main
+# 두 번째 계정이면 oar guide second-account 후:
+# oar import-auth xai sub --from "$OAR_TMP/auth.json"
+
+oar status          # xai/main, xai/sub 보이는지
+
+# 2) 전환 — OMO 슬롯 + Argo runners.grok 동시 기록
+oar use xai sub
+
+# 3) Argo가 시작 시 시크릿을 캐시하면 앱을 한 번 재시작
+```
+
+확인:
+
+- `oar doctor` 가 daemon ok
+- Argo에서 Grok runner가 막히지 않는지 (토큰 본문은 열지 말 것)
+- 안 바뀌면 Argo 재시작. 그래도 안 되면 `OAR_ARGO_SECRETS_PATH`로 실제 secrets 파일을 가리키기
+
+끄기: `OAR_ARGO_SINK=0` 또는 `OAR_SINKS=0` 후 daemon 재시작.
+
+Argo **Codex**는 `type: host`라 호스트 Codex 로그인을 씁니다. 그건 아래 Buzz Codex와 같은 `~/.codex` 경로입니다.
+
+### Buzz (Codex만)
+
+이 머신에서 Buzz Codex 에이전트는 `runtime: codex` / `codex-acp`이고 `CODEX_HOME`을 안 넣습니다. 호스트 CLI 홈인 **`~/.codex/auth.json`** 을 읽습니다.
+
+Buzz **Grok**은 `runtime: cursor` (Cursor 풀 + `CURSOR_API_KEY`)라 OAR xAI 슬롯과 다른 계정입니다. Grok을 OAR로 바꾸지 않습니다.
+
+절차:
+
+```bash
+oar import-auth openai-codex main
+# 두 번째 Codex 계정이면 second-account 가이드 후 sub 로 import
+
+oar use openai-codex sub
+
+# Buzz Codex 에이전트는 다음 턴부터 ~/.codex/auth.json 을 읽음
+# 안 바뀌면 Buzz 재시작 또는 새 Codex 세션
+```
+
+`CODEX_HOME`을 Buzz가 따로 쓰면:
+
+```bash
+export CODEX_HOME=/path/to/that/home
+# 또는
+export OAR_CODEX_HOME=/path/to/that/home
+oar daemon stop; oar daemon start
+oar use openai-codex sub
+```
+
+테스트/비기본 경로:
+
+| 변수 | 역할 |
+|------|------|
+| `OAR_SINKS=0` | Argo+Codex sink 전부 끔 |
+| `OAR_ARGO_SINK=0` | Argo만 끔 |
+| `OAR_CODEX_SINK=0` | Codex 홈만 끔 |
+| `OAR_ARGO_SECRETS_PATH` | Argo secrets JSON 한 파일 |
+| `OAR_CODEX_AUTH_PATH` | Codex `auth.json` 직접 지정 |
+| `CODEX_HOME` / `OAR_CODEX_HOME` | `…/auth.json` 의 부모 디렉터리 |
+
+한계 (의도):
+
+- Argo/Buzz 안에서 한도 초과 시 OAR auto-failover는 **안** 돕니다. 그건 OMO extension만.
+- sink 쓰기가 실패해도 OMO `auth.json` 기록은 롤백하지 않습니다.
+- 파일이 없으면 skip. `touch`로 빈 파일을 만들지 마세요.
+
 ---
 
 ## 명령어
@@ -144,7 +239,7 @@ oar use xai main
 | `oar daemon start\|stop\|status` | 데몬 |
 | `oar guide second-account` | 2계정 가이드 |
 
-환경 변수: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`
+환경 변수: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`, `OAR_SINKS`, `OAR_ARGO_SINK`, `OAR_CODEX_SINK`, `OAR_ARGO_SECRETS_PATH`, `OAR_CODEX_HOME`, `OAR_CODEX_AUTH_PATH`
 
 ---
 
@@ -157,8 +252,8 @@ OAR이 가장 깊게 붙는 곳은 **OMO / Senpi** 입니다. 나머지는 단�
 |------|-----|----------|
 | 1순위 | OMO, Senpi | 핫스왑, extension, usage, recommend |
 | 실험적 | pi, omp, gjc, OpenCode* | `auth.json` 쓰면 `OAR_AUTH_PATH` / `OAR_ACTIVATE_ALL` |
-| 부분 | Codex CLI, Claude Code | usage/vault 또는 향후 어댑터 (홈 디렉터리 다름) |
-| 별도 | Cursor, Copilot, Orca, Gemini CLI, Aider, Cline… | 자체 계정 UI; OAR은 모니터 정도 |
+| 부분 | Codex CLI, Argo Grok, Buzz Codex | `oar use` sink — [docs/sinks.md](docs/sinks.md) |
+| 별도 | Cursor, Copilot, Orca, Buzz Grok, Gemini CLI, Aider, Cline… | 자체 계정 UI; Buzz Grok은 Cursor 풀 |
 
 \*Senpi형 auth 공유 설정 시
 

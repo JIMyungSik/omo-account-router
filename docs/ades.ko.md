@@ -35,6 +35,8 @@ OAR vault  →  ADE auth 파일/슬롯에 프로필 1개 활성화
 | **Gemini CLI** | 상승 중 | **없음 / TBD** | Google 인증 별도 |
 | **Aider** | 기존 OSS | **없음 / TBD** | 환경변수 API 키 등 |
 | **Orca** | 니치 데스크톱 | **없음 (자체 멀티계정)** | Application Support 아래 자체 프로필 |
+| **Argo** | 로컬 멀티에이전트 | **sink (`xai`→`runners.grok`)** | `docs/sinks.md` — `oar use xai` 가 secrets JSON을 이중기록 |
+| **Buzz** | Block 데스크톱 | **sink (Codex 홈만)** | Buzz Codex는 `~/.codex/auth.json`. Grok은 Cursor 풀이라 OAR 밖 |
 | **Cline / Continue / Windsurf** | IDE 확장 인기 | **없음** | 각자 시크릿 저장 |
 
 **인기 참고 (단일 ‘점유율’ 수치는 없음, 방향만):**

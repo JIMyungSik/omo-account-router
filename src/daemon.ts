@@ -3,6 +3,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import { createAdapter } from "./adapters/index.ts";
 import { AuthSlotActivator } from "./auth-slot.ts";
+import { createDefaultSinks } from "./sinks/index.ts";
 import { classifyFailure } from "./classifier.ts";
 import { EventLog } from "./events.ts";
 import { LeaseManager } from "./lease.ts";
@@ -44,6 +45,7 @@ export class OarDaemon {
       store: opts.store,
       authPaths: opts.authPaths,
       preferSenpiLock: opts.preferSenpiLock,
+      sinks: createDefaultSinks(),
     });
     this.socketPath = opts.socketPath;
     this.activateOnUse = opts.activateOnUse ?? true;
