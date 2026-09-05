@@ -118,6 +118,7 @@ describe("anthropic + openai-codex OAuth refresh (mocked fetch)", () => {
     if (result.credential.type === "oauth") {
       expect(result.credential.access).toBe("new-codex-access-not-real");
       expect(result.credential.accountId).toBe("acct-123");
+      expect(result.credential.idToken).toBeUndefined();
     }
   });
 
@@ -133,6 +134,56 @@ describe("anthropic + openai-codex OAuth refresh (mocked fetch)", () => {
     expect(result.credential.type).toBe("oauth");
     if (result.credential.type === "oauth") {
       expect(result.credential.accountId).toBeUndefined();
+    }
+  });
+
+  test("openai-codex executeRefresh preserves idToken when the response omits it", async () => {
+    globalThis.fetch = Object.assign(async () =>
+      new Response(
+        JSON.stringify({
+          access_token: "new-codex-access-not-real",
+          refresh_token: "new-codex-refresh-not-real",
+          expires_in: 3600,
+        }),
+        { status: 200 },
+      ), { preconnect: globalThis.fetch.preconnect });
+
+    const credWithId: OAuthCredential = {
+      ...oldCred,
+      accountId: "acct-123",
+      idToken: "old-id-token-not-real",
+    };
+    const adapter = new OpenaiCodexAdapter(store);
+    const result = await adapter.executeRefresh!(account("openai-codex"), credWithId);
+    expect(result.credential.type).toBe("oauth");
+    if (result.credential.type === "oauth") {
+      expect(result.credential.idToken).toBe("old-id-token-not-real");
+      expect(result.credential.accountId).toBe("acct-123");
+    }
+  });
+
+  test("openai-codex executeRefresh updates idToken when the response includes it", async () => {
+    globalThis.fetch = Object.assign(async () =>
+      new Response(
+        JSON.stringify({
+          access_token: "new-codex-access-not-real",
+          refresh_token: "new-codex-refresh-not-real",
+          id_token: "new-id-token-not-real",
+          expires_in: 3600,
+        }),
+        { status: 200 },
+      ), { preconnect: globalThis.fetch.preconnect });
+
+    const credWithId: OAuthCredential = {
+      ...oldCred,
+      accountId: "acct-123",
+      idToken: "old-id-token-not-real",
+    };
+    const adapter = new OpenaiCodexAdapter(store);
+    const result = await adapter.executeRefresh!(account("openai-codex"), credWithId);
+    expect(result.credential.type).toBe("oauth");
+    if (result.credential.type === "oauth") {
+      expect(result.credential.idToken).toBe("new-id-token-not-real");
     }
   });
 });

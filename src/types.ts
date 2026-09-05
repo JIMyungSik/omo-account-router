@@ -38,6 +38,8 @@ export type OAuthCredential = {
   refresh: string;
   expires: number;
   accountId?: string;
+  /** ChatGPT/Codex ID token. Never mint one; import or preserve same-account only. */
+  idToken?: string;
 };
 
 export type ApiKeyCredential = {

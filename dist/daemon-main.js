@@ -319,13 +319,15 @@ class OpenaiCodexAdapter {
     if (!Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) {
       throw new Error("Invalid openai-codex OAuth response field: expires_in");
     }
+    const idToken = typeof parsed.id_token === "string" && parsed.id_token.length > 0 ? parsed.id_token : credential.idToken;
     return {
       credential: {
         type: "oauth",
         access,
         refresh,
         expires: Date.now() + expiresInSeconds * 1000 - REFRESH_SKEW_MS2,
-        ...credential.accountId ? { accountId: credential.accountId } : {}
+        ...credential.accountId ? { accountId: credential.accountId } : {},
+        ...idToken ? { idToken } : {}
       }
     };
   }
@@ -681,9 +683,8 @@ class AuthSlotActivator {
         continue;
       try {
         results.push(sink.apply(credential));
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        results.push({ id: sink.id, status: "error", detail });
+      } catch {
+        results.push({ id: sink.id, status: "error", detail: "apply_failed" });
       }
     }
     return results;
@@ -893,6 +894,13 @@ import { dirname as dirname3 } from "node:path";
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+function parseJsonText(text) {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+}
 function atomicWriteJson(path, data) {
   mkdirSync2(dirname3(path), { recursive: true, mode: 448 });
   const tmp = `${path}.tmp`;
@@ -959,22 +967,24 @@ function patchArgoSecrets(raw, grok) {
   };
 }
 function applyArgoGrokSecretFile(path, credential) {
-  let parsed;
+  let raw;
   try {
-    parsed = JSON.parse(readFileSync3(path, "utf8"));
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { id: ARGO_GROK_SINK_ID, status: "error", path, detail };
+    raw = readFileSync3(path, "utf8");
+  } catch {
+    return { id: ARGO_GROK_SINK_ID, status: "error", path, detail: "read_failed" };
   }
-  const next = patchArgoSecrets(parsed, mapXaiToArgoGrok(credential));
+  const parsed = parseJsonText(raw);
+  if (!parsed.ok) {
+    return { id: ARGO_GROK_SINK_ID, status: "error", path, detail: "invalid_json" };
+  }
+  const next = patchArgoSecrets(parsed.value, mapXaiToArgoGrok(credential));
   if (!next) {
     return { id: ARGO_GROK_SINK_ID, status: "skipped", path, detail: "no_runners.grok" };
   }
   try {
     atomicWriteJson(path, next);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { id: ARGO_GROK_SINK_ID, status: "error", path, detail };
+  } catch {
+    return { id: ARGO_GROK_SINK_ID, status: "error", path, detail: "write_failed" };
   }
   return { id: ARGO_GROK_SINK_ID, status: "wrote", path };
 }
@@ -1005,7 +1015,12 @@ function createArgoGrokSink(env) {
       if (wrote.length === 0) {
         return { id: ARGO_GROK_SINK_ID, status: "skipped", detail: "no_runners.grok" };
       }
-      return { id: ARGO_GROK_SINK_ID, status: "wrote", path: wrote.join(","), detail: errors.length ? errors.join("; ") : undefined };
+      return {
+        id: ARGO_GROK_SINK_ID,
+        status: "wrote",
+        path: wrote.join(","),
+        detail: errors.length ? errors.join("; ") : undefined
+      };
     }
   };
 }
@@ -1023,43 +1038,106 @@ function resolveCodexAuthPath(env) {
   const authPath = join4(homeDir, "auth.json");
   return existsSync6(authPath) ? authPath : undefined;
 }
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+function isSameCodexIdentity(prevTokens, credential) {
+  const prevAccount = nonEmptyString(prevTokens.account_id);
+  const nextAccount = nonEmptyString(credential.accountId);
+  if (prevAccount && nextAccount && prevAccount !== nextAccount)
+    return false;
+  if (prevTokens.access_token === credential.access && prevTokens.refresh_token === credential.refresh) {
+    return true;
+  }
+  if (prevAccount && nextAccount && prevAccount === nextAccount)
+    return true;
+  if (credential.idToken && prevTokens.id_token === credential.idToken)
+    return true;
+  return false;
+}
+function resolveCodexIdToken(prevTokens, credential, sameIdentity) {
+  const imported = nonEmptyString(credential.idToken);
+  if (imported)
+    return imported;
+  if (sameIdentity)
+    return nonEmptyString(prevTokens.id_token);
+  return;
+}
+function resolveCodexAccountId(prevTokens, credential, sameIdentity) {
+  const next = nonEmptyString(credential.accountId);
+  if (next)
+    return next;
+  if (sameIdentity)
+    return nonEmptyString(prevTokens.account_id);
+  return;
+}
+function tokenFingerprint(tokens, authMode, apiKey) {
+  return JSON.stringify({
+    auth_mode: authMode ?? null,
+    OPENAI_API_KEY: apiKey ?? null,
+    id_token: tokens.id_token ?? null,
+    access_token: tokens.access_token ?? null,
+    refresh_token: tokens.refresh_token ?? null,
+    account_id: tokens.account_id ?? null
+  });
+}
 function mapCodexAuthFile(existing, credential) {
   const prev = isRecord(existing) ? existing : {};
   const prevTokens = isRecord(prev.tokens) ? prev.tokens : {};
-  const same = prevTokens.access_token === credential.access && prevTokens.refresh_token === credential.refresh;
-  const tokens = {
-    access_token: credential.access,
-    refresh_token: credential.refresh
-  };
-  if (typeof credential.accountId === "string") {
-    tokens.account_id = credential.accountId;
-  } else if (typeof prevTokens.account_id === "string") {
-    tokens.account_id = prevTokens.account_id;
+  const sameIdentity = isSameCodexIdentity(prevTokens, credential);
+  const idToken = resolveCodexIdToken(prevTokens, credential, sameIdentity);
+  const accountId = resolveCodexAccountId(prevTokens, credential, sameIdentity);
+  const tokens = {};
+  if (sameIdentity) {
+    for (const [key, value] of Object.entries(prevTokens)) {
+      if (key === "access_token" || key === "refresh_token" || key === "id_token" || key === "account_id") {
+        continue;
+      }
+      tokens[key] = value;
+    }
   }
-  if (same && typeof prevTokens.id_token === "string") {
-    tokens.id_token = prevTokens.id_token;
-  }
-  const authMode = typeof prev.auth_mode === "string" ? prev.auth_mode : "chatgpt";
+  tokens.access_token = credential.access;
+  tokens.refresh_token = credential.refresh;
+  if (idToken)
+    tokens.id_token = idToken;
+  if (accountId)
+    tokens.account_id = accountId;
+  const unchanged = tokenFingerprint(prevTokens, prev.auth_mode, prev.OPENAI_API_KEY ?? null) === tokenFingerprint(tokens, "chatgpt", null);
   return {
     ...prev,
-    auth_mode: authMode,
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
     tokens,
-    last_refresh: new Date().toISOString()
+    last_refresh: unchanged && typeof prev.last_refresh === "string" ? prev.last_refresh : new Date().toISOString()
   };
 }
 function applyCodexAuthFile(path, credential) {
-  let parsed = {};
+  let raw;
   try {
-    parsed = JSON.parse(readFileSync4(path, "utf8"));
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { id: CODEX_HOME_SINK_ID, status: "error", path, detail };
+    raw = readFileSync4(path, "utf8");
+  } catch {
+    return { id: CODEX_HOME_SINK_ID, status: "error", path, detail: "read_failed" };
+  }
+  const parsed = parseJsonText(raw);
+  if (!parsed.ok) {
+    return { id: CODEX_HOME_SINK_ID, status: "error", path, detail: "invalid_json" };
+  }
+  const prev = isRecord(parsed.value) ? parsed.value : {};
+  const prevTokens = isRecord(prev.tokens) ? prev.tokens : {};
+  const sameIdentity = isSameCodexIdentity(prevTokens, credential);
+  if (!resolveCodexIdToken(prevTokens, credential, sameIdentity)) {
+    return { id: CODEX_HOME_SINK_ID, status: "error", path, detail: "missing_id_token" };
+  }
+  const next = mapCodexAuthFile(parsed.value, credential);
+  const nextTokens = isRecord(next.tokens) ? next.tokens : {};
+  const unchanged = tokenFingerprint(prevTokens, prev.auth_mode, prev.OPENAI_API_KEY ?? null) === tokenFingerprint(nextTokens, next.auth_mode, next.OPENAI_API_KEY ?? null);
+  if (unchanged) {
+    return { id: CODEX_HOME_SINK_ID, status: "skipped", path, detail: "unchanged" };
   }
   try {
-    atomicWriteJson(path, mapCodexAuthFile(parsed, credential));
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { id: CODEX_HOME_SINK_ID, status: "error", path, detail };
+    atomicWriteJson(path, next);
+  } catch {
+    return { id: CODEX_HOME_SINK_ID, status: "error", path, detail: "write_failed" };
   }
   return { id: CODEX_HOME_SINK_ID, status: "wrote", path };
 }
@@ -1091,13 +1169,13 @@ function createDefaultSinks(opts) {
   };
   if (flagOff(env.env.OAR_SINKS))
     return [];
-  if (env.env.BUN_TEST === "1" || env.env.BUN_TEST === "true")
-    return [];
   const sinks = [];
-  if (!flagOff(env.env.OAR_ARGO_SINK))
+  if (!flagOff(env.env.OAR_ARGO_SINK)) {
     sinks.push(createArgoGrokSink(env));
-  if (!flagOff(env.env.OAR_CODEX_SINK))
+  }
+  if (!flagOff(env.env.OAR_CODEX_SINK)) {
     sinks.push(createCodexHomeSink(env));
+  }
   return sinks;
 }
 
@@ -1447,7 +1525,7 @@ class OarDaemon {
       store: opts.store,
       authPaths: opts.authPaths,
       preferSenpiLock: opts.preferSenpiLock,
-      sinks: createDefaultSinks()
+      sinks: opts.sinks ?? createDefaultSinks()
     });
     this.socketPath = opts.socketPath;
     this.activateOnUse = opts.activateOnUse ?? true;
@@ -1554,6 +1632,7 @@ class OarDaemon {
                 ...resolved,
                 activatedPaths: act.paths,
                 via: act.via,
+                sinks: act.sinks,
                 message: `${req.provider} ${req.profile} is now preferred. Running OMO sessions will use it on their next eligible request.`
               }
             };

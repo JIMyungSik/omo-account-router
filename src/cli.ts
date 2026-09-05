@@ -5,7 +5,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OarClient } from "./client.ts";
-import { importAllFromAuthJson } from "./import-all.ts";
+import { importAllFromAuthJson, readCredentialFromAuthJson } from "./import-all.ts";
+import { formatSinkResultLines } from "./sinks/index.ts";
+import type { SinkApplyResult } from "./sinks/types.ts";
 import {
   defaultOarRoot,
   discoverAuthJsonFiles,
@@ -20,7 +22,7 @@ import { OarStore } from "./store.ts";
 import { fetchRemoteUsage, fetchRemoteUsageForAccounts } from "./usage/fetch.ts";
 import { formatUsageTable } from "./usage/format.ts";
 import { buildRecommendations, formatRecommendTable } from "./usage/recommend.ts";
-import type { AccountRecord, StoredCredential } from "./types.ts";
+import type { AccountRecord } from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -71,6 +73,7 @@ COMMANDS
   oar use <provider> <profile> [--force]
       Switch live auth slot to this vault profile. Refreshes remote usage first;
       refuses switch at 0% remaining unless --force. No OMO restart needed.
+      Prints each sink id/status/path/detail (no credentials).
 
   oar auto <provider> on|off
       Enable/disable automatic failover to another eligible profile on failures.
@@ -81,8 +84,10 @@ COMMANDS
       also runs this on session_start so daily use needs no manual oar.
 
   oar import-auth <provider> <profile> [--from <auth.json>]
-      Copy one provider credential from auth.json (default ~/.omo/agent/auth.json)
-      into the OAR vault. Secrets stay in the vault; nothing is printed.
+      Copy one provider credential from Senpi auth.json (default ~/.omo/agent/auth.json)
+      into the OAR vault. For openai-codex, --from may also be a native Codex
+      auth.json (tokens.id_token + account_id; expiry from access-token JWT exp).
+      Secrets stay in the vault; nothing is printed.
 
   oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
       Import every provider found in auth.json under one profile name (default main).
@@ -136,6 +141,9 @@ COMMANDS
 ENVIRONMENT
   OAR_HOME   State root and vault (default ~/.oar)
   OAR_SOCK   Unix socket path (default under OAR_HOME)
+  Codex sink path: OAR_CODEX_AUTH_PATH > OAR_CODEX_HOME > CODEX_HOME > ~/.codex
+  Argo sink path:  OAR_ARGO_SECRETS_PATH or ~/Library/Application Support/com.beyondworks.argo/...
+  Disable sinks:   OAR_SINKS=0 / OAR_ARGO_SINK=0 / OAR_CODEX_SINK=0 (restart daemon)
 
 OAUTH TROUBLESHOOTING
   Symptoms: Senpi \`invalid_grant\`, refresh token revoked, HTTP 401/403 on usage or
@@ -309,16 +317,6 @@ async function daemonStatus(): Promise<void> {
   }
 }
 
-function readCredentialFromAuthJson(authPath: string, provider: string): StoredCredential {
-  const data = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, StoredCredential>;
-  const cred = data[provider];
-  if (!cred) throw new Error(`provider ${provider} not found in ${authPath}`);
-  if (cred.type !== "oauth" && cred.type !== "api_key") {
-    throw new Error(`unsupported credential type in ${authPath}`);
-  }
-  return cred;
-}
-
 function suggestAccounts(provider?: string): string {
   try {
     // best-effort; may fail if daemon down
@@ -453,10 +451,18 @@ async function main(argv: string[]) {
         }
         throw new Error(err);
       }
-      const data = res.data as { message?: string; profile?: string; activatedPaths?: string[] };
+      const data = res.data as {
+        message?: string;
+        profile?: string;
+        activatedPaths?: string[];
+        sinks?: SinkApplyResult[];
+      };
       console.log(data.message ?? `now using ${provider}/${data.profile ?? profile}`);
       if (data.activatedPaths?.length) {
         console.log(`auth slot: ${data.activatedPaths.join(", ")}`);
+      }
+      for (const line of formatSinkResultLines(Array.isArray(data.sinks) ? data.sinks : [])) {
+        console.log(line);
       }
       return;
     }

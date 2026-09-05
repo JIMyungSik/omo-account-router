@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { createAdapter } from "./adapters/index.ts";
 import { AuthSlotActivator } from "./auth-slot.ts";
 import { createDefaultSinks } from "./sinks/index.ts";
+import type { AccountSink } from "./sinks/types.ts";
 import { classifyFailure } from "./classifier.ts";
 import { EventLog } from "./events.ts";
 import { LeaseManager } from "./lease.ts";
@@ -19,6 +20,7 @@ export type DaemonOptions = {
   authPaths?: string[];
   activateOnUse?: boolean;
   preferSenpiLock?: boolean;
+  sinks?: readonly AccountSink[];
 };
 
 function readFrame(buf: Buffer): { msg?: string; rest: Buffer } {
@@ -45,7 +47,7 @@ export class OarDaemon {
       store: opts.store,
       authPaths: opts.authPaths,
       preferSenpiLock: opts.preferSenpiLock,
-      sinks: createDefaultSinks(),
+      sinks: opts.sinks ?? createDefaultSinks(),
     });
     this.socketPath = opts.socketPath;
     this.activateOnUse = opts.activateOnUse ?? true;
@@ -171,6 +173,7 @@ export class OarDaemon {
                 ...resolved,
                 activatedPaths: act.paths,
                 via: act.via,
+                sinks: act.sinks,
                 message: `${req.provider} ${req.profile} is now preferred. Running OMO sessions will use it on their next eligible request.`,
               },
             };

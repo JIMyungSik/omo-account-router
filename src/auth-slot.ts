@@ -53,9 +53,8 @@ export class AuthSlotActivator {
       if (!sink.providers.includes(provider)) continue;
       try {
         results.push(sink.apply(credential));
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        results.push({ id: sink.id, status: "error", detail });
+      } catch {
+        results.push({ id: sink.id, status: "error", detail: "apply_failed" });
       }
     }
     return results;

@@ -97,26 +97,133 @@ class OarClient {
 
 // src/import-all.ts
 import { readFileSync } from "node:fs";
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 function isStoredCredential(value) {
-  if (!value || typeof value !== "object")
+  if (!isRecord(value))
     return false;
-  const v = value;
-  if (v.type === "oauth") {
-    return typeof v.access === "string" && typeof v.refresh === "string" && typeof v.expires === "number";
+  if (value.type === "oauth") {
+    if (typeof value.access !== "string" || typeof value.refresh !== "string" || typeof value.expires !== "number") {
+      return false;
+    }
+    if (value.accountId !== undefined && typeof value.accountId !== "string")
+      return false;
+    if (value.idToken !== undefined && typeof value.idToken !== "string")
+      return false;
+    return true;
   }
-  if (v.type === "api_key") {
-    return typeof v.key === "string";
+  if (value.type === "api_key") {
+    return typeof value.key === "string";
   }
   return false;
 }
+function parseAuthJsonFile(authPath) {
+  let raw;
+  try {
+    raw = readFileSync(authPath, "utf8");
+  } catch {
+    throw new Error(`unable to read ${authPath}`);
+  }
+  try {
+    const data = JSON.parse(raw);
+    if (!isRecord(data))
+      throw new Error("invalid auth.json");
+    return data;
+  } catch {
+    throw new Error(`invalid auth.json: ${authPath}`);
+  }
+}
+function decodeJwtPayload(token) {
+  const parts = token.split(".");
+  if (parts.length < 2)
+    return;
+  const payload = parts[1];
+  if (!payload)
+    return;
+  try {
+    const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - padded.length % 4);
+    const json = Buffer.from(padded + pad, "base64").toString("utf8");
+    const parsed = JSON.parse(json);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return;
+  }
+}
+function expiresFromAccessJwt(access) {
+  const payload = decodeJwtPayload(access);
+  const exp = payload?.exp;
+  if (typeof exp === "number" && Number.isFinite(exp) && exp > 0) {
+    return exp * 1000;
+  }
+  return;
+}
+function accountIdFromIdToken(idToken) {
+  const payload = decodeJwtPayload(idToken);
+  if (!payload)
+    return;
+  const auth = payload["https://api.openai.com/auth"];
+  if (isRecord(auth)) {
+    const id = auth.chatgpt_account_id;
+    if (typeof id === "string" && id.length > 0)
+      return id;
+  }
+  if (typeof payload.chatgpt_account_id === "string" && payload.chatgpt_account_id.length > 0) {
+    return payload.chatgpt_account_id;
+  }
+  return;
+}
+function credentialFromNativeCodexAuth(data) {
+  if (!isRecord(data))
+    return;
+  const tokens = data.tokens;
+  if (!isRecord(tokens))
+    return;
+  const access = tokens.access_token;
+  const refresh = tokens.refresh_token;
+  if (typeof access !== "string" || access.length === 0)
+    return;
+  if (typeof refresh !== "string" || refresh.length === 0)
+    return;
+  const idToken = typeof tokens.id_token === "string" && tokens.id_token.length > 0 ? tokens.id_token : undefined;
+  let accountId = typeof tokens.account_id === "string" && tokens.account_id.length > 0 ? tokens.account_id : undefined;
+  if (!accountId && idToken)
+    accountId = accountIdFromIdToken(idToken);
+  const expires = expiresFromAccessJwt(access) ?? 0;
+  return {
+    type: "oauth",
+    access,
+    refresh,
+    expires,
+    ...accountId ? { accountId } : {},
+    ...idToken ? { idToken } : {}
+  };
+}
+function readCredentialFromAuthJson(authPath, provider) {
+  const data = parseAuthJsonFile(authPath);
+  const slot = data[provider];
+  if (isStoredCredential(slot))
+    return slot;
+  if (provider === "openai-codex") {
+    const native = credentialFromNativeCodexAuth(data);
+    if (native)
+      return native;
+  }
+  throw new Error(`provider ${provider} not found in ${authPath}`);
+}
 function readAllCredentialsFromAuthJson(authPath) {
-  const raw = readFileSync(authPath, "utf8");
-  const data = JSON.parse(raw);
+  const data = parseAuthJsonFile(authPath);
   const out = {};
   for (const [provider, value] of Object.entries(data)) {
     if (isStoredCredential(value)) {
       out[provider] = value;
     }
+  }
+  if (!out["openai-codex"]) {
+    const native = credentialFromNativeCodexAuth(data);
+    if (native)
+      out["openai-codex"] = native;
   }
   return out;
 }
@@ -154,6 +261,17 @@ async function importAllFromAuthJson(client, opts) {
       errors.push({ provider, error: res.error });
   }
   return { imported, skipped, errors };
+}
+// src/sinks/index.ts
+function formatSinkResultLines(sinks) {
+  return sinks.map((sink) => {
+    const parts = [sink.id, sink.status];
+    if (typeof sink.path === "string" && sink.path.length > 0)
+      parts.push(sink.path);
+    if (typeof sink.detail === "string" && sink.detail.length > 0)
+      parts.push(sink.detail);
+    return `sink: ${parts.join(" ")}`;
+  });
 }
 
 // src/paths.ts
@@ -780,7 +898,7 @@ var DEFAULT_POLICY = {
 function emptyState() {
   return { version: 1, providers: {}, accounts: [], updatedAt: new Date().toISOString() };
 }
-function atomicWriteJson(path, data, mode = 384) {
+function atomicWriteJson2(path, data, mode = 384) {
   mkdirSync(dirname2(path), { recursive: true, mode: 448 });
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
@@ -822,7 +940,7 @@ class OarStore {
   }
   persist() {
     this.state.updatedAt = new Date().toISOString();
-    atomicWriteJson(this.statePath, this.state, 384);
+    atomicWriteJson2(this.statePath, this.state, 384);
   }
   getState() {
     return structuredClone(this.state);
@@ -873,7 +991,7 @@ class OarStore {
     return join4(this.vaultDir, `${provider}__${profile}.json`);
   }
   putVaultCredential(provider, profile, credential) {
-    atomicWriteJson(this.vaultPath(provider, profile), credential, 384);
+    atomicWriteJson2(this.vaultPath(provider, profile), credential, 384);
     const ref = `vault:${provider}:${profile}`;
     const existing = this.getAccount(provider, profile);
     if (existing) {
@@ -1738,6 +1856,7 @@ COMMANDS
   oar use <provider> <profile> [--force]
       Switch live auth slot to this vault profile. Refreshes remote usage first;
       refuses switch at 0% remaining unless --force. No OMO restart needed.
+      Prints each sink id/status/path/detail (no credentials).
 
   oar auto <provider> on|off
       Enable/disable automatic failover to another eligible profile on failures.
@@ -1748,8 +1867,10 @@ COMMANDS
       also runs this on session_start so daily use needs no manual oar.
 
   oar import-auth <provider> <profile> [--from <auth.json>]
-      Copy one provider credential from auth.json (default ~/.omo/agent/auth.json)
-      into the OAR vault. Secrets stay in the vault; nothing is printed.
+      Copy one provider credential from Senpi auth.json (default ~/.omo/agent/auth.json)
+      into the OAR vault. For openai-codex, --from may also be a native Codex
+      auth.json (tokens.id_token + account_id; expiry from access-token JWT exp).
+      Secrets stay in the vault; nothing is printed.
 
   oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
       Import every provider found in auth.json under one profile name (default main).
@@ -1803,6 +1924,9 @@ COMMANDS
 ENVIRONMENT
   OAR_HOME   State root and vault (default ~/.oar)
   OAR_SOCK   Unix socket path (default under OAR_HOME)
+  Codex sink path: OAR_CODEX_AUTH_PATH > OAR_CODEX_HOME > CODEX_HOME > ~/.codex
+  Argo sink path:  OAR_ARGO_SECRETS_PATH or ~/Library/Application Support/com.beyondworks.argo/...
+  Disable sinks:   OAR_SINKS=0 / OAR_ARGO_SINK=0 / OAR_CODEX_SINK=0 (restart daemon)
 
 OAUTH TROUBLESHOOTING
   Symptoms: Senpi \`invalid_grant\`, refresh token revoked, HTTP 401/403 on usage or
@@ -1949,16 +2073,6 @@ async function daemonStatus() {
     process.exitCode = 1;
   }
 }
-function readCredentialFromAuthJson(authPath, provider) {
-  const data = JSON.parse(readFileSync6(authPath, "utf8"));
-  const cred = data[provider];
-  if (!cred)
-    throw new Error(`provider ${provider} not found in ${authPath}`);
-  if (cred.type !== "oauth" && cred.type !== "api_key") {
-    throw new Error(`unsupported credential type in ${authPath}`);
-  }
-  return cred;
-}
 function suggestAccounts(provider) {
   try {} catch {}
   return provider ? `Try: oar accounts ${provider}   or   oar import-auth ${provider} <profile>` : `Try: oar accounts   or   oar import-auth --all`;
@@ -2089,6 +2203,9 @@ ${suggestAccounts(provider)}`);
       console.log(data.message ?? `now using ${provider}/${data.profile ?? profile}`);
       if (data.activatedPaths?.length) {
         console.log(`auth slot: ${data.activatedPaths.join(", ")}`);
+      }
+      for (const line of formatSinkResultLines(Array.isArray(data.sinks) ? data.sinks : [])) {
+        console.log(line);
       }
       return;
     }

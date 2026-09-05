@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { OarClient } from "../src/client.ts";
 import { OarDaemon } from "../src/daemon.ts";
 import { OarStore } from "../src/store.ts";
-import { importAllFromAuthJson, readAllCredentialsFromAuthJson } from "../src/import-all.ts";
+import {
+  importAllFromAuthJson,
+  readAllCredentialsFromAuthJson,
+  readCredentialFromAuthJson,
+} from "../src/import-all.ts";
+import { fakeCodexTokens, nativeCodexAuthJson } from "../scripts/sink-fixtures.ts";
 
 describe("import-auth --all", () => {
   let root: string;
@@ -107,5 +112,44 @@ describe("import-auth --all", () => {
     const third = await importAllFromAuthJson(client, { from: authPath2, profile: "main", force: true });
     expect(third.imported).toEqual(["xai"]);
     expect(third.skipped).toEqual([]);
+  });
+
+  test("imports native Codex auth.json including idToken, accountId, and JWT exp", () => {
+    const expSec = 1_900_000_000;
+    const tokens = fakeCodexTokens({ accountId: "acct-native", expSec });
+    const nativePath = join(root, "codex-auth.json");
+    writeFileSync(nativePath, nativeCodexAuthJson(tokens), { mode: 0o600 });
+
+    const creds = readAllCredentialsFromAuthJson(nativePath);
+    expect(Object.keys(creds)).toEqual(["openai-codex"]);
+    const cred = creds["openai-codex"];
+    expect(cred?.type).toBe("oauth");
+    if (cred?.type === "oauth") {
+      expect(cred.access).toBe(tokens.access);
+      expect(cred.refresh).toBe(tokens.refresh);
+      expect(cred.idToken).toBe(tokens.idToken);
+      expect(cred.accountId).toBe("acct-native");
+      expect(cred.expires).toBe(expSec * 1000);
+    }
+
+    const single = readCredentialFromAuthJson(nativePath, "openai-codex");
+    expect(single).toEqual(creds["openai-codex"]);
+  });
+
+  test("keeps Senpi openai-codex slots compatible when idToken is present", () => {
+    const senpi = {
+      "openai-codex": {
+        type: "oauth" as const,
+        access: "senpi-access",
+        refresh: "senpi-refresh",
+        expires: 123,
+        accountId: "acct-senpi",
+        idToken: "senpi-id",
+      },
+    };
+    const senpiPath = join(root, "senpi-auth.json");
+    writeFileSync(senpiPath, JSON.stringify(senpi), { mode: 0o600 });
+    const cred = readCredentialFromAuthJson(senpiPath, "openai-codex");
+    expect(cred).toEqual(senpi["openai-codex"]);
   });
 });

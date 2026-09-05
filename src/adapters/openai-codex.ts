@@ -94,6 +94,8 @@ export class OpenaiCodexAdapter implements ProviderAdapter {
     if (!Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) {
       throw new Error("Invalid openai-codex OAuth response field: expires_in");
     }
+    const idToken =
+      typeof parsed.id_token === "string" && parsed.id_token.length > 0 ? parsed.id_token : credential.idToken;
     return {
       credential: {
         type: "oauth",
@@ -103,6 +105,7 @@ export class OpenaiCodexAdapter implements ProviderAdapter {
         // Preserve accountId — Codex requests are routed by ChatGPT account id,
         // not just bearer token, and the token endpoint does not return it.
         ...(credential.accountId ? { accountId: credential.accountId } : {}),
+        ...(idToken ? { idToken } : {}),
       },
     };
   }
