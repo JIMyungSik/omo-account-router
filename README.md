@@ -130,11 +130,20 @@ Full guide: `oar guide second-account` · [scripts/second-account.md](scripts/se
 
 OAR is not forked. One vault; `oar use` dual-writes the Senpi slot **and** existing Argo/Codex files. Design: [docs/sinks.md](docs/sinks.md)
 
+| Surface | Provider | Sink | Notes |
+|---------|----------|------|--------|
+| Argo Grok | `xai` | `argo-grok` | `runners.grok` only |
+| Argo host Codex | `openai-codex` | `codex-home` | Argo `runners.codex.type = host` reads host Codex |
+| Buzz Codex | `openai-codex` | `codex-home` | default `~/.codex/auth.json` |
+| Buzz Grok | — | **excluded** | `runtime: cursor` / Cursor pool, not the OAR xAI slot |
+
 Prerequisites:
 
 1. `oar daemon start` (or LaunchAgent — `oar doctor`)
 2. Profile already in the vault (`oar import-auth` / `oar status`)
-3. **Log into the target app once yourself.** OAR never creates Argo/Codex installs.
+3. **The target file must already exist.** Log into Argo/Codex once yourself. OAR never creates those installs.
+
+`oar use` prints each sink `id` / `status` / `path` / `detail` (no credentials). OMO activation still succeeds if a sink is skipped or errors (`wrote` / `skipped` / `error`).
 
 ### Argo (Grok / xAI)
 
@@ -144,46 +153,97 @@ Argo Grok does not read `~/.omo/agent/auth.json`. It stores:
 plus per-workspace `…/workspaces/<id>/.secrets.json`
 
 ```json
-"runners": {
-  "grok": { "type": "oauth", "value": "{\"access_token\",\"refresh_token\",\"expires_at\"}" },
-  "codex": { "type": "host", "value": "auto" }
+{
+  "runners": {
+    "grok": {
+      "type": "oauth",
+      "value": "{\"access_token\":\"…\",\"refresh_token\":\"…\",\"expires_at\":1700000000000}"
+    },
+    "codex": { "type": "host", "value": "auto" }
+  }
 }
 ```
 
+`expires_at` is milliseconds. Sibling runners (`codex`, `glm`, …) are left intact.
+
 ```bash
 oar import-auth xai main
-# second account: oar guide second-account, then import as `sub`
+# second account: oar guide second-account, then:
+# oar import-auth xai sub --from "$OAR_TMP/auth.json"
 
 oar status
 oar use xai sub
-
+# expect: sink: argo-grok wrote <path>
 # Restart Argo if it cached secrets at launch
 ```
 
 Disable: `OAR_ARGO_SINK=0` or `OAR_SINKS=0`, then restart the daemon.
 
-Argo **Codex** is `type: host` — it uses host Codex (`~/.codex`), same as Buzz Codex below.
+Argo **Codex** is `type: host` — it uses host Codex (`~/.codex`), same sink as Buzz Codex below. There is **no** Argo/Buzz-driven auto failover; only the OMO extension reports failures.
 
-### Buzz (Codex only)
+### Buzz / host Codex (`openai-codex`)
 
 Buzz Codex agents here use `runtime: codex` / `codex-acp` with **no** `CODEX_HOME`. They inherit **`~/.codex/auth.json`**.
 
-Buzz **Grok** is `runtime: cursor` (Cursor pool + `CURSOR_API_KEY`). That is not the OAR xAI slot.
+Native Codex `auth.json` must include `tokens.id_token`. Old Senpi-only vault profiles (access/refresh only) can reuse an ID token already on the Codex target when it belongs to the same account (access+refresh match). Otherwise `oar use` shows `sink: codex-home error missing_id_token`, leaves the file unchanged, and you need a native re-import (below).
+
+**Main (current host Codex login, file-backed):**
 
 ```bash
-oar import-auth openai-codex main
-oar use openai-codex sub
-# new Buzz Codex turn; restart Buzz if it does not pick up
+mkdir -p "$HOME/.codex"
+grep -q 'cli_auth_credentials_store *= *"file"' "$HOME/.codex/config.toml" 2>/dev/null \
+  || printf 'cli_auth_credentials_store = "file"\n' >> "$HOME/.codex/config.toml"
+codex -c 'cli_auth_credentials_store="file"' login
+oar import-auth openai-codex main --from "$HOME/.codex/auth.json"
+# or Senpi slot, if that copy already has idToken:
+# oar import-auth openai-codex main
 ```
 
-If Buzz sets a private `CODEX_HOME`:
+**Sub (isolated login home — do not export `CODEX_HOME`):**
 
 ```bash
-export CODEX_HOME=/path/to/that/home
-# or OAR_CODEX_HOME
-oar daemon stop; oar daemon start
+OAR_CODEX_LOGIN=$(mktemp -d)
+CODEX_HOME="$OAR_CODEX_LOGIN" codex -c 'cli_auth_credentials_store="file"' login
+oar import-auth openai-codex sub --from "$OAR_CODEX_LOGIN/auth.json"
+rm -rf "$OAR_CODEX_LOGIN"
+# Cleanup is only the temp login dir. This does not change the daemon target;
+# later daemons still write the existing host Codex file (~/.codex) unless you
+# set OAR_CODEX_* on that daemon process (below).
+oar use openai-codex sub
+# new Buzz Codex turn or Codex CLI session; restart the app if it cached auth
+```
+
+If Buzz sets a private `CODEX_HOME`, the **daemon process** must see `OAR_CODEX_HOME` or `OAR_CODEX_AUTH_PATH`. A shell `export` does not reach a LaunchAgent.
+
+**LaunchAgent** (`~/Library/LaunchAgents/com.victor.oar-daemon.plist`) only inherits its plist `EnvironmentVariables` (`HOME`, `PATH`, `OAR_HOME` by default). Edit that plist, then reload:
+
+```bash
+PLIST="$HOME/Library/LaunchAgents/com.victor.oar-daemon.plist"
+# add OAR_CODEX_HOME and/or OAR_CODEX_AUTH_PATH under EnvironmentVariables, then:
+launchctl unload "$PLIST"
+launchctl load -w "$PLIST"
+# modern equivalents:
+# launchctl bootout "gui/$(id -u)/com.victor.oar-daemon"
+# launchctl bootstrap "gui/$(id -u)" "$PLIST"
+```
+
+**Shell-managed daemon:** unload/bootout the LaunchAgent first. KeepAlive will otherwise restart the agent and race the shell process.
+
+```bash
+launchctl unload "$HOME/Library/LaunchAgents/com.victor.oar-daemon.plist"
+# or: launchctl bootout "gui/$(id -u)/com.victor.oar-daemon"
+
+export OAR_CODEX_HOME=/path/to/that/home
+# or: export OAR_CODEX_AUTH_PATH=/path/to/that/home/auth.json
+oar daemon stop
+oar daemon status   # must report down / not running
+oar daemon start
 oar use openai-codex sub
 ```
+
+Do not treat `oar daemon stop; oar daemon start` as a reliable synchronous restart.
+
+Daemon Codex path precedence: **`OAR_CODEX_AUTH_PATH` > `OAR_CODEX_HOME` > `CODEX_HOME` > `~/.codex`**.
 
 | Env | Effect |
 |------|--------|
@@ -192,9 +252,27 @@ oar use openai-codex sub
 | `OAR_CODEX_SINK=0` | Codex home off |
 | `OAR_ARGO_SECRETS_PATH` | Single Argo secrets JSON |
 | `OAR_CODEX_AUTH_PATH` | Explicit Codex `auth.json` |
-| `CODEX_HOME` / `OAR_CODEX_HOME` | Parent of `auth.json` |
+| `OAR_CODEX_HOME` | Parent of `auth.json` (daemon-visible) |
+| `CODEX_HOME` | Same, if the daemon process sees it |
 
-Sink failures do not roll back the OMO slot. Missing files are skipped, not created.
+### Sink output / troubleshooting
+
+```text
+sink: argo-grok wrote /…/.secrets.json
+sink: codex-home skipped no_codex_auth
+sink: codex-home error missing_id_token
+sink: argo-grok error …/bad.json: invalid_json
+```
+
+| Detail | Meaning |
+|--------|---------|
+| `wrote` | Target updated |
+| `skipped` + `no_codex_auth` / `no_argo_secrets` | File missing — log into the app once |
+| `skipped` + `unchanged` | Same Codex tokens already on disk |
+| `error` + `missing_id_token` | Re-import native Codex `auth.json` (do not mint tokens) |
+| `error` + `invalid_json` | Target left byte-for-byte unchanged |
+
+Sink failures do not roll back the OMO slot. Missing files are skipped, not created. Apps that cache credentials need a restart or a new session after `oar use`. Fixture/smoke checks do **not** include live authenticated GUI or paid model requests.
 
 ---
 
@@ -241,9 +319,11 @@ OAR is deepest on **OMO / Senpi**. Other tools vary.
 → **[docs/ades.md](docs/ades.md)** · [한국어](docs/ades.ko.md)
 
 ```bash
-# Example: point OAR at another Senpi-like agent dir
+# Example: point OAR at another Senpi-like agent dir (shell-managed daemon)
 export OAR_AUTH_PATH="$HOME/.pi/agent/auth.json"
-oar daemon stop; oar daemon start
+oar daemon stop
+oar daemon status   # must report down / not running
+oar daemon start
 oar use xai sub
 ```
 
@@ -297,6 +377,7 @@ ln -sf "$(npm root -g)/oar-cli/scripts/oar-xbar.sh" \
 bun install
 bun test
 bun run scripts/smoke-hot-switch.ts
+bun run scripts/smoke-sinks.ts
 bun run build
 ```
 
