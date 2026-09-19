@@ -125,6 +125,20 @@ oar use xai main
 
 전체 가이드: `oar guide second-account` · [scripts/second-account.md](scripts/second-account.md)
 
+### auth 항목 하나에 숨은 로그인들 (xAI 멀티 로그인)
+
+xAI는 Google + Sign-in-with-Apple 등 여러 로그인을 한 provider 슬롯의
+`accounts[]` 배열에 넣을 수 있습니다. OAR은 기본으로 **primary**(최상위)
+토큰만 읽으므로, 살아있는 보조 로그인이 소진된 것처럼 보일 수 있습니다.
+임포트 시 계정을 명시적으로 고르세요:
+
+```bash
+# 안에 뭐가 있는지 (1=default, 2=login-2, ...)
+oar import-auth xai apple --account 3          # 1-based 인덱스로
+oar import-auth xai apple --account login-3    # 또는 name으로
+oar usage xai apple --refresh && oar use xai apple
+```
+
 ## Argo · Buzz에 붙이기
 
 OAR을 복제하지 않습니다. vault는 하나이고, `oar use`가 OMO `auth.json` 외에 **이미 있는** Argo/Codex 파일만 이중기록합니다. 설계: [docs/sinks.md](docs/sinks.md)

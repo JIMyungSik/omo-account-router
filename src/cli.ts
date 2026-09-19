@@ -83,10 +83,13 @@ COMMANDS
       autoFailover, and ensureActivated the preferred profile. OMO extension
       also runs this on session_start so daily use needs no manual oar.
 
-  oar import-auth <provider> <profile> [--from <auth.json>]
+  oar import-auth <provider> <profile> [--from <auth.json>] [--account <n|name>]
       Copy one provider credential from Senpi auth.json (default ~/.omo/agent/auth.json)
       into the OAR vault. For openai-codex, --from may also be a native Codex
       auth.json (tokens.id_token + account_id; expiry from access-token JWT exp).
+      When the provider slot carries a multi-login accounts[] array (e.g. xAI
+      Google + Sign-in-with-Apple under one entry), --account selects one by
+      1-based index or by its name field (default: primary/top-level token).
       Secrets stay in the vault; nothing is printed.
 
   oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
@@ -501,9 +504,12 @@ async function main(argv: string[]) {
 
       const [provider, profile] = rest;
       if (!provider || !profile) {
-        throw new Error("usage: oar import-auth <provider> <profile> [--from path]\n   or: oar import-auth --all [--from path] [--profile name] [--force]");
+        throw new Error("usage: oar import-auth <provider> <profile> [--from path] [--account <n|name>]\n   or: oar import-auth --all [--from path] [--profile name] [--force]");
       }
-      const credential = readCredentialFromAuthJson(from, provider);
+      let account: string | undefined;
+      const accountIdx = rest.indexOf("--account");
+      if (accountIdx >= 0 && rest[accountIdx + 1]) account = rest[accountIdx + 1]!;
+      const credential = readCredentialFromAuthJson(from, provider, account ? { account } : undefined);
       const res = await req({
         protocol: 1,
         action: "import-credential",

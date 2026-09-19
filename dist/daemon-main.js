@@ -1500,6 +1500,86 @@ class OarRouter {
   }
 }
 
+// src/credential-identity.ts
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function decodeJwtPayload(token) {
+  const parts = token.split(".");
+  if (parts.length < 2)
+    return;
+  const payload = parts[1];
+  if (!payload)
+    return;
+  try {
+    const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - padded.length % 4);
+    const json = Buffer.from(padded + pad, "base64").toString("utf8");
+    const parsed = JSON.parse(json);
+    return isRecord2(parsed) ? parsed : undefined;
+  } catch {
+    return;
+  }
+}
+var OPENAI_PROFILE = "https://api.openai.com/profile";
+function looksLikeEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+function emailFromUnknown(value) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return looksLikeEmail(trimmed) ? trimmed : undefined;
+}
+function emailFromJwtPayload(payload) {
+  if (!payload)
+    return;
+  const nested = payload[OPENAI_PROFILE];
+  if (isRecord2(nested)) {
+    const fromProfile = emailFromUnknown(nested.email);
+    if (fromProfile)
+      return fromProfile;
+  }
+  return emailFromUnknown(payload.email) ?? emailFromUnknown(payload.preferred_username);
+}
+function loginFromCredential(cred) {
+  if (!cred || cred.type !== "oauth")
+    return;
+  if (cred.idToken) {
+    const fromId = emailFromJwtPayload(decodeJwtPayload(cred.idToken));
+    if (fromId)
+      return fromId;
+  }
+  return emailFromJwtPayload(decodeJwtPayload(cred.access));
+}
+
+// src/xai-login.ts
+var XAI_USERINFO_URL = "https://auth.x.ai/oauth2/userinfo";
+async function loginFromXaiUserinfo(cred, opts) {
+  if (!cred || cred.type !== "oauth")
+    return;
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  const timeoutMs = opts?.timeoutMs ?? 5000;
+  try {
+    const response = await fetchImpl(XAI_USERINFO_URL, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${cred.access}`,
+        Accept: "application/json"
+      },
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!response.ok)
+      return;
+    const parsed = await response.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return;
+    return emailFromUnknown(parsed.email);
+  } catch {
+    return;
+  }
+}
+
 // src/daemon.ts
 function readFrame(buf) {
   const idx = buf.indexOf(0);
@@ -1596,6 +1676,22 @@ class OarDaemon {
         socket.write(Buffer.concat([Buffer.from(JSON.stringify(response), "utf8"), Buffer.from([0])]));
       }
     });
+  }
+  async backfillXaiLogins(provider) {
+    if (provider && provider !== "xai")
+      return;
+    const pending = this.store.listAccounts("xai").filter((account) => !account.login);
+    if (pending.length === 0)
+      return;
+    await Promise.all(pending.map(async (account) => {
+      const login = await loginFromXaiUserinfo(this.store.getVaultCredential("xai", account.profile));
+      if (!login)
+        return;
+      const latest = this.store.getAccount("xai", account.profile);
+      if (!latest || latest.login)
+        return;
+      this.store.upsertAccount({ ...latest, login });
+    }));
   }
   async dispatch(req) {
     if (!req || req.protocol !== 1) {
@@ -1703,6 +1799,8 @@ class OarDaemon {
         return { ok: true, data: { account: updated, failover } };
       }
       case "status": {
+        this.store.backfillAccountLogins();
+        await this.backfillXaiLogins();
         const state = this.store.getState();
         const providers = [...new Set(state.accounts.map((a) => a.provider))];
         return {
@@ -1716,8 +1814,11 @@ class OarDaemon {
           }
         };
       }
-      case "accounts":
+      case "accounts": {
+        this.store.backfillAccountLogins(req.provider);
+        await this.backfillXaiLogins(req.provider);
         return { ok: true, data: this.store.listAccounts(req.provider) };
+      }
       case "add": {
         this.store.upsertAccount({
           provider: req.provider,
@@ -1755,6 +1856,7 @@ class OarDaemon {
           });
         }
         this.store.putVaultCredential(req.provider, req.profile, credential);
+        await this.backfillXaiLogins(req.provider);
         return { ok: true, data: { provider: req.provider, profile: req.profile } };
       }
       case "activate": {
@@ -2093,8 +2195,33 @@ class OarStore {
     const ref = `vault:${provider}:${profile}`;
     const existing = this.getAccount(provider, profile);
     if (existing) {
-      this.upsertAccount({ ...existing, credentialRef: ref, auth: "valid", lastChecked: new Date().toISOString() });
+      const login = loginFromCredential(credential);
+      this.upsertAccount({
+        ...existing,
+        credentialRef: ref,
+        auth: "valid",
+        lastChecked: new Date().toISOString(),
+        ...login ? { login } : {}
+      });
     }
+  }
+  backfillAccountLogins(provider) {
+    let changed = false;
+    for (const account of this.listAccounts(provider)) {
+      if (account.login)
+        continue;
+      const login = loginFromCredential(this.getVaultCredential(account.provider, account.profile));
+      if (!login)
+        continue;
+      const idx = this.state.accounts.findIndex((a) => a.provider === account.provider && a.profile === account.profile);
+      if (idx < 0)
+        continue;
+      this.state.accounts[idx] = { ...account, login };
+      changed = true;
+    }
+    if (changed)
+      this.persist();
+    return this.listAccounts(provider);
   }
   getVaultCredential(provider, profile) {
     const path = this.vaultPath(provider, profile);

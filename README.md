@@ -126,6 +126,20 @@ oar use xai main
 
 Full guide: `oar guide second-account` · [scripts/second-account.md](scripts/second-account.md)
 
+### Hidden logins inside one auth entry (xAI multi-login)
+
+xAI can put several logins (Google + Sign-in-with-Apple, etc.) inside one
+provider slot as an `accounts[]` array. OAR reads the **primary** (top-level)
+token by default, so a live secondary login can look exhausted. Pick one
+explicitly when importing:
+
+```bash
+# list what is inside (1=default, 2=login-2, ...)
+oar import-auth xai apple --account 3          # by 1-based index
+oar import-auth xai apple --account login-3    # or by name
+oar usage xai apple --refresh && oar use xai apple
+```
+
 ## Attach Argo and Buzz
 
 OAR is not forked. One vault; `oar use` dual-writes the Senpi slot **and** existing Argo/Codex files. Design: [docs/sinks.md](docs/sinks.md)

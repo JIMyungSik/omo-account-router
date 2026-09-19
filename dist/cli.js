@@ -97,11 +97,69 @@ class OarClient {
 
 // src/import-all.ts
 import { readFileSync } from "node:fs";
+
+// src/credential-identity.ts
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+function decodeJwtPayload(token) {
+  const parts = token.split(".");
+  if (parts.length < 2)
+    return;
+  const payload = parts[1];
+  if (!payload)
+    return;
+  try {
+    const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - padded.length % 4);
+    const json = Buffer.from(padded + pad, "base64").toString("utf8");
+    const parsed = JSON.parse(json);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return;
+  }
+}
+var OPENAI_PROFILE = "https://api.openai.com/profile";
+function looksLikeEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+function emailFromUnknown(value) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return looksLikeEmail(trimmed) ? trimmed : undefined;
+}
+function emailFromJwtPayload(payload) {
+  if (!payload)
+    return;
+  const nested = payload[OPENAI_PROFILE];
+  if (isRecord(nested)) {
+    const fromProfile = emailFromUnknown(nested.email);
+    if (fromProfile)
+      return fromProfile;
+  }
+  return emailFromUnknown(payload.email) ?? emailFromUnknown(payload.preferred_username);
+}
+function formatProfileLabel(profile, login) {
+  return login ? `${profile}(${login})` : profile;
+}
+function loginFromCredential(cred) {
+  if (!cred || cred.type !== "oauth")
+    return;
+  if (cred.idToken) {
+    const fromId = emailFromJwtPayload(decodeJwtPayload(cred.idToken));
+    if (fromId)
+      return fromId;
+  }
+  return emailFromJwtPayload(decodeJwtPayload(cred.access));
+}
+
+// src/import-all.ts
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 function isStoredCredential(value) {
-  if (!isRecord(value))
+  if (!isRecord2(value))
     return false;
   if (value.type === "oauth") {
     if (typeof value.access !== "string" || typeof value.refresh !== "string" || typeof value.expires !== "number") {
@@ -127,28 +185,11 @@ function parseAuthJsonFile(authPath) {
   }
   try {
     const data = JSON.parse(raw);
-    if (!isRecord(data))
+    if (!isRecord2(data))
       throw new Error("invalid auth.json");
     return data;
   } catch {
     throw new Error(`invalid auth.json: ${authPath}`);
-  }
-}
-function decodeJwtPayload(token) {
-  const parts = token.split(".");
-  if (parts.length < 2)
-    return;
-  const payload = parts[1];
-  if (!payload)
-    return;
-  try {
-    const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
-    const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - padded.length % 4);
-    const json = Buffer.from(padded + pad, "base64").toString("utf8");
-    const parsed = JSON.parse(json);
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return;
   }
 }
 function expiresFromAccessJwt(access) {
@@ -164,7 +205,7 @@ function accountIdFromIdToken(idToken) {
   if (!payload)
     return;
   const auth = payload["https://api.openai.com/auth"];
-  if (isRecord(auth)) {
+  if (isRecord2(auth)) {
     const id = auth.chatgpt_account_id;
     if (typeof id === "string" && id.length > 0)
       return id;
@@ -175,10 +216,10 @@ function accountIdFromIdToken(idToken) {
   return;
 }
 function credentialFromNativeCodexAuth(data) {
-  if (!isRecord(data))
+  if (!isRecord2(data))
     return;
   const tokens = data.tokens;
-  if (!isRecord(tokens))
+  if (!isRecord2(tokens))
     return;
   const access = tokens.access_token;
   const refresh = tokens.refresh_token;
@@ -200,17 +241,38 @@ function credentialFromNativeCodexAuth(data) {
     ...idToken ? { idToken } : {}
   };
 }
-function readCredentialFromAuthJson(authPath, provider) {
+function readCredentialFromAuthJson(authPath, provider, opts) {
   const data = parseAuthJsonFile(authPath);
   const slot = data[provider];
-  if (isStoredCredential(slot))
+  if (isStoredCredential(slot)) {
+    if (opts?.account)
+      return selectLinkedAccount(slot, provider, authPath, opts.account);
     return slot;
+  }
   if (provider === "openai-codex") {
     const native = credentialFromNativeCodexAuth(data);
     if (native)
       return native;
   }
   throw new Error(`provider ${provider} not found in ${authPath}`);
+}
+function selectLinkedAccount(slot, provider, authPath, account) {
+  const linked = slot.accounts;
+  if (!Array.isArray(linked) || linked.length === 0) {
+    throw new Error(`${provider} in ${authPath} has no accounts[] array; --account cannot be applied`);
+  }
+  const idx = /^\d+$/.test(account) ? Number(account) - 1 : linked.findIndex((a) => {
+    return isRecord2(a) && a["name"] === account;
+  });
+  if (idx < 0 || idx >= linked.length) {
+    const names = linked.map((a, i) => isRecord2(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`).join(", ");
+    throw new Error(`--account ${account} not found in ${provider} accounts[] (available: ${names})`);
+  }
+  const entry = linked[idx];
+  if (!isStoredCredential(entry)) {
+    throw new Error(`${provider} accounts[${idx + 1}] in ${authPath} is not a valid credential`);
+  }
+  return entry;
 }
 function readAllCredentialsFromAuthJson(authPath) {
   const data = parseAuthJsonFile(authPath);
@@ -542,6 +604,7 @@ function buildPanelSnapshot(status, opts) {
     rows.push({
       provider: account.provider,
       profile: account.profile,
+      login: account.login,
       auth: account.auth,
       availability: account.availability,
       mode: policy.mode ?? "manual",
@@ -635,7 +698,7 @@ function formatPanelText(snap) {
     return {
       active: r.active ? "*" : r.preferred ? "." : "",
       provider: r.provider,
-      profile: r.profile,
+      profile: formatProfileLabel(r.profile, r.login),
       status: r.availability,
       mode: r.mode,
       auto: r.autoFailover ? "on" : "off",
@@ -689,7 +752,7 @@ function formatPanelXbar(snap) {
     const rc = remoteCols(r);
     const remote = r.provider === "openai-codex" ? `5h=${rc.session} wk=${rc.weekly}` : r.provider === "xai" ? `grok=${rc.grok}` : "";
     const stats = `ok=${r.usage.success} rl=${r.usage.rateLimited}${remote ? " " + remote : ""}`;
-    lines.push(`${star}${r.profile}  ${r.availability}  ${stats} | bash=${shellQuote(process.env.HOME + "/.local/bin/oar")} param1=use param2=${r.provider} param3=${r.profile} terminal=false refresh=true`);
+    lines.push(`${star}${formatProfileLabel(r.profile, r.login)}  ${r.availability}  ${stats} | bash=${shellQuote(process.env.HOME + "/.local/bin/oar")} param1=use param2=${r.provider} param3=${r.profile} terminal=false refresh=true`);
   }
   lines.push("---");
   lines.push("Open status in terminal | bash=" + shellQuote((process.env.HOME || "") + "/.local/bin/oar") + " param1=panel terminal=true");
@@ -764,6 +827,7 @@ function buildStatusView(data) {
       active,
       provider: account.provider,
       profile: account.profile,
+      login: account.login,
       auth: account.auth,
       availability: account.availability,
       mode: pol?.mode ?? "manual",
@@ -798,6 +862,7 @@ function statusViewToJson(view) {
       active: r.active,
       provider: r.provider,
       profile: r.profile,
+      login: r.login ?? null,
       auth: r.auth,
       status: r.availability,
       mode: r.mode,
@@ -854,7 +919,7 @@ function formatStatusText(view, opts) {
   ], view.rows.map((r) => ({
     active: r.active ? "*" : "",
     provider: r.provider,
-    profile: r.profile,
+    profile: formatProfileLabel(r.profile, r.login),
     auth: colorAuth(color, r.auth),
     status: colorStatus(color, r.availability),
     mode: r.mode,
@@ -995,8 +1060,33 @@ class OarStore {
     const ref = `vault:${provider}:${profile}`;
     const existing = this.getAccount(provider, profile);
     if (existing) {
-      this.upsertAccount({ ...existing, credentialRef: ref, auth: "valid", lastChecked: new Date().toISOString() });
+      const login = loginFromCredential(credential);
+      this.upsertAccount({
+        ...existing,
+        credentialRef: ref,
+        auth: "valid",
+        lastChecked: new Date().toISOString(),
+        ...login ? { login } : {}
+      });
     }
+  }
+  backfillAccountLogins(provider) {
+    let changed = false;
+    for (const account of this.listAccounts(provider)) {
+      if (account.login)
+        continue;
+      const login = loginFromCredential(this.getVaultCredential(account.provider, account.profile));
+      if (!login)
+        continue;
+      const idx = this.state.accounts.findIndex((a) => a.provider === account.provider && a.profile === account.profile);
+      if (idx < 0)
+        continue;
+      this.state.accounts[idx] = { ...account, login };
+      changed = true;
+    }
+    if (changed)
+      this.persist();
+    return this.listAccounts(provider);
   }
   getVaultCredential(provider, profile) {
     const path = this.vaultPath(provider, profile);
@@ -1866,10 +1956,13 @@ COMMANDS
       autoFailover, and ensureActivated the preferred profile. OMO extension
       also runs this on session_start so daily use needs no manual oar.
 
-  oar import-auth <provider> <profile> [--from <auth.json>]
+  oar import-auth <provider> <profile> [--from <auth.json>] [--account <n|name>]
       Copy one provider credential from Senpi auth.json (default ~/.omo/agent/auth.json)
       into the OAR vault. For openai-codex, --from may also be a native Codex
       auth.json (tokens.id_token + account_id; expiry from access-token JWT exp).
+      When the provider slot carries a multi-login accounts[] array (e.g. xAI
+      Google + Sign-in-with-Apple under one entry), --account selects one by
+      1-based index or by its name field (default: primary/top-level token).
       Secrets stay in the vault; nothing is printed.
 
   oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
@@ -2246,10 +2339,14 @@ ${suggestAccounts(provider)}`);
       }
       const [provider, profile] = rest;
       if (!provider || !profile) {
-        throw new Error(`usage: oar import-auth <provider> <profile> [--from path]
+        throw new Error(`usage: oar import-auth <provider> <profile> [--from path] [--account <n|name>]
    or: oar import-auth --all [--from path] [--profile name] [--force]`);
       }
-      const credential = readCredentialFromAuthJson(from, provider);
+      let account;
+      const accountIdx = rest.indexOf("--account");
+      if (accountIdx >= 0 && rest[accountIdx + 1])
+        account = rest[accountIdx + 1];
+      const credential = readCredentialFromAuthJson(from, provider, account ? { account } : undefined);
       const res = await req({
         protocol: 1,
         action: "import-credential",

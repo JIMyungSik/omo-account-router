@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import type { OarClient } from "./client.ts";
+import { decodeJwtPayload } from "./credential-identity.ts";
 import type { OAuthCredential, StoredCredential } from "./types.ts";
+
+export { decodeJwtPayload } from "./credential-identity.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -35,22 +38,6 @@ function parseAuthJsonFile(authPath: string): Record<string, unknown> {
     return data;
   } catch {
     throw new Error(`invalid auth.json: ${authPath}`);
-  }
-}
-
-export function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
-  const parts = token.split(".");
-  if (parts.length < 2) return undefined;
-  const payload = parts[1];
-  if (!payload) return undefined;
-  try {
-    const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
-    const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - (padded.length % 4));
-    const json = Buffer.from(padded + pad, "base64").toString("utf8");
-    const parsed: unknown = JSON.parse(json);
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
   }
 }
 
@@ -102,17 +89,56 @@ export function credentialFromNativeCodexAuth(data: unknown): OAuthCredential | 
 /**
  * Reads one provider from Senpi auth.json, or a native Codex CLI auth.json when
  * `provider` is `openai-codex` and the file is the Codex tokens document.
+ * When the provider slot carries a multi-login `accounts[]` array (e.g. xAI
+ * Google + Sign-in-with-Apple under one entry), `opts.account` selects one by
+ * 1-based index ("2") or by its `name` field ("login-2"). Without `opts.account`
+ * the primary (top-level) credential is returned, as before.
  * Never mints an ID token.
  */
-export function readCredentialFromAuthJson(authPath: string, provider: string): StoredCredential {
+export function readCredentialFromAuthJson(
+  authPath: string,
+  provider: string,
+  opts?: { account?: string },
+): StoredCredential {
   const data = parseAuthJsonFile(authPath);
   const slot = data[provider];
-  if (isStoredCredential(slot)) return slot;
+  if (isStoredCredential(slot)) {
+    if (opts?.account) return selectLinkedAccount(slot, provider, authPath, opts.account);
+    return slot;
+  }
   if (provider === "openai-codex") {
     const native = credentialFromNativeCodexAuth(data);
     if (native) return native;
   }
   throw new Error(`provider ${provider} not found in ${authPath}`);
+}
+
+/**
+ * Picks one credential out of a multi-login `accounts[]` array. Selection is by
+ * 1-based index or by the entry's `name` field. The primary token is index 1.
+ */
+function selectLinkedAccount(
+  slot: StoredCredential,
+  provider: string,
+  authPath: string,
+  account: string,
+): StoredCredential {
+  const linked = (slot as { accounts?: unknown }).accounts;
+  if (!Array.isArray(linked) || linked.length === 0) {
+    throw new Error(`${provider} in ${authPath} has no accounts[] array; --account cannot be applied`);
+  }
+  const idx = /^\d+$/.test(account) ? Number(account) - 1 : linked.findIndex((a) => {
+    return isRecord(a) && a["name"] === account;
+  });
+  if (idx < 0 || idx >= linked.length) {
+    const names = linked.map((a, i) => (isRecord(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`)).join(", ");
+    throw new Error(`--account ${account} not found in ${provider} accounts[] (available: ${names})`);
+  }
+  const entry = linked[idx];
+  if (!isStoredCredential(entry)) {
+    throw new Error(`${provider} accounts[${idx + 1}] in ${authPath} is not a valid credential`);
+  }
+  return entry;
 }
 
 /**
