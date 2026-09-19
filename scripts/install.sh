@@ -83,8 +83,10 @@ if [ -d "$HOME_DIR/.omo/agent" ]; then
   mkdir -p "$EXT_DIR"
   ln -sf "$ROOT/extensions/oar-senpi.js" "$EXT_DIR/oar.js"
   ln -sf "$ROOT/extensions/cursor-omo.js" "$EXT_DIR/cursor-omo.js"
+  ln -sf "$ROOT/extensions/oar-usage-status.js" "$EXT_DIR/oar-usage-status.js"
   echo "    linked $EXT_DIR/oar.js -> $ROOT/extensions/oar-senpi.js"
   echo "    linked $EXT_DIR/cursor-omo.js (Cursor provider via local bridge)"
+  echo "    linked $EXT_DIR/oar-usage-status.js (Grok/Codex remaining % footer)"
 else
   echo "    skipped: $HOME_DIR/.omo/agent not found (OMO not installed for this user yet)"
 fi

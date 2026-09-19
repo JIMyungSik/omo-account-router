@@ -63,6 +63,7 @@ describe("panel aggregation", () => {
           {
             provider: "xai",
             profile: "main",
+            login: "user@example.com",
             auth: "valid",
             availability: "AVAILABLE",
             priority: 100,
@@ -84,6 +85,7 @@ describe("panel aggregation", () => {
         {
           provider: "xai",
           profile: "main",
+          login: "user@example.com",
           auth: "valid",
           availability: "AVAILABLE",
           priority: 100,
@@ -111,14 +113,18 @@ describe("panel aggregation", () => {
     const snap = buildPanelSnapshot(status, { windowHours: 24, eventsPath });
     expect(snap.rows[0]?.active).toBe(true);
     expect(snap.rows[0]?.profile).toBe("main");
+    expect(snap.rows[0]?.login).toBe("user@example.com");
     expect(snap.totals.success).toBe(1);
     const text = formatPanelText(snap);
     expect(text).toContain("xai");
     expect(text).toContain("*");
     expect(text).toContain("PROVIDER");
+    expect(text).toContain("main(user@example.com)");
     expect(text.toLowerCase()).not.toContain("access_token");
     const xbar = formatPanelXbar(snap);
     expect(xbar.startsWith("OAR ")).toBe(true);
+    expect(xbar).toContain("main(user@example.com)");
     expect(xbar).toContain("param1=use");
+    expect(xbar).toContain("param3=main");
   });
 });

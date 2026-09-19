@@ -64,6 +64,8 @@ export type AccountRecord = {
   availability: AccountAvailability;
   priority: number;
   credentialRef: string;
+  /** Vault login email when extractable. Display-only; profile id stays the machine key. */
+  login?: string;
   reason?: string;
   until?: string | null;
   lastChecked?: string;

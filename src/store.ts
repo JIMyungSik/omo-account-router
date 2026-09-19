@@ -17,6 +17,7 @@ import type {
   ProviderPolicy,
   StoredCredential,
 } from "./types.ts";
+import { loginFromCredential } from "./credential-identity.ts";
 import { defaultOarRoot, oarStatePath, oarVaultDir } from "./paths.ts";
 
 const DEFAULT_POLICY: ProviderPolicy = {
@@ -143,8 +144,33 @@ export class OarStore {
     const ref = `vault:${provider}:${profile}`;
     const existing = this.getAccount(provider, profile);
     if (existing) {
-      this.upsertAccount({ ...existing, credentialRef: ref, auth: "valid", lastChecked: new Date().toISOString() });
+      const login = loginFromCredential(credential);
+      this.upsertAccount({
+        ...existing,
+        credentialRef: ref,
+        auth: "valid",
+        lastChecked: new Date().toISOString(),
+        ...(login ? { login } : {}),
+      });
     }
+  }
+
+  /** Persist login only when missing and vault JWT yields an email. */
+  backfillAccountLogins(provider?: ProviderId): AccountRecord[] {
+    let changed = false;
+    for (const account of this.listAccounts(provider)) {
+      if (account.login) continue;
+      const login = loginFromCredential(this.getVaultCredential(account.provider, account.profile));
+      if (!login) continue;
+      const idx = this.state.accounts.findIndex(
+        (a) => a.provider === account.provider && a.profile === account.profile,
+      );
+      if (idx < 0) continue;
+      this.state.accounts[idx] = { ...account, login };
+      changed = true;
+    }
+    if (changed) this.persist();
+    return this.listAccounts(provider);
   }
 
   getVaultCredential(provider: ProviderId, profile: ProfileId): StoredCredential | undefined {

@@ -1,3 +1,4 @@
+import { formatProfileLabel } from "./credential-identity.ts";
 import { formatMarkdownTable } from "./table.ts";
 import type { AccountAvailability, AccountRecord, AuthHealth } from "./types.ts";
 
@@ -20,6 +21,7 @@ export type StatusRowView = {
   active: boolean;
   provider: string;
   profile: string;
+  login?: string;
   auth: AuthHealth;
   availability: AccountAvailability;
   mode: string;
@@ -48,6 +50,7 @@ export type StatusJson = {
     active: boolean;
     provider: string;
     profile: string;
+    login: string | null;
     auth: AuthHealth;
     status: AccountAvailability;
     mode: string;
@@ -110,6 +113,7 @@ export function buildStatusView(data: StatusInput): StatusView {
       active,
       provider: account.provider,
       profile: account.profile,
+      login: account.login,
       auth: account.auth,
       availability: account.availability,
       mode: pol?.mode ?? "manual",
@@ -145,6 +149,7 @@ export function statusViewToJson(view: StatusView): StatusJson {
       active: r.active,
       provider: r.provider,
       profile: r.profile,
+      login: r.login ?? null,
       auth: r.auth,
       status: r.availability,
       mode: r.mode,
@@ -207,7 +212,7 @@ export function formatStatusText(view: StatusView, opts?: { color?: boolean }): 
       view.rows.map((r) => ({
         active: r.active ? "*" : "",
         provider: r.provider,
-        profile: r.profile,
+        profile: formatProfileLabel(r.profile, r.login),
         auth: colorAuth(color, r.auth),
         status: colorStatus(color, r.availability),
         mode: r.mode,

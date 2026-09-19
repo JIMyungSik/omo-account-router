@@ -13,6 +13,7 @@ import { AccountRefreshLock } from "./refresh-lock.ts";
 import { OarRouter } from "./router.ts";
 import type { OarStore } from "./store.ts";
 import type { StoredCredential } from "./types.ts";
+import { loginFromXaiUserinfo } from "./xai-login.ts";
 
 export type DaemonOptions = {
   store: OarStore;
@@ -131,6 +132,24 @@ export class OarDaemon {
         socket.write(Buffer.concat([Buffer.from(JSON.stringify(response), "utf8"), Buffer.from([0])]));
       }
     });
+  }
+
+  /** OIDC userinfo for xAI profiles that JWT decode cannot label. Persists once. */
+  private async backfillXaiLogins(provider?: string): Promise<void> {
+    if (provider && provider !== "xai") return;
+    const pending = this.store.listAccounts("xai").filter((account) => !account.login);
+    if (pending.length === 0) return;
+    await Promise.all(
+      pending.map(async (account) => {
+        const login = await loginFromXaiUserinfo(
+          this.store.getVaultCredential("xai", account.profile),
+        );
+        if (!login) return;
+        const latest = this.store.getAccount("xai", account.profile);
+        if (!latest || latest.login) return;
+        this.store.upsertAccount({ ...latest, login });
+      }),
+    );
   }
 
   async dispatch(req: OarRequest): Promise<OarResponse> {
@@ -253,6 +272,8 @@ export class OarDaemon {
         return { ok: true, data: { account: updated, failover } };
       }
       case "status": {
+        this.store.backfillAccountLogins();
+        await this.backfillXaiLogins();
         const state = this.store.getState();
         const providers = [...new Set(state.accounts.map((a) => a.provider))];
         return {
@@ -266,8 +287,11 @@ export class OarDaemon {
           },
         };
       }
-      case "accounts":
+      case "accounts": {
+        this.store.backfillAccountLogins(req.provider);
+        await this.backfillXaiLogins(req.provider);
         return { ok: true, data: this.store.listAccounts(req.provider) };
+      }
       case "add": {
         this.store.upsertAccount({
           provider: req.provider,
@@ -305,6 +329,7 @@ export class OarDaemon {
           });
         }
         this.store.putVaultCredential(req.provider, req.profile, credential);
+        await this.backfillXaiLogins(req.provider);
         return { ok: true, data: { provider: req.provider, profile: req.profile } };
       }
       case "activate": {

@@ -29,7 +29,7 @@ const sample: StatusInput = {
       reason: "token expired",
       until: "2026-08-22T03:00:00.000Z",
     }),
-    account({ provider: "xai", profile: "main" }),
+    account({ provider: "xai", profile: "main", login: "user@example.com" }),
     account({
       provider: "openai-codex",
       profile: "work",
@@ -90,7 +90,7 @@ describe("status formatter", () => {
     expect(text).toContain("active 2");
     expect(text).toContain("problematic 2");
     expect(text).toMatch(/\|\s*\*\s+\|/);
-    expect(text).toMatch(/\|\s*xai\s+\|\s*main\s+\|/);
+    expect(text).toMatch(/\|\s*xai\s+\|\s*main\(user@example\.com\)\s+\|/);
     expect(text).toContain("Legend:");
     expect(text).toContain("AUTH");
     expect(text).toContain("STATUS");
@@ -119,10 +119,15 @@ describe("status formatter", () => {
       active: true,
       provider: "openai-codex",
       profile: "main",
+      login: null,
       auth: "valid",
       status: "AVAILABLE",
       mode: "manual",
       auto: false,
+    });
+    expect(json.rows.find((r) => r.provider === "xai" && r.profile === "main")).toMatchObject({
+      profile: "main",
+      login: "user@example.com",
     });
     expect(json.authPaths).toEqual(["/tmp/auth.json"]);
   });

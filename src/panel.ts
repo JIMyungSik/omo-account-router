@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { formatProfileLabel } from "./credential-identity.ts";
 import { oarEventsPath } from "./paths.ts";
 import { formatMarkdownTable } from "./table.ts";
 import type { AccountRemoteUsage } from "./usage/types.ts";
@@ -36,6 +37,7 @@ export type AccountUsageStats = {
 export type PanelRow = {
   provider: string;
   profile: string;
+  login?: string;
   auth: string;
   availability: string;
   mode: string;
@@ -201,6 +203,7 @@ export function buildPanelSnapshot(
     rows.push({
       provider: account.provider,
       profile: account.profile,
+      login: account.login,
       auth: account.auth,
       availability: account.availability,
       mode: policy.mode ?? "manual",
@@ -312,7 +315,7 @@ export function formatPanelText(snap: PanelSnapshot): string {
         return {
           active: r.active ? "*" : r.preferred ? "." : "",
           provider: r.provider,
-          profile: r.profile,
+          profile: formatProfileLabel(r.profile, r.login),
           status: r.availability,
           mode: r.mode,
           auto: r.autoFailover ? "on" : "off",
@@ -378,7 +381,7 @@ export function formatPanelXbar(snap: PanelSnapshot): string {
           : "";
     const stats = `ok=${r.usage.success} rl=${r.usage.rateLimited}${remote ? " " + remote : ""}`;
     lines.push(
-      `${star}${r.profile}  ${r.availability}  ${stats} | bash=${shellQuote(process.env.HOME + "/.local/bin/oar")} param1=use param2=${r.provider} param3=${r.profile} terminal=false refresh=true`,
+      `${star}${formatProfileLabel(r.profile, r.login)}  ${r.availability}  ${stats} | bash=${shellQuote(process.env.HOME + "/.local/bin/oar")} param1=use param2=${r.provider} param3=${r.profile} terminal=false refresh=true`,
     );
   }
   lines.push("---");
