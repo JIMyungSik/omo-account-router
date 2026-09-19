@@ -10,6 +10,7 @@ import { EventLog } from "./events.ts";
 import { LeaseManager } from "./lease.ts";
 import type { OarRequest, OarResponse } from "./protocol.ts";
 import { AccountRefreshLock } from "./refresh-lock.ts";
+import { parseReportResult } from "./report-results.ts";
 import { OarRouter } from "./router.ts";
 import type { OarStore } from "./store.ts";
 import type { StoredCredential } from "./types.ts";
@@ -220,13 +221,35 @@ export class OarDaemon {
         this.router.setMode(req.provider, req.mode);
         return { ok: true, data: { provider: req.provider, mode: req.mode } };
       case "report": {
+        let parsedResult: ReturnType<typeof parseReportResult>;
+        try {
+          parsedResult = parseReportResult(String(req.result));
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        const existing = this.store.getAccount(req.provider, req.account);
+        if (!existing) {
+          return {
+            ok: false,
+            error: `unknown account ${req.provider}/${req.account}`,
+          };
+        }
         const updated = this.router.reportResult({
           provider: req.provider,
           account: req.account,
-          result: req.result,
+          result: parsedResult,
           retryAfterSec: req.retryAfterSec,
           detail: req.detail,
         });
+        if (!updated) {
+          return {
+            ok: false,
+            error: `unknown account ${req.provider}/${req.account}`,
+          };
+        }
         this.events.append({
           ts: new Date().toISOString(),
           event: "report",
@@ -304,6 +327,13 @@ export class OarDaemon {
         return { ok: true, data: this.store.getAccount(req.provider, req.profile) };
       }
       case "remove": {
+        const existing = this.store.getAccount(req.provider, req.profile);
+        if (!existing) {
+          return {
+            ok: false,
+            error: `unknown account ${req.provider}/${req.profile}`,
+          };
+        }
         this.store.removeAccount(req.provider, req.profile);
         this.events.append({
           ts: new Date().toISOString(),

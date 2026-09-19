@@ -1311,6 +1311,35 @@ class AccountRefreshLock {
   }
 }
 
+// src/report-results.ts
+var REPORT_RESULTS = [
+  "SUCCESS",
+  "AUTH_EXPIRED",
+  "AUTH_REVOKED",
+  "RATE_LIMITED",
+  "QUOTA_EXHAUSTED",
+  "NETWORK_ERROR",
+  "SERVER_ERROR",
+  "BAD_REQUEST",
+  "INVALID_ARGUMENT",
+  "MODEL_NOT_FOUND",
+  "PROMPT_ERROR",
+  "TOOL_ERROR",
+  "LOCAL_ERROR",
+  "UNKNOWN"
+];
+var REPORT_RESULT_SET = new Set(REPORT_RESULTS);
+function isReportResult(value) {
+  return REPORT_RESULT_SET.has(value);
+}
+function parseReportResult(value) {
+  if (!isReportResult(value)) {
+    throw new Error(`invalid report result: ${value}
+` + `expected one of: ${REPORT_RESULTS.join(", ")}`);
+  }
+  return value;
+}
+
 // src/router.ts
 var ELIGIBLE = ["AVAILABLE", "ACTIVE"];
 function isEligible(a, now = Date.now()) {
@@ -1480,6 +1509,17 @@ class OarRouter {
         next.availability = "QUOTA_EXHAUSTED";
         next.until = req.retryAfterSec ? new Date(Date.now() + req.retryAfterSec * 1000).toISOString() : null;
         break;
+      case "NETWORK_ERROR":
+      case "SERVER_ERROR":
+      case "BAD_REQUEST":
+      case "INVALID_ARGUMENT":
+      case "MODEL_NOT_FOUND":
+      case "PROMPT_ERROR":
+      case "TOOL_ERROR":
+      case "LOCAL_ERROR":
+      case "UNKNOWN":
+        this.store.upsertAccount(next);
+        return next;
       default:
         this.store.upsertAccount(next);
         return next;
@@ -1756,13 +1796,35 @@ class OarDaemon {
         this.router.setMode(req.provider, req.mode);
         return { ok: true, data: { provider: req.provider, mode: req.mode } };
       case "report": {
+        let parsedResult;
+        try {
+          parsedResult = parseReportResult(String(req.result));
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+        const existing = this.store.getAccount(req.provider, req.account);
+        if (!existing) {
+          return {
+            ok: false,
+            error: `unknown account ${req.provider}/${req.account}`
+          };
+        }
         const updated = this.router.reportResult({
           provider: req.provider,
           account: req.account,
-          result: req.result,
+          result: parsedResult,
           retryAfterSec: req.retryAfterSec,
           detail: req.detail
         });
+        if (!updated) {
+          return {
+            ok: false,
+            error: `unknown account ${req.provider}/${req.account}`
+          };
+        }
         this.events.append({
           ts: new Date().toISOString(),
           event: "report",
@@ -1831,6 +1893,13 @@ class OarDaemon {
         return { ok: true, data: this.store.getAccount(req.provider, req.profile) };
       }
       case "remove": {
+        const existing = this.store.getAccount(req.provider, req.profile);
+        if (!existing) {
+          return {
+            ok: false,
+            error: `unknown account ${req.provider}/${req.profile}`
+          };
+        }
         this.store.removeAccount(req.provider, req.profile);
         this.events.append({
           ts: new Date().toISOString(),

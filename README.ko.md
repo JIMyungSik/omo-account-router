@@ -19,7 +19,7 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 | | |
 |--|--|
 | 패키지명 | **`oar-cli`** (실행 명령은 **`oar`**) |
-| 버전 | `0.1.7` |
+| 버전 | `0.2.0` |
 | 라이선스 | [MIT](LICENSE) |
 | 런타임 | Node.js **22+** (개발 시 Bun 선택) |
 | 테스트 | `bun test` |
@@ -92,6 +92,10 @@ oar status
 oar panel --refresh         # 표: 활성 슬롯 + 로컬 신호 + 원격 %
 oar usage --refresh         # Codex 5h/주간 + Grok 구독 잔여
 oar recommend --refresh     # 다음에 쓸 계정 순위 표
+
+# 구독료 절감 감사 (월 $ 수동 입력 + usage 휴리스틱)
+oar subscriptions set xai main --monthly-usd 30 --plan "SuperGrok"
+oar subscriptions audit --refresh
 
 # 현재 로그인 vault 적재
 oar import-auth --all
@@ -297,7 +301,10 @@ sink 쓰기가 실패해도 OMO `auth.json`은 롤백하지 않습니다. 없는
 | `oar status` | 프로필 + 활성 `*` |
 | `oar panel [--refresh] [--watch N] [--json] [--xbar]` | 대시보드 표 |
 | `oar usage [provider] [profile] [--refresh]` | 잔여 % 표 |
-| `oar recommend [--refresh] [provider...]` | 잔여 % 기준 순위 표 |
+| `oar recommend [--refresh] [--json] [provider...]` | 잔여 % 기준 순위 표 |
+| `oar subscriptions list` | 설정된 월 구독료 |
+| `oar subscriptions set <p> <profile> --monthly-usd <n>` | 월 비용 기록 |
+| `oar subscriptions audit [--json] [--refresh]` | 유지/해지 후보 + 절감액 |
 | `oar accounts [provider]` | JSON 목록 |
 | `oar import-auth …` / `--all` | vault 적재 |
 | `oar use <p> <profile> [--force]` | 전환 (0% 거절) |

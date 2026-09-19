@@ -1,4 +1,5 @@
 import { isEligible } from "../router.ts";
+import { defaultOarRoot } from "../paths.ts";
 import type { OarStore } from "../store.ts";
 import { formatMarkdownTable } from "../table.ts";
 import type { AccountRecord } from "../types.ts";

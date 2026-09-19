@@ -19,7 +19,7 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 | | |
 |--|--|
 | Package | **`oar-cli`** on npm path (command is still **`oar`**) |
-| Version | `0.1.7` |
+| Version | `0.2.0` |
 | License | [MIT](LICENSE) |
 | Runtime | Node.js **22+** (Bun optional for dev) |
 | Tests | `bun test` |
@@ -93,6 +93,10 @@ oar status
 oar panel --refresh         # table: live slot + local signals + remote %
 oar usage --refresh         # Codex 5h/week + Grok subscription remaining
 oar recommend --refresh     # ranked “what to use next”
+
+# subscription cost audit (manual monthly $ + usage heuristics)
+oar subscriptions set xai main --monthly-usd 30 --plan "SuperGrok"
+oar subscriptions audit --refresh
 
 # vault current logins
 oar import-auth --all
@@ -298,7 +302,10 @@ Sink failures do not roll back the OMO slot. Missing files are skipped, not crea
 | `oar status` | Profiles + active `*` |
 | `oar panel [--refresh] [--watch N] [--json] [--xbar]` | Full dashboard table |
 | `oar usage [provider] [profile] [--refresh]` | Remaining % table |
-| `oar recommend [--refresh] [provider...]` | Ranked accounts by remaining % |
+| `oar recommend [--refresh] [--json] [provider...]` | Ranked accounts by remaining % |
+| `oar subscriptions list` | Configured monthly plan costs |
+| `oar subscriptions set <p> <profile> --monthly-usd <n>` | Record plan cost |
+| `oar subscriptions audit [--json] [--refresh]` | Keep/cancel heuristic + savings |
 | `oar accounts [provider]` | JSON list |
 | `oar import-auth <p> <profile> [--from path]` | auth.json → vault |
 | `oar import-auth --all [--force]` | Import every provider |

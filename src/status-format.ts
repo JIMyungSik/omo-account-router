@@ -29,6 +29,7 @@ export type StatusRowView = {
   preferred: boolean;
   until?: string | null;
   reason?: string;
+  lastChecked?: string;
   note: string;
 };
 
@@ -121,6 +122,7 @@ export function buildStatusView(data: StatusInput): StatusView {
       preferred: pol?.preferred === account.profile,
       until: account.until ?? null,
       reason: account.reason,
+      lastChecked: account.lastChecked,
       note: buildNote(account),
     };
   });
@@ -226,6 +228,7 @@ export function formatStatusText(view: StatusView, opts?: { color?: boolean }): 
   lines.push("  AUTH    Vault/import health (valid | expired | revoked | unknown).");
   lines.push("  STATUS  Routing eligibility (AVAILABLE, QUOTA_EXHAUSTED, RATE_LIMITED, …).");
   lines.push("  ACTIVE  * = live auth slot for that provider (target of oar use).");
+  lines.push("  NOTE    Stale AUTH hints when vault token expired but metadata still valid.");
   lines.push("");
   lines.push("Next: oar panel --refresh | oar usage | oar use <provider> <profile>");
   lines.push("");

@@ -4,8 +4,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { applyAuthStaleHints } from "./auth-stale.ts";
 import { OarClient } from "./client.ts";
+import { positionalArgs, rejectUnknownFlags } from "./cli-flags.ts";
 import { importAllFromAuthJson, readCredentialFromAuthJson } from "./import-all.ts";
+import { parseReportResult } from "./report-results.ts";
 import { formatSinkResultLines } from "./sinks/index.ts";
 import type { SinkApplyResult } from "./sinks/types.ts";
 import {
@@ -21,10 +24,24 @@ import { buildStatusView, formatStatusText, statusViewToJson, wantStatusColor } 
 import { OarStore } from "./store.ts";
 import { fetchRemoteUsage, fetchRemoteUsageForAccounts } from "./usage/fetch.ts";
 import { formatUsageTable } from "./usage/format.ts";
+import { buildSubscriptionAudit } from "./subscriptions/audit.ts";
+import { auditToJson, formatAuditText, formatSubscriptionsList } from "./subscriptions/format.ts";
+import { SubscriptionsStore } from "./subscriptions/store.ts";
 import { buildRecommendations, formatRecommendTable } from "./usage/recommend.ts";
 import type { AccountRecord } from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function readPackageVersion(): string {
+  const pkgPath = join(__dirname, "..", "package.json");
+  if (!existsSync(pkgPath)) return "unknown";
+  try {
+    const parsed = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+    return parsed.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 
 function usage(): string {
   return `oar — OMO Account Router
@@ -130,9 +147,23 @@ COMMANDS
       Remote quota table for openai-codex and xai (5H/WK/Grok %). OK = request ok.
       Omit args to list all supported accounts. Updates daemon on 0% exhaustion.
 
-  oar recommend [--refresh] [provider...]
+  oar recommend [--refresh] [--json] [provider...]
       Rank profiles by eligibility + remote remaining %. Optional provider filter.
       --refresh  Fetch fresh usage (default). Daemon must be running for full sync.
+      --json     Structured rows + topPick (machine output).
+
+  oar subscriptions list
+      Show configured monthly plan costs (subscriptions.json under OAR_HOME).
+
+  oar subscriptions set <provider> <profile> --monthly-usd <n> [--plan "label"]
+      Record monthly subscription cost for a vault profile.
+
+  oar subscriptions remove <provider> <profile>
+      Remove a configured plan cost.
+
+  oar subscriptions audit [--json] [--refresh]
+      Join vault usage + eligibility + configured costs; suggest keep/cancel/fix
+      and estimate potential monthly savings (heuristic, not financial advice).
 
   oar doctor
       Local diagnostics: paths, Senpi install, auth.json discovery, daemon JSON.
@@ -227,6 +258,18 @@ async function req(request: OarRequest) {
   return withClient((c) => c.request(request));
 }
 
+async function warnIfDaemonDown(scope: string): Promise<boolean> {
+  try {
+    const res = await req({ protocol: 1, action: "ping" });
+    return res.ok;
+  } catch {
+    console.error(
+      `warning: OAR daemon unavailable — ${scope} uses cached/local vault data only (may be stale). Run: oar daemon start`,
+    );
+    return false;
+  }
+}
+
 function printStatus(
   data: {
     accounts: AccountRecord[];
@@ -236,7 +279,10 @@ function printStatus(
   },
   opts?: { json?: boolean },
 ) {
-  const view = buildStatusView(data);
+  const root = process.env.OAR_HOME ?? defaultOarRoot();
+  const store = new OarStore({ rootDir: root });
+  let view = buildStatusView(data);
+  view = { ...view, rows: applyAuthStaleHints(view.rows, store) };
   if (opts?.json) {
     console.log(JSON.stringify(statusViewToJson(view), null, 2));
     return;
@@ -337,6 +383,14 @@ async function main(argv: string[]) {
     console.log(usage());
     return;
   }
+  if (cmd === "--version" || cmd === "-V") {
+    console.log(readPackageVersion());
+    return;
+  }
+  if (cmd === "help") {
+    console.log(usage());
+    return;
+  }
   // Bare \`oar\` → friendly snapshot (not a wall of help).
   if (!cmd) {
     try {
@@ -355,6 +409,7 @@ async function main(argv: string[]) {
 
   switch (cmd) {
     case "status": {
+      rejectUnknownFlags(rest, new Set(["--json"]));
       const res = await req({ protocol: 1, action: "status" });
       if (!res.ok) throw new Error(res.error);
       printStatus(res.data as Parameters<typeof printStatus>[0], { json: rest.includes("--json") });
@@ -392,9 +447,9 @@ async function main(argv: string[]) {
       return;
     }
     case "use": {
+      rejectUnknownFlags(rest, new Set(["--force"]));
       const force = rest.includes("--force");
-      const args = rest.filter((a) => a !== "--force");
-      const [provider, profile] = args;
+      const [provider, profile] = positionalArgs(rest);
       if (!provider || !profile) {
         throw new Error("usage: oar use <provider> <profile> [--force]\n" + suggestAccounts());
       }
@@ -480,6 +535,15 @@ async function main(argv: string[]) {
       return;
     }
     case "import-auth": {
+      if (rest.includes("--all")) {
+        rejectUnknownFlags(
+          rest,
+          new Set(["--all", "--from", "--force", "--profile"]),
+          new Set(["--from", "--profile"]),
+        );
+      } else {
+        rejectUnknownFlags(rest, new Set(["--from", "--account"]), new Set(["--from", "--account"]));
+      }
       let from = join(homedir(), ".omo", "agent", "auth.json");
       const fromIdx = rest.indexOf("--from");
       if (fromIdx >= 0 && rest[fromIdx + 1]) from = rest[fromIdx + 1]!;
@@ -502,7 +566,7 @@ async function main(argv: string[]) {
         return;
       }
 
-      const [provider, profile] = rest;
+      const [provider, profile] = positionalArgs(rest, new Set(["--from", "--account"]));
       if (!provider || !profile) {
         throw new Error("usage: oar import-auth <provider> <profile> [--from path] [--account <n|name>]\n   or: oar import-auth --all [--from path] [--profile name] [--force]");
       }
@@ -587,7 +651,8 @@ async function main(argv: string[]) {
       return;
     }
     case "test": {
-      const [provider, profile] = rest;
+      rejectUnknownFlags(rest, new Set(["--live"]));
+      const [provider, profile] = positionalArgs(rest);
       if (!provider || !profile) throw new Error("usage: oar test <provider> <profile> [--live]");
       const live = rest.includes("--live");
       const res = await req({ protocol: 1, action: "test", provider, profile, live });
@@ -603,6 +668,7 @@ async function main(argv: string[]) {
     case "report": {
       const [provider, profile, result] = rest;
       if (!provider || !profile || !result) throw new Error("usage: oar report <provider> <profile> <RESULT>");
+      parseReportResult(result);
       const res = await req({
         protocol: 1,
         action: "report",
@@ -615,6 +681,11 @@ async function main(argv: string[]) {
       return;
     }
     case "panel": {
+      rejectUnknownFlags(
+        rest,
+        new Set(["--watch", "--json", "--xbar", "--hours", "--refresh", "--no-remote"]),
+        new Set(["--hours"]),
+      );
       const watchIdx = rest.indexOf("--watch");
       const json = rest.includes("--json");
       const xbar = rest.includes("--xbar");
@@ -674,6 +745,8 @@ async function main(argv: string[]) {
       return;
     }
     case "usage": {
+      rejectUnknownFlags(rest, new Set(["--refresh"]));
+      await warnIfDaemonDown("usage");
       const refresh = rest.includes("--refresh");
       const args = rest.filter((a) => !a.startsWith("--"));
       const root = process.env.OAR_HOME ?? defaultOarRoot();
@@ -726,8 +799,11 @@ async function main(argv: string[]) {
     case "recommend":
     case "recommand": {
       // accept common typo "recommand"
+      rejectUnknownFlags(rest, new Set(["--refresh", "--cache", "--json"]));
+      await warnIfDaemonDown("recommend");
+      const json = rest.includes("--json");
       const refresh = rest.includes("--refresh") || !rest.includes("--cache");
-      const providers = rest.filter((a) => !a.startsWith("--"));
+      const providers = positionalArgs(rest);
       const root = process.env.OAR_HOME ?? defaultOarRoot();
       const store = new OarStore({ rootDir: root });
       // Prefer daemon account list so eligibility matches runtime
@@ -761,7 +837,22 @@ async function main(argv: string[]) {
           }
         }
       }
-      console.log(formatRecommendTable(rows));
+      if (json) {
+        const top = rows.find((r) => r.score > 0 && r.eligibility === "ok");
+        console.log(
+          JSON.stringify(
+            {
+              generatedAt: new Date().toISOString(),
+              topPick: top ? { provider: top.provider, profile: top.profile } : null,
+              rows,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        console.log(formatRecommendTable(rows));
+      }
       return;
     }
     case "bootstrap-auto": {
@@ -769,6 +860,89 @@ async function main(argv: string[]) {
       if (!res.ok) throw new Error(res.error);
       console.log(JSON.stringify(res.data, null, 2));
       return;
+    }
+    case "subscriptions": {
+      const sub = rest[0];
+      const root = process.env.OAR_HOME ?? defaultOarRoot();
+      const subsStore = new SubscriptionsStore({ rootDir: root });
+      const oarStore = new OarStore({ rootDir: root });
+
+      if (sub === "list") {
+        rejectUnknownFlags(rest.slice(1), new Set([]));
+        console.log(formatSubscriptionsList(subsStore.list()));
+        return;
+      }
+
+      if (sub === "set") {
+        const valueFlags = new Set(["--monthly-usd", "--plan", "--billing-cycle-day", "--notes"]);
+        rejectUnknownFlags(rest.slice(1), valueFlags, valueFlags);
+        const [provider, profile] = positionalArgs(rest.slice(1), valueFlags);
+        if (!provider || !profile) {
+          throw new Error(
+            "usage: oar subscriptions set <provider> <profile> --monthly-usd <n> [--plan \"label\"] [--billing-cycle-day N]",
+          );
+        }
+        const usdIdx = rest.indexOf("--monthly-usd");
+        if (usdIdx < 0 || !rest[usdIdx + 1]) {
+          throw new Error("--monthly-usd is required and must be a non-negative number");
+        }
+        const monthlyUsd = Number(rest[usdIdx + 1]);
+        let planLabel: string | undefined;
+        const planIdx = rest.indexOf("--plan");
+        if (planIdx >= 0 && rest[planIdx + 1]) planLabel = rest[planIdx + 1];
+        let billingCycleDay: number | undefined;
+        const cycleIdx = rest.indexOf("--billing-cycle-day");
+        if (cycleIdx >= 0 && rest[cycleIdx + 1]) {
+          billingCycleDay = Number(rest[cycleIdx + 1]);
+          if (!Number.isFinite(billingCycleDay) || billingCycleDay < 1 || billingCycleDay > 31) {
+            throw new Error("--billing-cycle-day must be 1–31");
+          }
+        }
+        let notes: string | undefined;
+        const notesIdx = rest.indexOf("--notes");
+        if (notesIdx >= 0 && rest[notesIdx + 1]) notes = rest[notesIdx + 1];
+        const saved = subsStore.set({
+          provider,
+          profile,
+          monthlyUsd,
+          ...(planLabel ? { planLabel } : {}),
+          ...(billingCycleDay != null ? { billingCycleDay } : {}),
+          ...(notes ? { notes } : {}),
+        });
+        console.log(
+          `saved ${saved.provider}/${saved.profile} ${saved.planLabel ?? "plan"} @ $${saved.monthlyUsd}/mo`,
+        );
+        return;
+      }
+
+      if (sub === "remove") {
+        rejectUnknownFlags(rest.slice(1), new Set([]));
+        const [provider, profile] = rest.slice(1);
+        if (!provider || !profile) {
+          throw new Error("usage: oar subscriptions remove <provider> <profile>");
+        }
+        if (!subsStore.remove(provider, profile)) {
+          throw new Error(`unknown subscription plan: ${provider}/${profile}`);
+        }
+        console.log(`removed subscription plan ${provider}/${profile}`);
+        return;
+      }
+
+      if (sub === "audit") {
+        rejectUnknownFlags(rest.slice(1), new Set(["--json", "--refresh"]));
+        await warnIfDaemonDown("subscriptions audit");
+        const json = rest.includes("--json");
+        const refresh = rest.includes("--refresh");
+        const result = await buildSubscriptionAudit(oarStore, subsStore, { root, force: refresh });
+        if (json) console.log(JSON.stringify(auditToJson(result), null, 2));
+        else console.log(formatAuditText(result));
+        return;
+      }
+
+      throw new Error(
+        "usage: oar subscriptions list|set|remove|audit\n" +
+          "  oar subscriptions set <provider> <profile> --monthly-usd <n> [--plan \"label\"]",
+      );
     }
     case "doctor": {
       console.log("OAR doctor");
@@ -791,6 +965,33 @@ async function main(argv: string[]) {
         console.log(`  ${p}`);
       }
       await daemonStatus();
+      const root = process.env.OAR_HOME ?? defaultOarRoot();
+      const store = new OarStore({ rootDir: root });
+      const codexAccounts = store
+        .listAccounts()
+        .filter((a) => a.provider === "openai-codex")
+        .map((a) => ({ provider: a.provider, profile: a.profile }));
+      if (codexAccounts.length > 0) {
+        const usageRows = await fetchRemoteUsageForAccounts(store, codexAccounts, {
+          root,
+          force: false,
+          maxAgeMs: 300_000,
+        });
+        const authFailures = usageRows.filter((u) => !u.ok && /401|403|invalid_grant/i.test(u.error ?? ""));
+        if (authFailures.length > 0) {
+          console.log("");
+          console.log("codex usage auth issue detected:");
+          for (const u of authFailures) {
+            console.log(`  ${u.provider}/${u.profile}: ${u.error ?? "HTTP auth error"}`);
+          }
+          console.log("  remediation:");
+          console.log("    1. oar login openai-codex <profile>");
+          console.log("    2. omo → /login → openai-codex → complete OAuth");
+          console.log("    3. oar import-auth openai-codex <profile>");
+          console.log("    4. oar test openai-codex <profile> --live");
+          console.log("    5. oar usage openai-codex <profile> --refresh");
+        }
+      }
       console.log("");
       console.log("tips:");
       console.log("  oar panel --refresh   # accounts + remaining %");
@@ -808,7 +1009,7 @@ async function main(argv: string[]) {
       throw new Error("usage: oar daemon start|stop|status");
     }
     default:
-      throw new Error(`unknown command: ${cmd}\n${usage()}`);
+      throw new Error(`unknown command: ${cmd} (try: oar -h)`);
   }
 }
 

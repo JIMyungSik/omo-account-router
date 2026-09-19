@@ -216,6 +216,18 @@ export class OarRouter {
           ? new Date(Date.now() + req.retryAfterSec * 1000).toISOString()
           : null;
         break;
+      case "NETWORK_ERROR":
+      case "SERVER_ERROR":
+      case "BAD_REQUEST":
+      case "INVALID_ARGUMENT":
+      case "MODEL_NOT_FOUND":
+      case "PROMPT_ERROR":
+      case "TOOL_ERROR":
+      case "LOCAL_ERROR":
+      case "UNKNOWN":
+        // Record reason without changing routing eligibility (transient / non-auth).
+        this.store.upsertAccount(next);
+        return next;
       default:
         this.store.upsertAccount(next);
         return next;

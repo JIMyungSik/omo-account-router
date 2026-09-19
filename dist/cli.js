@@ -3,10 +3,35 @@
 
 // src/cli.ts
 import { spawn, spawnSync } from "child_process";
-import { existsSync as existsSync6, readFileSync as readFileSync6 } from "fs";
+import { existsSync as existsSync7, readFileSync as readFileSync7 } from "fs";
 import { homedir as homedir4 } from "os";
-import { dirname as dirname4, join as join6 } from "path";
+import { dirname as dirname5, join as join7 } from "path";
 import { fileURLToPath } from "url";
+
+// src/auth-stale.ts
+var STALE_CHECK_MS = 7 * 24 * 60 * 60 * 1000;
+function applyAuthStaleHints(rows, store) {
+  const now = Date.now();
+  return rows.map((row) => {
+    if (row.auth !== "valid")
+      return row;
+    const cred = store.getVaultCredential(row.provider, row.profile);
+    const hints = [];
+    if (cred?.type === "oauth" && cred.expires <= now) {
+      hints.push("AUTH may be stale (access token expired)");
+    } else if (row.lastChecked) {
+      const checked = Date.parse(row.lastChecked);
+      if (Number.isFinite(checked) && now - checked > STALE_CHECK_MS) {
+        hints.push("AUTH not re-checked recently");
+      }
+    }
+    if (hints.length === 0)
+      return row;
+    const hint = `${hints.join("; ")} · oar test ${row.provider} ${row.profile} --live`;
+    const note = row.note ? `${row.note} · ${hint}` : hint;
+    return { ...row, note };
+  });
+}
 
 // src/client.ts
 import { createConnection } from "node:net";
@@ -14,21 +39,21 @@ import { createConnection } from "node:net";
 // src/paths.ts
 import { homedir } from "node:os";
 import { join } from "node:path";
-function defaultOarRoot2(env = process.env) {
+function defaultOarRoot(env = process.env) {
   if (env.OAR_HOME)
     return env.OAR_HOME;
   return join(homedir(), ".oar");
 }
-function oarSocketPath(root = defaultOarRoot2()) {
+function oarSocketPath(root = defaultOarRoot()) {
   return join(root, "oar.sock");
 }
-function oarStatePath(root = defaultOarRoot2()) {
+function oarStatePath(root = defaultOarRoot()) {
   return join(root, "state.json");
 }
-function oarVaultDir(root = defaultOarRoot2()) {
+function oarVaultDir(root = defaultOarRoot()) {
   return join(root, "vault");
 }
-function oarEventsPath(root = defaultOarRoot2()) {
+function oarEventsPath(root = defaultOarRoot()) {
   return join(root, "events.jsonl");
 }
 
@@ -93,6 +118,39 @@ class OarClient {
       });
     });
   }
+}
+
+// src/cli-flags.ts
+function rejectUnknownFlags(args, allowed, valueFlags = new Set) {
+  for (let i = 0;i < args.length; i++) {
+    const token = args[i];
+    if (!token.startsWith("--"))
+      continue;
+    if (valueFlags.has(token)) {
+      const next = args[i + 1];
+      if (!next || next.startsWith("--")) {
+        throw new Error(`flag ${token} requires a value`);
+      }
+      i++;
+      continue;
+    }
+    if (!allowed.has(token)) {
+      throw new Error(`unknown flag: ${token}`);
+    }
+  }
+}
+function positionalArgs(args, valueFlags = new Set) {
+  const out = [];
+  for (let i = 0;i < args.length; i++) {
+    const token = args[i];
+    if (token.startsWith("--")) {
+      if (valueFlags.has(token))
+        i++;
+      continue;
+    }
+    out.push(token);
+  }
+  return out;
 }
 
 // src/import-all.ts
@@ -324,6 +382,35 @@ async function importAllFromAuthJson(client, opts) {
   }
   return { imported, skipped, errors };
 }
+
+// src/report-results.ts
+var REPORT_RESULTS = [
+  "SUCCESS",
+  "AUTH_EXPIRED",
+  "AUTH_REVOKED",
+  "RATE_LIMITED",
+  "QUOTA_EXHAUSTED",
+  "NETWORK_ERROR",
+  "SERVER_ERROR",
+  "BAD_REQUEST",
+  "INVALID_ARGUMENT",
+  "MODEL_NOT_FOUND",
+  "PROMPT_ERROR",
+  "TOOL_ERROR",
+  "LOCAL_ERROR",
+  "UNKNOWN"
+];
+var REPORT_RESULT_SET = new Set(REPORT_RESULTS);
+function isReportResult(value) {
+  return REPORT_RESULT_SET.has(value);
+}
+function parseReportResult(value) {
+  if (!isReportResult(value)) {
+    throw new Error(`invalid report result: ${value}
+` + `expected one of: ${REPORT_RESULTS.join(", ")}`);
+  }
+  return value;
+}
 // src/sinks/index.ts
 function formatSinkResultLines(sinks) {
   return sinks.map((sink) => {
@@ -340,12 +427,12 @@ function formatSinkResultLines(sinks) {
 import { existsSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join2 } from "node:path";
-function defaultOarRoot3(env = process.env) {
+function defaultOarRoot2(env = process.env) {
   if (env.OAR_HOME)
     return env.OAR_HOME;
   return join2(homedir2(), ".oar");
 }
-function oarSocketPath2(root = defaultOarRoot3()) {
+function oarSocketPath2(root = defaultOarRoot2()) {
   return join2(root, "oar.sock");
 }
 function unique(paths) {
@@ -835,6 +922,7 @@ function buildStatusView(data) {
       preferred: pol?.preferred === account.profile,
       until: account.until ?? null,
       reason: account.reason,
+      lastChecked: account.lastChecked,
       note: buildNote(account)
     };
   });
@@ -931,6 +1019,7 @@ function formatStatusText(view, opts) {
   lines.push("  AUTH    Vault/import health (valid | expired | revoked | unknown).");
   lines.push("  STATUS  Routing eligibility (AVAILABLE, QUOTA_EXHAUSTED, RATE_LIMITED, …).");
   lines.push("  ACTIVE  * = live auth slot for that provider (target of oar use).");
+  lines.push("  NOTE    Stale AUTH hints when vault token expired but metadata still valid.");
   lines.push("");
   lines.push("Next: oar panel --refresh | oar usage | oar use <provider> <profile>");
   lines.push("");
@@ -979,7 +1068,7 @@ class OarStore {
   vaultDir;
   state;
   constructor(opts) {
-    this.rootDir = opts?.rootDir ?? defaultOarRoot2();
+    this.rootDir = opts?.rootDir ?? defaultOarRoot();
     this.statePath = oarStatePath(this.rootDir);
     this.vaultDir = oarVaultDir(this.rootDir);
     mkdirSync(this.rootDir, { recursive: true, mode: 448 });
@@ -1103,13 +1192,13 @@ class OarStore {
 // src/usage/cache.ts
 import { existsSync as existsSync5, mkdirSync as mkdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2, chmodSync as chmodSync2 } from "node:fs";
 import { dirname as dirname3, join as join5 } from "node:path";
-function usageCachePath(root = defaultOarRoot2()) {
+function usageCachePath(root = defaultOarRoot()) {
   return join5(root, "usage-cache.json");
 }
 function cacheKey(provider, profile) {
   return `${provider}/${profile}`;
 }
-function loadUsageCache(root = defaultOarRoot2()) {
+function loadUsageCache(root = defaultOarRoot()) {
   const path = usageCachePath(root);
   if (!existsSync5(path))
     return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
@@ -1123,7 +1212,7 @@ function loadUsageCache(root = defaultOarRoot2()) {
     return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
   }
 }
-function saveUsageCache(cache, root = defaultOarRoot2()) {
+function saveUsageCache(cache, root = defaultOarRoot()) {
   const path = usageCachePath(root);
   mkdirSync2(dirname3(path), { recursive: true, mode: 448 });
   const tmp = `${path}.${process.pid}.tmp`;
@@ -1139,7 +1228,7 @@ function saveUsageCache(cache, root = defaultOarRoot2()) {
   } catch {}
 }
 function getCachedUsage(provider, profile, opts) {
-  const root = opts?.root ?? defaultOarRoot2();
+  const root = opts?.root ?? defaultOarRoot();
   const maxAgeMs = opts?.maxAgeMs ?? 60000;
   const cache = loadUsageCache(root);
   const entry = cache.entries[cacheKey(provider, profile)];
@@ -1150,7 +1239,7 @@ function getCachedUsage(provider, profile, opts) {
     return;
   return entry;
 }
-function putCachedUsage(entry, root = defaultOarRoot2()) {
+function putCachedUsage(entry, root = defaultOarRoot()) {
   const cache = loadUsageCache(root);
   cache.entries[cacheKey(entry.provider, entry.profile)] = entry;
   saveUsageCache(cache, root);
@@ -1477,7 +1566,7 @@ function applyUsageToAccountState(store, usage) {
   }
 }
 async function fetchRemoteUsage(store, provider, profile, opts) {
-  const root = opts?.root ?? store.rootDir ?? defaultOarRoot2();
+  const root = opts?.root ?? store.rootDir ?? defaultOarRoot();
   const maxAgeMs = opts?.maxAgeMs ?? 60000;
   if (!opts?.force) {
     const cached = getCachedUsage(provider, profile, { maxAgeMs, root });
@@ -1664,7 +1753,7 @@ function applyUsageToAccountState2(store, usage) {
   }
 }
 async function fetchRemoteUsage2(store, provider, profile, opts) {
-  const root = opts?.root ?? store.rootDir ?? defaultOarRoot2();
+  const root = opts?.root ?? store.rootDir ?? defaultOarRoot();
   const maxAgeMs = opts?.maxAgeMs ?? 60000;
   if (!opts?.force) {
     const cached = getCachedUsage(provider, profile, { maxAgeMs, root });
@@ -1831,6 +1920,443 @@ async function buildRecommendations(store, opts) {
   });
   return scored.map((row, i) => ({ ...row, rank: i + 1 }));
 }
+
+// src/subscriptions/audit.ts
+function primaryUsage(u) {
+  if (!u)
+    return { remainingPercent: null, label: "-", ok: false };
+  if (!u.ok) {
+    return { remainingPercent: null, label: "-", ok: false, error: u.error };
+  }
+  const ranked = [...u.windows].sort((a, b) => (b.remainingPercent ?? -1) - (a.remainingPercent ?? -1));
+  const w = ranked.find((x) => x.remainingPercent != null) ?? ranked[0];
+  if (!w)
+    return { remainingPercent: null, label: "-", ok: true };
+  return {
+    remainingPercent: w.remainingPercent,
+    label: w.label ?? w.kind,
+    ok: true
+  };
+}
+function usageSummary(account, u) {
+  const p = primaryUsage(u);
+  if (!u)
+    return account.availability;
+  if (!u.ok)
+    return u.error ?? "usage error";
+  if (p.remainingPercent != null)
+    return `${p.remainingPercent}% ${p.label}`;
+  return account.availability;
+}
+function isAuthBroken(u) {
+  if (!u || u.ok)
+    return false;
+  return /401|403|invalid_grant/i.test(u.error ?? "");
+}
+function classifyRow(account, plan, u, isTopPick, isActive, siblingHasEligible) {
+  const monthly = plan?.monthlyUsd ?? null;
+  const p = primaryUsage(u);
+  if (monthly == null) {
+    return {
+      recommend: "unset cost",
+      note: "run: oar subscriptions set … --monthly-usd <n>",
+      savePerMonth: null
+    };
+  }
+  if (isAuthBroken(u)) {
+    if (siblingHasEligible) {
+      return {
+        recommend: "fix first",
+        note: "usage auth error — re-auth before cancel; sibling can cover workload",
+        savePerMonth: null
+      };
+    }
+    return {
+      recommend: "fix first",
+      note: "usage auth error — oar doctor for remediation",
+      savePerMonth: null
+    };
+  }
+  if (account.availability === "QUOTA_EXHAUSTED" || p.remainingPercent != null && p.remainingPercent <= 0) {
+    if (isTopPick || isActive) {
+      return {
+        recommend: "keep",
+        note: "exhausted but primary/active — switch before cancel",
+        savePerMonth: null
+      };
+    }
+    if (siblingHasEligible) {
+      return {
+        recommend: "cancel candidate",
+        note: "0% / exhausted with eligible sibling",
+        savePerMonth: monthly
+      };
+    }
+    return {
+      recommend: "keep",
+      note: "only eligible profile for provider — do not cancel all",
+      savePerMonth: null
+    };
+  }
+  if (isTopPick || isActive) {
+    return { recommend: "keep", note: isActive ? "active slot" : "recommend top pick", savePerMonth: null };
+  }
+  if (isEligible(account) && p.remainingPercent != null && p.remainingPercent > 0) {
+    return {
+      recommend: "demote",
+      note: "eligible duplicate — lower priority vs sibling",
+      savePerMonth: null
+    };
+  }
+  if (!isEligible(account) && siblingHasEligible) {
+    return {
+      recommend: "cancel candidate",
+      note: `${account.availability} with sibling coverage`,
+      savePerMonth: monthly
+    };
+  }
+  return { recommend: "keep", note: "default keep (provider guard)", savePerMonth: null };
+}
+async function buildSubscriptionAudit(oarStore, subsStore, opts) {
+  const root = opts?.root ?? oarStore.rootDir;
+  const accounts = oarStore.listAccounts();
+  const plans = subsStore.list();
+  const planMap = new Map(plans.map((p) => [`${p.provider}\x00${p.profile}`, p]));
+  const usageTargets = accounts.filter((a) => a.provider === "xai" || a.provider === "openai-codex").map((a) => ({ provider: a.provider, profile: a.profile }));
+  const usageList = usageTargets.length > 0 ? await fetchRemoteUsageForAccounts2(oarStore, usageTargets, {
+    root,
+    force: opts?.force ?? false,
+    maxAgeMs: opts?.force ? 0 : 300000
+  }) : [];
+  const usageMap = new Map(usageList.map((u) => [`${u.provider}\x00${u.profile}`, u]));
+  const recommendRows = await buildRecommendations(oarStore, { root, force: opts?.force ?? false });
+  const topPick = recommendRows.find((r) => r.score > 0 && r.eligibility === "ok");
+  const topKey = topPick ? `${topPick.provider}\x00${topPick.profile}` : null;
+  const activeByProvider = new Map;
+  for (const r of recommendRows) {
+    if (r.live)
+      activeByProvider.set(r.provider, r.profile);
+  }
+  const eligibleByProvider = new Map;
+  for (const a of accounts) {
+    if (isEligible(a))
+      eligibleByProvider.set(a.provider, true);
+  }
+  const rows = accounts.map((account) => {
+    const key = `${account.provider}\x00${account.profile}`;
+    const plan = planMap.get(key);
+    const u = usageMap.get(key);
+    const siblingHasEligible = accounts.filter((a) => a.provider === account.provider && a.profile !== account.profile).some(isEligible) || Boolean(eligibleByProvider.get(account.provider));
+    const isTopPick = topKey === key;
+    const isActive = activeByProvider.get(account.provider) === account.profile;
+    const { recommend, note, savePerMonth } = classifyRow(account, plan, u, isTopPick, isActive, siblingHasEligible);
+    return {
+      provider: account.provider,
+      profile: account.profile,
+      planLabel: plan?.planLabel ?? "-",
+      monthlyUsd: plan?.monthlyUsd ?? null,
+      usageSummary: usageSummary(account, u),
+      status: account.availability,
+      recommend,
+      savePerMonth,
+      note
+    };
+  });
+  rows.sort((a, b) => a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider));
+  const totalConfiguredUsd = plans.reduce((s, p) => s + p.monthlyUsd, 0);
+  const potentialSavingsUsd = rows.filter((r) => r.recommend === "cancel candidate" && r.savePerMonth != null).reduce((s, r) => s + (r.savePerMonth ?? 0), 0);
+  const fmt = (r) => `${r.provider}/${r.profile}`;
+  return {
+    generatedAt: new Date().toISOString(),
+    totalConfiguredUsd,
+    potentialSavingsUsd,
+    rows,
+    summary: {
+      keep: rows.filter((r) => r.recommend === "keep").map(fmt),
+      cancel: rows.filter((r) => r.recommend === "cancel candidate").map(fmt),
+      fix: rows.filter((r) => r.recommend === "fix first").map(fmt),
+      demote: rows.filter((r) => r.recommend === "demote").map(fmt),
+      unsetCost: rows.filter((r) => r.recommend === "unset cost").map(fmt)
+    }
+  };
+}
+
+// src/subscriptions/format.ts
+function fmtUsd(n) {
+  if (n == null || !Number.isFinite(n))
+    return "-";
+  return `$${n.toFixed(0)}`;
+}
+function formatSubscriptionsList(plans) {
+  if (plans.length === 0) {
+    return `OAR subscriptions
+(no plans configured — oar subscriptions set <provider> <profile> --monthly-usd <n>)`;
+  }
+  const table = formatMarkdownTable([
+    { key: "provider", header: "PROVIDER" },
+    { key: "profile", header: "PROFILE" },
+    { key: "usd", header: "$/MO", align: "right" },
+    { key: "plan", header: "PLAN" },
+    { key: "cycle", header: "CYCLE DAY", align: "right" }
+  ], plans.map((p) => ({
+    provider: p.provider,
+    profile: p.profile,
+    usd: fmtUsd(p.monthlyUsd),
+    plan: p.planLabel ?? "-",
+    cycle: p.billingCycleDay != null ? String(p.billingCycleDay) : "-"
+  })));
+  const total = plans.reduce((s, p) => s + p.monthlyUsd, 0);
+  return ["OAR subscriptions", table, "", `total configured: ${fmtUsd(total)}/mo`, ""].join(`
+`);
+}
+function formatAuditText(result) {
+  const lines = [];
+  lines.push(`OAR subscription audit  ·  total configured ${fmtUsd(result.totalConfiguredUsd)}/mo  ·  potential savings ${fmtUsd(result.potentialSavingsUsd)}/mo`);
+  lines.push("");
+  lines.push(formatMarkdownTable([
+    { key: "provider", header: "PROVIDER" },
+    { key: "profile", header: "PROFILE" },
+    { key: "plan", header: "PLAN" },
+    { key: "usd", header: "$/MO", align: "right" },
+    { key: "usage", header: "USAGE" },
+    { key: "status", header: "STATUS" },
+    { key: "rec", header: "RECOMMEND" },
+    { key: "save", header: "SAVE/MO", align: "right" },
+    { key: "note", header: "NOTE" }
+  ], result.rows.map((r) => ({
+    provider: r.provider,
+    profile: r.profile,
+    plan: r.planLabel,
+    usd: fmtUsd(r.monthlyUsd),
+    usage: r.usageSummary,
+    status: r.status,
+    rec: r.recommend,
+    save: r.savePerMonth != null ? fmtUsd(r.savePerMonth) : "-",
+    note: r.note
+  }))));
+  lines.push("");
+  lines.push("RECOMMENDATION SUMMARY");
+  if (result.summary.keep.length)
+    lines.push(`  keep:     ${result.summary.keep.join(", ")}`);
+  if (result.summary.cancel.length) {
+    lines.push(`  cancel:   ${result.summary.cancel.join(", ")}`);
+  }
+  if (result.summary.fix.length)
+    lines.push(`  fix:      ${result.summary.fix.join(", ")}`);
+  if (result.summary.demote.length)
+    lines.push(`  demote:   ${result.summary.demote.join(", ")}`);
+  if (result.summary.unsetCost.length) {
+    lines.push(`  unset:    ${result.summary.unsetCost.join(", ")} (add monthly cost)`);
+  }
+  lines.push("");
+  lines.push("Heuristic only — not financial advice. Provider must keep ≥1 eligible profile.");
+  lines.push('  oar subscriptions set <provider> <profile> --monthly-usd <n> [--plan "…"]');
+  lines.push("  oar doctor   # codex auth remediation");
+  return lines.join(`
+`);
+}
+function auditToJson(result) {
+  return result;
+}
+
+// src/subscriptions/store.ts
+import {
+  chmodSync as chmodSync3,
+  existsSync as existsSync6,
+  mkdirSync as mkdirSync3,
+  readFileSync as readFileSync6,
+  renameSync as renameSync3,
+  writeFileSync as writeFileSync3
+} from "node:fs";
+import { dirname as dirname4, join as join6 } from "node:path";
+function emptyFile() {
+  return { version: 1, plans: [], updatedAt: new Date().toISOString() };
+}
+function atomicWriteJson3(path, data, mode = 384) {
+  mkdirSync3(dirname4(path), { recursive: true, mode: 448 });
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync3(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
+  renameSync3(tmp, path);
+  try {
+    chmodSync3(path, mode);
+  } catch {}
+}
+function subscriptionsPath(root = defaultOarRoot()) {
+  return join6(root, "subscriptions.json");
+}
+
+class SubscriptionsStore {
+  rootDir;
+  path;
+  constructor(opts) {
+    this.rootDir = opts?.rootDir ?? defaultOarRoot();
+    this.path = subscriptionsPath(this.rootDir);
+  }
+  load() {
+    if (!existsSync6(this.path))
+      return emptyFile();
+    try {
+      const parsed = JSON.parse(readFileSync6(this.path, "utf8"));
+      if (parsed?.version !== 1 || !Array.isArray(parsed.plans))
+        return emptyFile();
+      return {
+        version: 1,
+        plans: parsed.plans,
+        updatedAt: parsed.updatedAt ?? new Date().toISOString()
+      };
+    } catch {
+      return emptyFile();
+    }
+  }
+  save(data) {
+    atomicWriteJson3(this.path, { ...data, updatedAt: new Date().toISOString() }, 384);
+  }
+  get(provider, profile) {
+    return this.load().plans.find((p) => p.provider === provider && p.profile === profile);
+  }
+  set(plan) {
+    if (!Number.isFinite(plan.monthlyUsd) || plan.monthlyUsd < 0) {
+      throw new Error("monthlyUsd must be a non-negative number");
+    }
+    const data = this.load();
+    const idx = data.plans.findIndex((p) => p.provider === plan.provider && p.profile === plan.profile);
+    const next = {
+      provider: plan.provider,
+      profile: plan.profile,
+      monthlyUsd: plan.monthlyUsd,
+      ...plan.planLabel ? { planLabel: plan.planLabel } : {},
+      ...plan.billingCycleDay != null ? { billingCycleDay: plan.billingCycleDay } : {},
+      ...plan.notes ? { notes: plan.notes } : {}
+    };
+    if (idx >= 0)
+      data.plans[idx] = next;
+    else
+      data.plans.push(next);
+    this.save(data);
+    return next;
+  }
+  remove(provider, profile) {
+    const data = this.load();
+    const before = data.plans.length;
+    data.plans = data.plans.filter((p) => !(p.provider === provider && p.profile === profile));
+    if (data.plans.length === before)
+      return false;
+    this.save(data);
+    return true;
+  }
+  list() {
+    return [...this.load().plans].sort((a, b) => a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider));
+  }
+}
+
+// src/usage/recommend.ts
+function primaryWindow2(u) {
+  if (!u?.ok || u.windows.length === 0) {
+    return { remainingPercent: null, usedPercent: null, label: "-", resetsAt: null };
+  }
+  const ranked = [...u.windows].sort((a, b) => {
+    const ar = a.remainingPercent ?? -1;
+    const br = b.remainingPercent ?? -1;
+    return br - ar;
+  });
+  const w = ranked.find((x) => x.remainingPercent != null) ?? ranked[0];
+  return {
+    remainingPercent: w.remainingPercent,
+    usedPercent: w.usedPercent,
+    label: w.label ?? w.kind,
+    resetsAt: w.resetsAt
+  };
+}
+function scoreAccount2(account, usage, preferred) {
+  const win = primaryWindow2(usage);
+  let score = 0;
+  const notes = [];
+  if (!isEligible(account)) {
+    score = -1000;
+    notes.push(account.availability === "QUOTA_EXHAUSTED" ? "0%/exhausted" : account.availability);
+  } else {
+    score += 100;
+  }
+  if (win.remainingPercent != null) {
+    score += win.remainingPercent;
+    if (win.remainingPercent <= 0) {
+      score -= 500;
+      notes.push("remote 0%");
+    } else if (win.remainingPercent <= 5) {
+      notes.push("low remaining");
+    }
+  } else if (usage && !usage.ok) {
+    score += 10;
+    notes.push(usage.error ? `usage err` : "no remote %");
+  } else {
+    score += 15;
+    notes.push("no remote %");
+  }
+  if (preferred && account.profile === preferred && isEligible(account)) {
+    score += 5;
+    notes.push("preferred");
+  }
+  if (account.availability === "ACTIVE") {
+    score += 2;
+  }
+  return {
+    score,
+    note: notes.join(", ") || "ok",
+    remainingPercent: win.remainingPercent,
+    usedPercent: win.usedPercent,
+    label: win.label,
+    resetsAt: win.resetsAt
+  };
+}
+async function buildRecommendations2(store, opts) {
+  const root = opts?.root ?? defaultOarRoot();
+  let accounts = store.listAccounts();
+  if (opts?.providers?.length) {
+    const set = new Set(opts.providers);
+    accounts = accounts.filter((a) => set.has(a.provider));
+  }
+  const targets = accounts.filter((a) => a.provider === "xai" || a.provider === "openai-codex").map((a) => ({ provider: a.provider, profile: a.profile }));
+  const usageList = targets.length > 0 ? await fetchRemoteUsageForAccounts2(store, targets, {
+    root,
+    force: opts?.force ?? true,
+    maxAgeMs: opts?.force ? 0 : 60000
+  }) : [];
+  const usageMap = new Map(usageList.map((u) => [`${u.provider}\x00${u.profile}`, u]));
+  const preferredByProvider = new Map;
+  for (const a of accounts) {
+    if (!preferredByProvider.has(a.provider)) {
+      preferredByProvider.set(a.provider, store.getProviderPolicy(a.provider).preferred);
+    }
+  }
+  const scored = accounts.map((a) => {
+    const u = usageMap.get(`${a.provider}\x00${a.profile}`);
+    const preferred = preferredByProvider.get(a.provider);
+    const s = scoreAccount2(a, u, preferred);
+    const live = preferred === a.profile && a.availability === "ACTIVE";
+    return {
+      provider: a.provider,
+      profile: a.profile,
+      remainingPercent: s.remainingPercent,
+      usedPercent: s.usedPercent,
+      windowLabel: s.label,
+      eligibility: isEligible(a) ? "ok" : a.availability,
+      live,
+      score: s.score,
+      note: s.note,
+      resetsAt: s.resetsAt
+    };
+  });
+  scored.sort((a, b) => {
+    if (b.score !== a.score)
+      return b.score - a.score;
+    const ar = a.remainingPercent ?? -1;
+    const br = b.remainingPercent ?? -1;
+    if (br !== ar)
+      return br - ar;
+    return `${a.provider}/${a.profile}`.localeCompare(`${b.provider}/${b.profile}`);
+  });
+  return scored.map((row, i) => ({ ...row, rank: i + 1 }));
+}
 function fmtPct2(n) {
   if (n == null || !Number.isFinite(n))
     return "-";
@@ -1898,7 +2424,18 @@ function formatRecommendTable(rows) {
 }
 
 // src/cli.ts
-var __dirname2 = dirname4(fileURLToPath(import.meta.url));
+var __dirname2 = dirname5(fileURLToPath(import.meta.url));
+function readPackageVersion() {
+  const pkgPath = join7(__dirname2, "..", "package.json");
+  if (!existsSync7(pkgPath))
+    return "unknown";
+  try {
+    const parsed = JSON.parse(readFileSync7(pkgPath, "utf8"));
+    return parsed.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 function usage() {
   return `oar \u2014 OMO Account Router
 
@@ -2003,9 +2540,23 @@ COMMANDS
       Remote quota table for openai-codex and xai (5H/WK/Grok %). OK = request ok.
       Omit args to list all supported accounts. Updates daemon on 0% exhaustion.
 
-  oar recommend [--refresh] [provider...]
+  oar recommend [--refresh] [--json] [provider...]
       Rank profiles by eligibility + remote remaining %. Optional provider filter.
       --refresh  Fetch fresh usage (default). Daemon must be running for full sync.
+      --json     Structured rows + topPick (machine output).
+
+  oar subscriptions list
+      Show configured monthly plan costs (subscriptions.json under OAR_HOME).
+
+  oar subscriptions set <provider> <profile> --monthly-usd <n> [--plan "label"]
+      Record monthly subscription cost for a vault profile.
+
+  oar subscriptions remove <provider> <profile>
+      Remove a configured plan cost.
+
+  oar subscriptions audit [--json] [--refresh]
+      Join vault usage + eligibility + configured costs; suggest keep/cancel/fix
+      and estimate potential monthly savings (heuristic, not financial advice).
 
   oar doctor
       Local diagnostics: paths, Senpi install, auth.json discovery, daemon JSON.
@@ -2096,8 +2647,20 @@ async function withClient(fn) {
 async function req(request) {
   return withClient((c) => c.request(request));
 }
+async function warnIfDaemonDown(scope) {
+  try {
+    const res = await req({ protocol: 1, action: "ping" });
+    return res.ok;
+  } catch {
+    console.error(`warning: OAR daemon unavailable \u2014 ${scope} uses cached/local vault data only (may be stale). Run: oar daemon start`);
+    return false;
+  }
+}
 function printStatus(data, opts) {
-  const view = buildStatusView(data);
+  const root = process.env.OAR_HOME ?? defaultOarRoot2();
+  const store = new OarStore({ rootDir: root });
+  let view = buildStatusView(data);
+  view = { ...view, rows: applyAuthStaleHints(view.rows, store) };
   if (opts?.json) {
     console.log(JSON.stringify(statusViewToJson(view), null, 2));
     return;
@@ -2105,9 +2668,9 @@ function printStatus(data, opts) {
   console.log(formatStatusText(view, { color: wantStatusColor() }));
 }
 async function daemonStart() {
-  const root = process.env.OAR_HOME ?? defaultOarRoot3();
+  const root = process.env.OAR_HOME ?? defaultOarRoot2();
   const sock = process.env.OAR_SOCK ?? oarSocketPath2(root);
-  if (existsSync6(sock)) {
+  if (existsSync7(sock)) {
     try {
       const client = new OarClient({ socketPath: sock });
       const pong = await client.request({ protocol: 1, action: "ping" });
@@ -2117,9 +2680,9 @@ async function daemonStart() {
       }
     } catch {}
   }
-  const daemonTs = join6(__dirname2, "daemon-main.ts");
-  const daemonJs = join6(__dirname2, "daemon-main.js");
-  const daemonEntry = existsSync6(daemonTs) ? daemonTs : daemonJs;
+  const daemonTs = join7(__dirname2, "daemon-main.ts");
+  const daemonJs = join7(__dirname2, "daemon-main.js");
+  const daemonEntry = existsSync7(daemonTs) ? daemonTs : daemonJs;
   const runtimeBin = typeof process.execPath === "string" && process.execPath.length > 0 ? process.execPath : "node";
   const useBunForTs = daemonEntry.endsWith(".ts") && !runtimeBin.includes("bun");
   const spawnBin = useBunForTs ? "bun" : runtimeBin;
@@ -2143,11 +2706,11 @@ async function daemonStart() {
 async function daemonStop() {
   const sock = process.env.OAR_SOCK ?? oarSocketPath2();
   const pidPath = `${sock}.pid`;
-  if (!existsSync6(pidPath)) {
+  if (!existsSync7(pidPath)) {
     console.log("oar-daemon not running (no pid file)");
     return;
   }
-  const pid = Number(readFileSync6(pidPath, "utf8").trim());
+  const pid = Number(readFileSync7(pidPath, "utf8").trim());
   if (!Number.isFinite(pid))
     throw new Error("invalid pid file");
   try {
@@ -2176,6 +2739,14 @@ async function main(argv) {
     console.log(usage());
     return;
   }
+  if (cmd === "--version" || cmd === "-V") {
+    console.log(readPackageVersion());
+    return;
+  }
+  if (cmd === "help") {
+    console.log(usage());
+    return;
+  }
   if (!cmd) {
     try {
       const res = await req({ protocol: 1, action: "status" });
@@ -2194,6 +2765,7 @@ async function main(argv) {
   }
   switch (cmd) {
     case "status": {
+      rejectUnknownFlags(rest, new Set(["--json"]));
       const res = await req({ protocol: 1, action: "status" });
       if (!res.ok)
         throw new Error(res.error);
@@ -2240,14 +2812,14 @@ async function main(argv) {
       return;
     }
     case "use": {
+      rejectUnknownFlags(rest, new Set(["--force"]));
       const force = rest.includes("--force");
-      const args = rest.filter((a) => a !== "--force");
-      const [provider, profile] = args;
+      const [provider, profile] = positionalArgs(rest);
       if (!provider || !profile) {
         throw new Error(`usage: oar use <provider> <profile> [--force]
 ` + suggestAccounts());
       }
-      const root = process.env.OAR_HOME ?? defaultOarRoot3();
+      const root = process.env.OAR_HOME ?? defaultOarRoot2();
       const store = new OarStore({ rootDir: root });
       try {
         const u = await fetchRemoteUsage(store, provider, profile, {
@@ -2314,7 +2886,12 @@ ${suggestAccounts(provider)}`);
       return;
     }
     case "import-auth": {
-      let from = join6(homedir4(), ".omo", "agent", "auth.json");
+      if (rest.includes("--all")) {
+        rejectUnknownFlags(rest, new Set(["--all", "--from", "--force", "--profile"]), new Set(["--from", "--profile"]));
+      } else {
+        rejectUnknownFlags(rest, new Set(["--from", "--account"]), new Set(["--from", "--account"]));
+      }
+      let from = join7(homedir4(), ".omo", "agent", "auth.json");
       const fromIdx = rest.indexOf("--from");
       if (fromIdx >= 0 && rest[fromIdx + 1])
         from = rest[fromIdx + 1];
@@ -2337,7 +2914,7 @@ ${suggestAccounts(provider)}`);
           process.exitCode = 1;
         return;
       }
-      const [provider, profile] = rest;
+      const [provider, profile] = positionalArgs(rest, new Set(["--from", "--account"]));
       if (!provider || !profile) {
         throw new Error(`usage: oar import-auth <provider> <profile> [--from path] [--account <n|name>]
    or: oar import-auth --all [--from path] [--profile name] [--force]`);
@@ -2388,8 +2965,8 @@ ${suggestAccounts(provider)}`);
       return;
     }
     case "install": {
-      const scriptPath = join6(__dirname2, "..", "scripts", "install.sh");
-      if (!existsSync6(scriptPath)) {
+      const scriptPath = join7(__dirname2, "..", "scripts", "install.sh");
+      if (!existsSync7(scriptPath)) {
         throw new Error(`install script not found at ${scriptPath}. Run scripts/install.sh directly from a full checkout.`);
       }
       const result = spawnSync(scriptPath, rest, { stdio: "inherit" });
@@ -2429,7 +3006,8 @@ ${suggestAccounts(provider)}`);
       return;
     }
     case "test": {
-      const [provider, profile] = rest;
+      rejectUnknownFlags(rest, new Set(["--live"]));
+      const [provider, profile] = positionalArgs(rest);
       if (!provider || !profile)
         throw new Error("usage: oar test <provider> <profile> [--live]");
       const live = rest.includes("--live");
@@ -2446,6 +3024,7 @@ ${suggestAccounts(provider)}`);
       const [provider, profile, result] = rest;
       if (!provider || !profile || !result)
         throw new Error("usage: oar report <provider> <profile> <RESULT>");
+      parseReportResult(result);
       const res = await req({
         protocol: 1,
         action: "report",
@@ -2459,6 +3038,7 @@ ${suggestAccounts(provider)}`);
       return;
     }
     case "panel": {
+      rejectUnknownFlags(rest, new Set(["--watch", "--json", "--xbar", "--hours", "--refresh", "--no-remote"]), new Set(["--hours"]));
       const watchIdx = rest.indexOf("--watch");
       const json = rest.includes("--json");
       const xbar = rest.includes("--xbar");
@@ -2478,7 +3058,7 @@ ${suggestAccounts(provider)}`);
         if (!Number.isFinite(intervalSec) || intervalSec <= 0)
           intervalSec = 2;
       }
-      const root = process.env.OAR_HOME ?? defaultOarRoot3();
+      const root = process.env.OAR_HOME ?? defaultOarRoot2();
       const store = new OarStore({ rootDir: root });
       const renderOnce = async () => {
         const res = await req({ protocol: 1, action: "status" });
@@ -2520,9 +3100,11 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       return;
     }
     case "usage": {
+      rejectUnknownFlags(rest, new Set(["--refresh"]));
+      await warnIfDaemonDown("usage");
       const refresh = rest.includes("--refresh");
       const args = rest.filter((a) => !a.startsWith("--"));
-      const root = process.env.OAR_HOME ?? defaultOarRoot3();
+      const root = process.env.OAR_HOME ?? defaultOarRoot2();
       const store = new OarStore({ rootDir: root });
       const provider = args[0];
       const profile = args[1];
@@ -2561,15 +3143,18 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
     }
     case "recommend":
     case "recommand": {
+      rejectUnknownFlags(rest, new Set(["--refresh", "--cache", "--json"]));
+      await warnIfDaemonDown("recommend");
+      const json = rest.includes("--json");
       const refresh = rest.includes("--refresh") || !rest.includes("--cache");
-      const providers = rest.filter((a) => !a.startsWith("--"));
-      const root = process.env.OAR_HOME ?? defaultOarRoot3();
+      const providers = positionalArgs(rest);
+      const root = process.env.OAR_HOME ?? defaultOarRoot2();
       const store = new OarStore({ rootDir: root });
       try {
         const st = await req({ protocol: 1, action: "accounts" });
         if (st.ok && Array.isArray(st.data)) {}
       } catch {}
-      const rows = await buildRecommendations(store, {
+      const rows = await buildRecommendations2(store, {
         root,
         force: refresh,
         providers: providers.length ? providers : undefined
@@ -2588,7 +3173,16 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
           } catch {}
         }
       }
-      console.log(formatRecommendTable(rows));
+      if (json) {
+        const top = rows.find((r) => r.score > 0 && r.eligibility === "ok");
+        console.log(JSON.stringify({
+          generatedAt: new Date().toISOString(),
+          topPick: top ? { provider: top.provider, profile: top.profile } : null,
+          rows
+        }, null, 2));
+      } else {
+        console.log(formatRecommendTable(rows));
+      }
       return;
     }
     case "bootstrap-auto": {
@@ -2598,9 +3192,85 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       console.log(JSON.stringify(res.data, null, 2));
       return;
     }
+    case "subscriptions": {
+      const sub = rest[0];
+      const root = process.env.OAR_HOME ?? defaultOarRoot2();
+      const subsStore = new SubscriptionsStore({ rootDir: root });
+      const oarStore = new OarStore({ rootDir: root });
+      if (sub === "list") {
+        rejectUnknownFlags(rest.slice(1), new Set([]));
+        console.log(formatSubscriptionsList(subsStore.list()));
+        return;
+      }
+      if (sub === "set") {
+        const valueFlags = new Set(["--monthly-usd", "--plan", "--billing-cycle-day", "--notes"]);
+        rejectUnknownFlags(rest.slice(1), valueFlags, valueFlags);
+        const [provider, profile] = positionalArgs(rest.slice(1), valueFlags);
+        if (!provider || !profile) {
+          throw new Error('usage: oar subscriptions set <provider> <profile> --monthly-usd <n> [--plan "label"] [--billing-cycle-day N]');
+        }
+        const usdIdx = rest.indexOf("--monthly-usd");
+        if (usdIdx < 0 || !rest[usdIdx + 1]) {
+          throw new Error("--monthly-usd is required and must be a non-negative number");
+        }
+        const monthlyUsd = Number(rest[usdIdx + 1]);
+        let planLabel;
+        const planIdx = rest.indexOf("--plan");
+        if (planIdx >= 0 && rest[planIdx + 1])
+          planLabel = rest[planIdx + 1];
+        let billingCycleDay;
+        const cycleIdx = rest.indexOf("--billing-cycle-day");
+        if (cycleIdx >= 0 && rest[cycleIdx + 1]) {
+          billingCycleDay = Number(rest[cycleIdx + 1]);
+          if (!Number.isFinite(billingCycleDay) || billingCycleDay < 1 || billingCycleDay > 31) {
+            throw new Error("--billing-cycle-day must be 1\u201331");
+          }
+        }
+        let notes;
+        const notesIdx = rest.indexOf("--notes");
+        if (notesIdx >= 0 && rest[notesIdx + 1])
+          notes = rest[notesIdx + 1];
+        const saved = subsStore.set({
+          provider,
+          profile,
+          monthlyUsd,
+          ...planLabel ? { planLabel } : {},
+          ...billingCycleDay != null ? { billingCycleDay } : {},
+          ...notes ? { notes } : {}
+        });
+        console.log(`saved ${saved.provider}/${saved.profile} ${saved.planLabel ?? "plan"} @ $${saved.monthlyUsd}/mo`);
+        return;
+      }
+      if (sub === "remove") {
+        rejectUnknownFlags(rest.slice(1), new Set([]));
+        const [provider, profile] = rest.slice(1);
+        if (!provider || !profile) {
+          throw new Error("usage: oar subscriptions remove <provider> <profile>");
+        }
+        if (!subsStore.remove(provider, profile)) {
+          throw new Error(`unknown subscription plan: ${provider}/${profile}`);
+        }
+        console.log(`removed subscription plan ${provider}/${profile}`);
+        return;
+      }
+      if (sub === "audit") {
+        rejectUnknownFlags(rest.slice(1), new Set(["--json", "--refresh"]));
+        await warnIfDaemonDown("subscriptions audit");
+        const json = rest.includes("--json");
+        const refresh = rest.includes("--refresh");
+        const result = await buildSubscriptionAudit(oarStore, subsStore, { root, force: refresh });
+        if (json)
+          console.log(JSON.stringify(auditToJson(result), null, 2));
+        else
+          console.log(formatAuditText(result));
+        return;
+      }
+      throw new Error(`usage: oar subscriptions list|set|remove|audit
+` + '  oar subscriptions set <provider> <profile> --monthly-usd <n> [--plan "label"]');
+    }
     case "doctor": {
       console.log("OAR doctor");
-      console.log(`root: ${process.env.OAR_HOME ?? defaultOarRoot3()}`);
+      console.log(`root: ${process.env.OAR_HOME ?? defaultOarRoot2()}`);
       console.log(`sock: ${process.env.OAR_SOCK ?? oarSocketPath2()}`);
       const install = findSenpiInstall();
       if (install) {
@@ -2612,13 +3282,37 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       }
       console.log("active auth paths:");
       for (const p of resolveActiveAuthPaths()) {
-        console.log(`  ${existsSync6(p) ? "OK" : "--"} ${p}`);
+        console.log(`  ${existsSync7(p) ? "OK" : "--"} ${p}`);
       }
       console.log("discovered auth.json:");
       for (const p of discoverAuthJsonFiles()) {
         console.log(`  ${p}`);
       }
       await daemonStatus();
+      const root = process.env.OAR_HOME ?? defaultOarRoot2();
+      const store = new OarStore({ rootDir: root });
+      const codexAccounts = store.listAccounts().filter((a) => a.provider === "openai-codex").map((a) => ({ provider: a.provider, profile: a.profile }));
+      if (codexAccounts.length > 0) {
+        const usageRows = await fetchRemoteUsageForAccounts(store, codexAccounts, {
+          root,
+          force: false,
+          maxAgeMs: 300000
+        });
+        const authFailures = usageRows.filter((u) => !u.ok && /401|403|invalid_grant/i.test(u.error ?? ""));
+        if (authFailures.length > 0) {
+          console.log("");
+          console.log("codex usage auth issue detected:");
+          for (const u of authFailures) {
+            console.log(`  ${u.provider}/${u.profile}: ${u.error ?? "HTTP auth error"}`);
+          }
+          console.log("  remediation:");
+          console.log("    1. oar login openai-codex <profile>");
+          console.log("    2. omo \u2192 /login \u2192 openai-codex \u2192 complete OAuth");
+          console.log("    3. oar import-auth openai-codex <profile>");
+          console.log("    4. oar test openai-codex <profile> --live");
+          console.log("    5. oar usage openai-codex <profile> --refresh");
+        }
+      }
       console.log("");
       console.log("tips:");
       console.log("  oar panel --refresh   # accounts + remaining %");
@@ -2639,8 +3333,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       throw new Error("usage: oar daemon start|stop|status");
     }
     default:
-      throw new Error(`unknown command: ${cmd}
-${usage()}`);
+      throw new Error(`unknown command: ${cmd} (try: oar -h)`);
   }
 }
 main(process.argv.slice(2)).catch((error) => {
