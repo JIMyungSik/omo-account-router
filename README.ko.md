@@ -308,6 +308,7 @@ sink 쓰기가 실패해도 OMO `auth.json`은 롤백하지 않습니다. 없는
 | `oar accounts [provider]` | JSON 목록 |
 | `oar import-auth …` / `--all` | vault 적재 |
 | `oar use <p> <profile> [--force]` | 전환 (0% 거절) |
+| `oar remove <p> <profile>` | vault 프로필·자격 증명 삭제, stale preferred 해제. live auth.json·구독 기록은 유지 |
 | `oar auto <p> on\|off` | auto failover |
 | `oar doctor` | 경로·엔진·daemon |
 | `oar daemon start\|stop\|status` | 데몬 |

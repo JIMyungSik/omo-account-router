@@ -85,7 +85,9 @@ COMMANDS
       Register a named profile slot (no credential yet).
 
   oar remove <provider> <profile>
-      Remove profile from vault and daemon state.
+      Delete that profile from daemon state and its vault credential.
+      Clears preferred if it pointed here. Other profiles, live auth.json
+      slots, and subscription records are left unchanged.
 
   oar use <provider> <profile> [--force]
       Switch live auth slot to this vault profile. Refreshes remote usage first;

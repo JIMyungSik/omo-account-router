@@ -74,6 +74,18 @@ export class LeaseManager {
     return n;
   }
 
+  releaseAccount(provider: ProviderId, profile: ProfileId): number {
+    this.sweep();
+    let n = 0;
+    for (const [id, lease] of this.leases) {
+      if (lease.provider === provider && lease.profile === profile) {
+        this.leases.delete(id);
+        n += 1;
+      }
+    }
+    return n;
+  }
+
   list(): AccountLease[] {
     this.sweep();
     return [...this.leases.values()];

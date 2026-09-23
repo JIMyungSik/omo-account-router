@@ -334,7 +334,15 @@ export class OarDaemon {
             error: `unknown account ${req.provider}/${req.profile}`,
           };
         }
-        this.store.removeAccount(req.provider, req.profile);
+        try {
+          this.store.removeAccount(req.provider, req.profile);
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        this.leases.releaseAccount(req.provider, req.profile);
         this.events.append({
           ts: new Date().toISOString(),
           event: "remove",

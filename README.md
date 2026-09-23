@@ -310,6 +310,7 @@ Sink failures do not roll back the OMO slot. Missing files are skipped, not crea
 | `oar import-auth <p> <profile> [--from path]` | auth.json → vault |
 | `oar import-auth --all [--force]` | Import every provider |
 | `oar use <p> <profile> [--force]` | Prefer + activate (blocks 0%) |
+| `oar remove <p> <profile>` | Delete vault profile + credential; clear stale preferred. Live auth.json and subscription records stay. |
 | `oar auto <p> on\|off` | Auto mode + failover flag |
 | `oar login` / `oar logout` | Login guide / remove vault |
 | `oar test <p> <profile> [--live]` | Health check |

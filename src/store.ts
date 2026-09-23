@@ -99,18 +99,20 @@ export class OarStore {
   }
 
   removeAccount(provider: ProviderId, profile: ProfileId): void {
+    const vaultPath = this.vaultPath(provider, profile);
+    if (existsSync(vaultPath)) {
+      unlinkSync(vaultPath);
+    }
     this.state.accounts = this.state.accounts.filter(
       (a) => !(a.provider === provider && a.profile === profile),
     );
-    this.persist();
-    const vaultPath = this.vaultPath(provider, profile);
-    if (existsSync(vaultPath)) {
-      try {
-        unlinkSync(vaultPath);
-      } catch {
-        // ignore
-      }
+    const policy = this.state.providers[provider];
+    if (policy?.preferred === profile) {
+      const next = { ...policy };
+      delete next.preferred;
+      this.state.providers[provider] = next;
     }
+    this.persist();
   }
 
   getProviderPolicy(provider: ProviderId): ProviderPolicy {
