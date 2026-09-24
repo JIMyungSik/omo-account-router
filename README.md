@@ -307,10 +307,13 @@ Sink failures do not roll back the OMO slot. Missing files are skipped, not crea
 | `oar subscriptions set <p> <profile> --monthly-usd <n>` | Record plan cost |
 | `oar subscriptions audit [--json] [--refresh]` | Keep/cancel heuristic + savings |
 | `oar accounts [provider]` | JSON list |
-| `oar import-auth <p> <profile> [--from path]` | auth.json → vault. `openai`/`codex`/`chatgpt` → `chatgpt-subscription`; `grok` → `xai` |
-| `oar import-auth --all [--force]` | Import every provider |
-| `oar use <p> <profile> [--force]` | Prefer + activate (blocks 0%) |
-| `oar remove <p> <profile>` | Delete vault profile + credential; clear stale preferred. Also drops that provider from the live auth slot when it is the same account. |
+| `oar import-auth <p> <profile> [--account <n\|name\|latest\|primary>]` | auth.json → vault. Default account is `latest` (highest `login-N`). A third argument or `--account` overrides it. `openai`/`codex`/`chatgpt` → `chatgpt-subscription`; `grok` → `xai` |
+| `oar import-auth default [latest\|primary\|<slot>]` | Show or save the import slot default |
+| `oar import-auth --all [--force]` | Import every provider (top-level token) |
+| `oar who` | Which vault profile is actually in each live auth.json |
+| `oar use <p> <profile> [--force]` | Prefer + activate. Writes every existing local auth.json and both Codex keys |
+| `oar remove <p> <profile>` | Delete that vault profile. Also drops a matching live auth slot |
+| `oar remove *` | Delete every vault account |
 | `oar auto <p> on\|off` | Auto mode + failover flag |
 | `oar login` / `oar logout` | Login guide / remove vault |
 | `oar test <p> <profile> [--live]` | Health check |
