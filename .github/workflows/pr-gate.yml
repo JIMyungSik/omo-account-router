@@ -48,9 +48,11 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Merge or request changes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           UNIT: ${{ needs.unit.result }}
           INTEGRATION: ${{ needs.integration.result }}
@@ -58,19 +60,15 @@ jobs:
           SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -eu
-          body="unit=${UNIT}
-          integration=${INTEGRATION}
-          style=${STYLE}"
+          body="unit=${UNIT} integration=${INTEGRATION} style=${STYLE}"
           if [ "$UNIT" = "success" ] && [ "$INTEGRATION" = "success" ] && [ "$STYLE" = "success" ]; then
-            gh pr review "$PR" --approve --body "Checks passed. ${body}"
+            gh pr review "$PR" --approve --body "Checks passed. ${body}" || true
             if [ "$SAME_REPO" = "true" ]; then
               gh pr merge "$PR" --squash --auto
             else
               gh pr comment "$PR" --body "Checks passed. Fork PRs are not auto-merged; a maintainer merges after this review."
             fi
           else
-            gh pr review "$PR" --request-changes --body "Checks failed. Fix the failing job and push again.
-
-          ${body}"
+            gh pr review "$PR" --request-changes --body "Checks failed. Fix the failing job and push again. ${body}"
             exit 1
           fi
