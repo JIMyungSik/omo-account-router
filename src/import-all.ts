@@ -106,13 +106,16 @@ export function readCredentialFromAuthJson(
   for (const key of authJsonKeysForProvider(provider)) {
     const slot = data[key];
     if (!isStoredCredential(slot)) continue;
-    if (opts?.account) return selectLinkedAccount(slot, provider, authPath, opts.account);
-    return slot;
+    return selectImportAccount(slot, provider, authPath, opts?.account ?? "latest").credential;
   }
   if (provider === "openai-codex" || provider === "chatgpt-subscription") {
     const native = credentialFromNativeCodexAuth(data);
     if (native) return native;
   }
+  return missingProvider(data, provider, authPath);
+}
+
+function missingProvider(data: Record<string, unknown>, provider: string, authPath: string): never {
   const available = Object.keys(data).filter((key) => isStoredCredential(data[key]));
   const looked = authJsonKeysForProvider(provider).join(", ");
   throw new Error(
@@ -120,10 +123,73 @@ export function readCredentialFromAuthJson(
   );
 }
 
+export function importSelectionUsed(authPath: string, provider: string, account = "latest"): string {
+  const data = parseAuthJsonFile(authPath);
+  for (const key of authJsonKeysForProvider(provider)) {
+    const slot = data[key];
+    if (!isStoredCredential(slot)) continue;
+    return selectImportAccount(slot, provider, authPath, account).used;
+  }
+  return account;
+}
+
 /**
  * Picks one credential out of a multi-login `accounts[]` array. Selection is by
  * 1-based index or by the entry's `name` field. The primary token is index 1.
  */
+export function latestLoginSlotName(linked: readonly unknown[]): string | undefined {
+  let best = 0;
+  let name: string | undefined;
+  for (const item of linked) {
+    if (!isRecord(item) || typeof item.name !== "string") continue;
+    const match = /^login-(\d+)$/.exec(item.name);
+    if (!match) continue;
+    const n = Number(match[1]);
+    if (n > best) {
+      best = n;
+      name = item.name;
+    }
+  }
+  return name;
+}
+
+function credentialFromSlotEntry(parent: StoredCredential, entry: unknown): StoredCredential {
+  if (isStoredCredential(entry)) return entry;
+  if (!isRecord(entry) || parent.type !== "oauth" || typeof entry.access !== "string") {
+    throw new Error("selected accounts[] entry is not a credential");
+  }
+  const refresh = typeof entry.refresh === "string" ? entry.refresh : parent.refresh;
+  const expires = typeof entry.expires === "number" ? entry.expires : parent.expires;
+  return {
+    type: "oauth",
+    access: entry.access,
+    refresh,
+    expires,
+    ...(parent.accountId ? { accountId: parent.accountId } : {}),
+    ...(typeof entry.idToken === "string"
+      ? { idToken: entry.idToken }
+      : parent.idToken
+        ? { idToken: parent.idToken }
+        : {}),
+  };
+}
+
+export function selectImportAccount(
+  slot: StoredCredential,
+  provider: string,
+  authPath: string,
+  account = "latest",
+): { used: string; credential: StoredCredential } {
+  if (account === "primary") return { used: "primary", credential: slot };
+  const linked = (slot as { accounts?: unknown }).accounts;
+  if (account === "latest") {
+    const name = Array.isArray(linked) ? latestLoginSlotName(linked) : undefined;
+    if (!name) return { used: "primary", credential: slot };
+    return { used: name, credential: selectLinkedAccount(slot, provider, authPath, name) };
+  }
+  return { used: account, credential: selectLinkedAccount(slot, provider, authPath, account) };
+}
+
 function selectLinkedAccount(
   slot: StoredCredential,
   provider: string,
@@ -134,18 +200,18 @@ function selectLinkedAccount(
   if (!Array.isArray(linked) || linked.length === 0) {
     throw new Error(`${provider} in ${authPath} has no accounts[] array; --account cannot be applied`);
   }
-  const idx = /^\d+$/.test(account) ? Number(account) - 1 : linked.findIndex((a) => {
-    return isRecord(a) && a["name"] === account;
+  const selected = account === "latest" ? latestLoginSlotName(linked) : account;
+  if (!selected) {
+    throw new Error(`${provider} in ${authPath} has no login-N slot to use as latest`);
+  }
+  const idx = /^\d+$/.test(selected) ? Number(selected) - 1 : linked.findIndex((a) => {
+    return isRecord(a) && a["name"] === selected;
   });
   if (idx < 0 || idx >= linked.length) {
     const names = linked.map((a, i) => (isRecord(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`)).join(", ");
     throw new Error(`--account ${account} not found in ${provider} accounts[] (available: ${names})`);
   }
-  const entry = linked[idx];
-  if (!isStoredCredential(entry)) {
-    throw new Error(`${provider} accounts[${idx + 1}] in ${authPath} is not a valid credential`);
-  }
-  return entry;
+  return credentialFromSlotEntry(slot, linked[idx]);
 }
 
 /**

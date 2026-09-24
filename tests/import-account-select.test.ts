@@ -24,8 +24,13 @@ describe("readCredentialFromAuthJson --account (multi-login accounts[])", () => 
     }),
   );
 
-  test("default returns primary (top-level) credential", () => {
+  test("default uses the latest login-N slot", () => {
     const c = readCredentialFromAuthJson(authPath, "xai");
+    expect(c.type === "oauth" && c.access === "apple-token").toBe(true);
+  });
+
+  test("primary override keeps the top-level credential", () => {
+    const c = readCredentialFromAuthJson(authPath, "xai", { account: "primary" });
     expect(c.type === "oauth" && c.access === "primary-token").toBe(true);
   });
 

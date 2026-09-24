@@ -150,6 +150,26 @@ describe("oar remove account deletion", () => {
     expect(existsSync(vaultFile(root, "xai", "account-a"))).toBe(true);
   });
 
+  test("CLI remove * deletes every vault account", async () => {
+    const env = { ...process.env, OAR_HOME: root, OAR_SOCK: sock };
+    const proc = Bun.spawn(["bun", cliPath, "remove", "*"], {
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(code).toBe(0);
+    expect(err).toBe("");
+    expect(out).toContain("removed xai/account-a");
+    expect(out).toContain("removed xai/account-b");
+    expect(store.getAccount("xai", "account-a")).toBeUndefined();
+    expect(store.getAccount("xai", "account-b")).toBeUndefined();
+  });
+
   test("CLI remove against isolated daemon succeeds and missing profile exits 1", async () => {
     const env = { ...process.env, OAR_HOME: root, OAR_SOCK: sock };
     const ok = Bun.spawn(["bun", cliPath, "remove", "xai", "account-a"], {

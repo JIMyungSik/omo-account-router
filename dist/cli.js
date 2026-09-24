@@ -3,9 +3,9 @@
 
 // src/cli.ts
 import { spawn, spawnSync } from "child_process";
-import { existsSync as existsSync7, readFileSync as readFileSync7 } from "fs";
+import { existsSync as existsSync9, readFileSync as readFileSync9 } from "fs";
 import { homedir as homedir4 } from "os";
-import { dirname as dirname5, join as join7 } from "path";
+import { dirname as dirname5, join as join8 } from "path";
 import { fileURLToPath } from "url";
 
 // src/auth-stale.ts
@@ -199,6 +199,16 @@ function isXaiProvider2(provider) {
 }
 
 // src/auth-slot.ts
+function credentialsSameSecrets(a, b) {
+  if (a.type !== b.type)
+    return false;
+  if (a.type === "api_key" && b.type === "api_key")
+    return a.key === b.key;
+  if (a.type === "oauth" && b.type === "oauth") {
+    return a.access === b.access && a.refresh === b.refresh;
+  }
+  return false;
+}
 function authJsonKeysForProvider(provider) {
   const canonical = resolveProvider2(provider);
   if (canonical === "chatgpt-subscription")
@@ -355,36 +365,93 @@ function readCredentialFromAuthJson(authPath, provider, opts) {
     const slot = data[key];
     if (!isStoredCredential(slot))
       continue;
-    if (opts?.account)
-      return selectLinkedAccount(slot, provider, authPath, opts.account);
-    return slot;
+    return selectImportAccount(slot, provider, authPath, opts?.account ?? "latest").credential;
   }
   if (provider === "openai-codex" || provider === "chatgpt-subscription") {
     const native = credentialFromNativeCodexAuth(data);
     if (native)
       return native;
   }
+  return missingProvider(data, provider, authPath);
+}
+function missingProvider(data, provider, authPath) {
   const available = Object.keys(data).filter((key) => isStoredCredential(data[key]));
   const looked = authJsonKeysForProvider(provider).join(", ");
   throw new Error(`provider ${provider} not found in ${authPath} (looked for ${looked}; available: ${available.join(", ") || "none"})`);
+}
+function importSelectionUsed(authPath, provider, account = "latest") {
+  const data = parseAuthJsonFile(authPath);
+  for (const key of authJsonKeysForProvider(provider)) {
+    const slot = data[key];
+    if (!isStoredCredential(slot))
+      continue;
+    return selectImportAccount(slot, provider, authPath, account).used;
+  }
+  return account;
+}
+function latestLoginSlotName(linked) {
+  let best = 0;
+  let name;
+  for (const item of linked) {
+    if (!isRecord2(item) || typeof item.name !== "string")
+      continue;
+    const match = /^login-(\d+)$/.exec(item.name);
+    if (!match)
+      continue;
+    const n = Number(match[1]);
+    if (n > best) {
+      best = n;
+      name = item.name;
+    }
+  }
+  return name;
+}
+function credentialFromSlotEntry(parent, entry) {
+  if (isStoredCredential(entry))
+    return entry;
+  if (!isRecord2(entry) || parent.type !== "oauth" || typeof entry.access !== "string") {
+    throw new Error("selected accounts[] entry is not a credential");
+  }
+  const refresh = typeof entry.refresh === "string" ? entry.refresh : parent.refresh;
+  const expires = typeof entry.expires === "number" ? entry.expires : parent.expires;
+  return {
+    type: "oauth",
+    access: entry.access,
+    refresh,
+    expires,
+    ...parent.accountId ? { accountId: parent.accountId } : {},
+    ...typeof entry.idToken === "string" ? { idToken: entry.idToken } : parent.idToken ? { idToken: parent.idToken } : {}
+  };
+}
+function selectImportAccount(slot, provider, authPath, account = "latest") {
+  if (account === "primary")
+    return { used: "primary", credential: slot };
+  const linked = slot.accounts;
+  if (account === "latest") {
+    const name = Array.isArray(linked) ? latestLoginSlotName(linked) : undefined;
+    if (!name)
+      return { used: "primary", credential: slot };
+    return { used: name, credential: selectLinkedAccount(slot, provider, authPath, name) };
+  }
+  return { used: account, credential: selectLinkedAccount(slot, provider, authPath, account) };
 }
 function selectLinkedAccount(slot, provider, authPath, account) {
   const linked = slot.accounts;
   if (!Array.isArray(linked) || linked.length === 0) {
     throw new Error(`${provider} in ${authPath} has no accounts[] array; --account cannot be applied`);
   }
-  const idx = /^\d+$/.test(account) ? Number(account) - 1 : linked.findIndex((a) => {
-    return isRecord2(a) && a["name"] === account;
+  const selected = account === "latest" ? latestLoginSlotName(linked) : account;
+  if (!selected) {
+    throw new Error(`${provider} in ${authPath} has no login-N slot to use as latest`);
+  }
+  const idx = /^\d+$/.test(selected) ? Number(selected) - 1 : linked.findIndex((a) => {
+    return isRecord2(a) && a["name"] === selected;
   });
   if (idx < 0 || idx >= linked.length) {
     const names = linked.map((a, i) => isRecord2(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`).join(", ");
     throw new Error(`--account ${account} not found in ${provider} accounts[] (available: ${names})`);
   }
-  const entry = linked[idx];
-  if (!isStoredCredential(entry)) {
-    throw new Error(`${provider} accounts[${idx + 1}] in ${authPath} is not a valid credential`);
-  }
-  return entry;
+  return credentialFromSlotEntry(slot, linked[idx]);
 }
 function readAllCredentialsFromAuthJson(authPath) {
   const data = parseAuthJsonFile(authPath);
@@ -445,6 +512,33 @@ async function importAllFromAuthJson(client, opts) {
   return { imported, skipped, errors };
 }
 
+// src/import-pref.ts
+import { existsSync, mkdirSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
+import { join as join2 } from "node:path";
+function prefPath(root = defaultOarRoot()) {
+  return join2(root, "import-account.json");
+}
+function readImportAccountSetting(root = defaultOarRoot()) {
+  const path = prefPath(root);
+  if (!existsSync(path))
+    return "latest";
+  try {
+    const parsed = JSON.parse(readFileSync2(path, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return "primary";
+    const account = parsed.account;
+    return typeof account === "string" && account.length > 0 ? account : "latest";
+  } catch {
+    return "latest";
+  }
+}
+function writeImportAccountSetting(account, root = defaultOarRoot()) {
+  if (!account || account.startsWith("-"))
+    throw new Error("import account setting must be primary, latest, or a slot name");
+  mkdirSync(root, { recursive: true, mode: 448 });
+  writeFileSync(prefPath(root), JSON.stringify({ account }, null, 2), { encoding: "utf8", mode: 384 });
+}
+
 // src/report-results.ts
 var REPORT_RESULTS = [
   "SUCCESS",
@@ -486,16 +580,16 @@ function formatSinkResultLines(sinks) {
 }
 
 // src/paths.ts
-import { existsSync } from "node:fs";
+import { existsSync as existsSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 function defaultOarRoot2(env = process.env) {
   if (env.OAR_HOME)
     return env.OAR_HOME;
-  return join2(homedir2(), ".oar");
+  return join3(homedir2(), ".oar");
 }
 function oarSocketPath2(root = defaultOarRoot2()) {
-  return join2(root, "oar.sock");
+  return join3(root, "oar.sock");
 }
 function unique(paths) {
   const out = [];
@@ -506,60 +600,50 @@ function unique(paths) {
   return out;
 }
 function resolveActiveAuthPaths2(env = process.env, home = homedir2()) {
+  if (env.OAR_AUTH_PATH)
+    return unique([env.OAR_AUTH_PATH]);
   const envDirs = [
     env.OAR_AUTH_DIR,
     env.OMO_CODING_AGENT_DIR,
     env.SENPI_CODING_AGENT_DIR,
     env.PI_CODING_AGENT_DIR
   ].filter((v) => typeof v === "string" && v.length > 0);
-  if (env.OAR_AUTH_PATH)
-    return unique([env.OAR_AUTH_PATH]);
-  if (envDirs.length > 0)
-    return unique(envDirs.map((dir) => join2(dir, "auth.json")));
   const known = knownAuthJsonCandidates(home);
-  if (env.OAR_ACTIVATE_ALL === "1") {
-    const existing = known.filter((p) => existsSync(p));
-    return existing.length > 0 ? existing : [known[0]];
-  }
-  const omoAgent = join2(home, ".omo", "agent", "auth.json");
-  const remoteAgent = join2(home, ".senpi", "remote-agent", "auth.json");
-  const targets = [];
-  if (existsSync(omoAgent) || existsSync(join2(home, ".omo")))
-    targets.push(omoAgent);
-  if (existsSync(join2(home, ".senpi", "remote-agent")))
-    targets.push(remoteAgent);
+  const existing = known.filter((p) => existsSync2(p));
+  const selected = envDirs.length > 0 ? envDirs.map((dir) => join3(dir, "auth.json")) : [];
+  const targets = unique([...selected, ...existing]);
   if (targets.length > 0)
-    return unique(targets);
-  return [join2(home, ".senpi", "agent", "auth.json")];
+    return targets;
+  return [join3(home, ".omo", "agent", "auth.json")];
 }
 function knownAuthJsonCandidates(home) {
   return unique([
-    join2(home, ".omo", "agent", "auth.json"),
-    join2(home, ".omo", "auth.json"),
-    join2(home, ".senpi", "agent", "auth.json"),
-    join2(home, ".senpi", "remote-agent", "auth.json")
+    join3(home, ".omo", "agent", "auth.json"),
+    join3(home, ".omo", "auth.json"),
+    join3(home, ".senpi", "agent", "auth.json"),
+    join3(home, ".senpi", "remote-agent", "auth.json")
   ]);
 }
 function discoverAuthJsonFiles(env = process.env, home = homedir2()) {
-  return unique([...resolveActiveAuthPaths2(env, home), ...knownAuthJsonCandidates(home)]).filter((p) => existsSync(p));
+  return unique([...resolveActiveAuthPaths2(env, home), ...knownAuthJsonCandidates(home)]).filter((p) => existsSync2(p));
 }
 
 // src/senpi-install.ts
-import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir as homedir3 } from "node:os";
-import { dirname, join as join3 } from "node:path";
+import { dirname, join as join4 } from "node:path";
 var KNOWN_OMO = "/opt/homebrew/lib/node_modules/omo-ai";
 function readJson(path) {
-  return JSON.parse(readFileSync2(path, "utf8"));
+  return JSON.parse(readFileSync3(path, "utf8"));
 }
 function fromOmoRoot(omoRoot) {
-  const omoPkg = join3(omoRoot, "package.json");
-  const senpiRoot = join3(omoRoot, "node_modules", "@code-yeongyu", "senpi");
-  const senpiPkg = join3(senpiRoot, "package.json");
-  const authStoragePath = join3(senpiRoot, "dist", "core", "auth-storage.js");
-  const pluginRoot = join3(omoRoot, "plugin");
-  if (!existsSync2(omoPkg) || !existsSync2(senpiPkg) || !existsSync2(authStoragePath))
+  const omoPkg = join4(omoRoot, "package.json");
+  const senpiRoot = join4(omoRoot, "node_modules", "@code-yeongyu", "senpi");
+  const senpiPkg = join4(senpiRoot, "package.json");
+  const authStoragePath = join4(senpiRoot, "dist", "core", "auth-storage.js");
+  const pluginRoot = join4(omoRoot, "plugin");
+  if (!existsSync3(omoPkg) || !existsSync3(senpiPkg) || !existsSync3(authStoragePath))
     return null;
   const omo = readJson(omoPkg);
   const senpi = readJson(senpiPkg);
@@ -579,8 +663,8 @@ function findSenpiInstall2() {
     candidates.push(dirname(require2.resolve("omo-ai/package.json")));
   } catch {}
   candidates.push(KNOWN_OMO);
-  const homebrew = join3(homedir3(), ".nvm", "versions");
-  if (existsSync2(homebrew)) {}
+  const homebrew = join4(homedir3(), ".nvm", "versions");
+  if (existsSync3(homebrew)) {}
   for (const root of candidates) {
     const found = fromOmoRoot(root);
     if (found)
@@ -590,7 +674,7 @@ function findSenpiInstall2() {
 }
 
 // src/panel.ts
-import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
 
 // src/table.ts
 function stripAnsi(s) {
@@ -641,9 +725,9 @@ function keyOf(provider, profile) {
   return `${provider}\x00${profile}`;
 }
 function readEventLines(eventsPath, opts) {
-  if (!existsSync3(eventsPath))
+  if (!existsSync4(eventsPath))
     return [];
-  const raw = readFileSync3(eventsPath, "utf8");
+  const raw = readFileSync4(eventsPath, "utf8");
   if (!raw.trim())
     return [];
   const maxLines = opts?.maxLines ?? 50000;
@@ -1099,14 +1183,14 @@ function formatStatusText(view, opts) {
 // src/store.ts
 import {
   chmodSync,
-  existsSync as existsSync4,
-  mkdirSync,
-  readFileSync as readFileSync4,
+  existsSync as existsSync5,
+  mkdirSync as mkdirSync2,
+  readFileSync as readFileSync5,
   renameSync,
   unlinkSync,
-  writeFileSync
+  writeFileSync as writeFileSync2
 } from "node:fs";
-import { dirname as dirname2, join as join4 } from "node:path";
+import { dirname as dirname2, join as join5 } from "node:path";
 var DEFAULT_POLICY = {
   mode: "manual",
   autoFailover: false
@@ -1115,9 +1199,9 @@ function emptyState() {
   return { version: 1, providers: {}, accounts: [], updatedAt: new Date().toISOString() };
 }
 function atomicWriteJson2(path, data, mode = 384) {
-  mkdirSync(dirname2(path), { recursive: true, mode: 448 });
+  mkdirSync2(dirname2(path), { recursive: true, mode: 448 });
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
+  writeFileSync2(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
   renameSync(tmp, path);
   try {
     chmodSync(path, mode);
@@ -1133,8 +1217,8 @@ class OarStore {
     this.rootDir = opts?.rootDir ?? defaultOarRoot();
     this.statePath = oarStatePath(this.rootDir);
     this.vaultDir = oarVaultDir(this.rootDir);
-    mkdirSync(this.rootDir, { recursive: true, mode: 448 });
-    mkdirSync(this.vaultDir, { recursive: true, mode: 448 });
+    mkdirSync2(this.rootDir, { recursive: true, mode: 448 });
+    mkdirSync2(this.vaultDir, { recursive: true, mode: 448 });
     this.state = this.load();
     if (this.migrateLegacyProviders())
       this.persist();
@@ -1162,16 +1246,16 @@ class OarStore {
     return true;
   }
   renameVaultFile(from, to, profile) {
-    const oldPath = join4(this.vaultDir, `${from}__${profile}.json`);
-    const nextPath = join4(this.vaultDir, `${to}__${profile}.json`);
-    if (existsSync4(oldPath) && !existsSync4(nextPath))
+    const oldPath = join5(this.vaultDir, `${from}__${profile}.json`);
+    const nextPath = join5(this.vaultDir, `${to}__${profile}.json`);
+    if (existsSync5(oldPath) && !existsSync5(nextPath))
       renameSync(oldPath, nextPath);
   }
   load() {
-    if (!existsSync4(this.statePath))
+    if (!existsSync5(this.statePath))
       return emptyState();
     try {
-      const parsed = JSON.parse(readFileSync4(this.statePath, "utf8"));
+      const parsed = JSON.parse(readFileSync5(this.statePath, "utf8"));
       if (parsed?.version !== 1)
         return emptyState();
       return {
@@ -1215,11 +1299,11 @@ class OarStore {
   removeAccount(provider, profile) {
     const canonical = resolveProvider2(provider);
     const vaultPath = this.vaultPath(canonical, profile);
-    const legacyPath = join4(this.vaultDir, `${provider}__${profile}.json`);
-    if (existsSync4(vaultPath)) {
+    const legacyPath = join5(this.vaultDir, `${provider}__${profile}.json`);
+    if (existsSync5(vaultPath)) {
       unlinkSync(vaultPath);
     }
-    if (legacyPath !== vaultPath && existsSync4(legacyPath))
+    if (legacyPath !== vaultPath && existsSync5(legacyPath))
       unlinkSync(legacyPath);
     this.state.accounts = this.state.accounts.filter((a) => !(resolveProvider2(a.provider) === canonical && a.profile === profile));
     const policy = this.state.providers[canonical] ?? this.state.providers[provider];
@@ -1254,7 +1338,7 @@ class OarStore {
     this.persist();
   }
   vaultPath(provider, profile) {
-    return join4(this.vaultDir, `${resolveProvider2(provider)}__${profile}.json`);
+    return join5(this.vaultDir, `${resolveProvider2(provider)}__${profile}.json`);
   }
   putVaultCredential(provider, profile, credential) {
     atomicWriteJson2(this.vaultPath(provider, profile), credential, 384);
@@ -1291,31 +1375,116 @@ class OarStore {
   }
   getVaultCredential(provider, profile) {
     const path = this.vaultPath(provider, profile);
-    if (!existsSync4(path))
+    if (!existsSync5(path))
       return;
     try {
-      return JSON.parse(readFileSync4(path, "utf8"));
+      return JSON.parse(readFileSync5(path, "utf8"));
     } catch {
       return;
     }
   }
 }
 
+// src/who.ts
+import { existsSync as existsSync6, readFileSync as readFileSync6 } from "node:fs";
+function isCredential(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const type = value.type;
+  return type === "oauth" || type === "api_key";
+}
+function sameAccount(live, vault) {
+  if (credentialsSameSecrets(live, vault))
+    return true;
+  return live.type === "oauth" && vault.type === "oauth" && Boolean(live.refresh) && live.refresh === vault.refresh;
+}
+function slotName(slot) {
+  const accounts = slot.accounts;
+  if (!Array.isArray(accounts))
+    return "-";
+  for (const item of accounts) {
+    if (!item || typeof item !== "object")
+      continue;
+    const name = item.name;
+    if (typeof name !== "string" || !name)
+      continue;
+    const access = item.access;
+    const refresh = item.refresh;
+    const key = item.key;
+    if (slot.type === "oauth" && (access === slot.access || refresh === slot.refresh))
+      return name;
+    if (slot.type === "api_key" && key === slot.key)
+      return name;
+  }
+  return "-";
+}
+function describeLiveAuth(paths, accounts, readVault) {
+  const rows = [];
+  for (const path of paths) {
+    if (!existsSync6(path))
+      continue;
+    let data;
+    try {
+      const parsed = JSON.parse(readFileSync6(path, "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        continue;
+      data = parsed;
+    } catch {
+      rows.push({ path, provider: "-", profile: "-", login: "-", slot: "-", note: "unreadable" });
+      continue;
+    }
+    for (const [provider, raw] of Object.entries(data)) {
+      if (!isCredential(raw))
+        continue;
+      const canonical = resolveProvider2(provider);
+      const match = accounts.find((account) => {
+        if (resolveProvider2(account.provider) !== canonical)
+          return false;
+        const vault = readVault(account.provider, account.profile);
+        return vault ? sameAccount(raw, vault) : false;
+      });
+      const login = loginFromCredential(raw) ?? match?.login ?? "-";
+      const slot = slotName(raw);
+      rows.push({
+        path,
+        provider,
+        profile: match?.profile ?? "-",
+        login,
+        slot,
+        note: match ? "live token" : "no vault match"
+      });
+    }
+  }
+  return rows;
+}
+function formatWho(rows) {
+  if (rows.length === 0)
+    return "no live auth slots";
+  const lines = ["PATH  PROVIDER  OAR  LOGIN  SLOT  NOTE"];
+  for (const row of rows) {
+    lines.push([row.path, row.provider, row.profile, row.login, row.slot, row.note].join("  "));
+  }
+  lines.push("");
+  lines.push("OAR is the vault profile whose token is in the file. SLOT is the Senpi accounts[] name only when that entry holds the same token. The footer @login-N is a per-session label and can differ.");
+  return lines.join(`
+`);
+}
+
 // src/usage/cache.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2, chmodSync as chmodSync2 } from "node:fs";
-import { dirname as dirname3, join as join5 } from "node:path";
+import { existsSync as existsSync7, mkdirSync as mkdirSync3, readFileSync as readFileSync7, renameSync as renameSync2, writeFileSync as writeFileSync3, chmodSync as chmodSync2 } from "node:fs";
+import { dirname as dirname3, join as join6 } from "node:path";
 function usageCachePath(root = defaultOarRoot()) {
-  return join5(root, "usage-cache.json");
+  return join6(root, "usage-cache.json");
 }
 function cacheKey(provider, profile) {
   return `${provider}/${profile}`;
 }
 function loadUsageCache(root = defaultOarRoot()) {
   const path = usageCachePath(root);
-  if (!existsSync5(path))
+  if (!existsSync7(path))
     return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
   try {
-    const parsed = JSON.parse(readFileSync5(path, "utf8"));
+    const parsed = JSON.parse(readFileSync7(path, "utf8"));
     if (parsed?.version !== 1 || !parsed.entries) {
       return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
     }
@@ -1326,14 +1495,14 @@ function loadUsageCache(root = defaultOarRoot()) {
 }
 function saveUsageCache(cache, root = defaultOarRoot()) {
   const path = usageCachePath(root);
-  mkdirSync2(dirname3(path), { recursive: true, mode: 448 });
+  mkdirSync3(dirname3(path), { recursive: true, mode: 448 });
   const tmp = `${path}.${process.pid}.tmp`;
   const body = {
     version: 1,
     updatedAt: new Date().toISOString(),
     entries: cache.entries
   };
-  writeFileSync2(tmp, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 384 });
+  writeFileSync3(tmp, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 384 });
   renameSync2(tmp, path);
   try {
     chmodSync2(path, 384);
@@ -2274,27 +2443,27 @@ function auditToJson(result) {
 // src/subscriptions/store.ts
 import {
   chmodSync as chmodSync3,
-  existsSync as existsSync6,
-  mkdirSync as mkdirSync3,
-  readFileSync as readFileSync6,
+  existsSync as existsSync8,
+  mkdirSync as mkdirSync4,
+  readFileSync as readFileSync8,
   renameSync as renameSync3,
-  writeFileSync as writeFileSync3
+  writeFileSync as writeFileSync4
 } from "node:fs";
-import { dirname as dirname4, join as join6 } from "node:path";
+import { dirname as dirname4, join as join7 } from "node:path";
 function emptyFile() {
   return { version: 1, plans: [], updatedAt: new Date().toISOString() };
 }
 function atomicWriteJson3(path, data, mode = 384) {
-  mkdirSync3(dirname4(path), { recursive: true, mode: 448 });
+  mkdirSync4(dirname4(path), { recursive: true, mode: 448 });
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync3(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
+  writeFileSync4(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
   renameSync3(tmp, path);
   try {
     chmodSync3(path, mode);
   } catch {}
 }
 function subscriptionsPath(root = defaultOarRoot()) {
-  return join6(root, "subscriptions.json");
+  return join7(root, "subscriptions.json");
 }
 
 class SubscriptionsStore {
@@ -2305,10 +2474,10 @@ class SubscriptionsStore {
     this.path = subscriptionsPath(this.rootDir);
   }
   load() {
-    if (!existsSync6(this.path))
+    if (!existsSync8(this.path))
       return emptyFile();
     try {
-      const parsed = JSON.parse(readFileSync6(this.path, "utf8"));
+      const parsed = JSON.parse(readFileSync8(this.path, "utf8"));
       if (parsed?.version !== 1 || !Array.isArray(parsed.plans))
         return emptyFile();
       return {
@@ -2538,11 +2707,11 @@ function formatRecommendTable(rows) {
 // src/cli.ts
 var __dirname2 = dirname5(fileURLToPath(import.meta.url));
 function readPackageVersion() {
-  const pkgPath = join7(__dirname2, "..", "package.json");
-  if (!existsSync7(pkgPath))
+  const pkgPath = join8(__dirname2, "..", "package.json");
+  if (!existsSync9(pkgPath))
     return "unknown";
   try {
-    const parsed = JSON.parse(readFileSync7(pkgPath, "utf8"));
+    const parsed = JSON.parse(readFileSync9(pkgPath, "utf8"));
     return parsed.version ?? "unknown";
   } catch {
     return "unknown";
@@ -2580,6 +2749,11 @@ COMMANDS
       Header counts accounts / active / problematic. No remote usage fetch.
       --json  Structured rows + summary (exit 0).
 
+  oar who
+      Which vault profile is actually in each live auth.json. SLOT is set only
+      when a Senpi accounts[] entry holds that same token. The footer @login-N
+      is a per-session label and can name a different slot.
+
   oar accounts [provider]
       JSON list of vault accounts; optional filter by provider id.
 
@@ -2591,9 +2765,10 @@ COMMANDS
 
   oar remove <provider> <profile>
       Delete that profile from daemon state and its vault credential.
-      Clears preferred if it pointed here. If the live auth.json slot is
-      this same account, that provider key is removed. A different live
-      account, other providers, and subscription records stay.
+      oar remove * deletes every vault account. Clears preferred if it
+      pointed here. If the live auth.json slot is this same account, that
+      provider key is removed. A different live account and subscription
+      records stay.
 
   oar use <provider> <profile> [--force]
       Switch live auth slot to this vault profile. Refreshes remote usage first;
@@ -2613,9 +2788,9 @@ COMMANDS
       into the OAR vault. openai, codex, chatgpt, and openai-codex all mean
       chatgpt-subscription. grok means xai. For chatgpt-subscription, --from may also be a native Codex
       auth.json (tokens.id_token + account_id; expiry from access-token JWT exp).
-      When the provider slot carries a multi-login accounts[] array (e.g. xAI
-      Google + Sign-in-with-Apple under one entry), --account selects one by
-      1-based index or by its name field (default: primary/top-level token).
+      When the provider slot carries a multi-login accounts[] array, --account
+      selects one by 1-based index, name, latest, or primary. The default is
+      latest (highest login-N). Pass --account or a third argument to override.
       Secrets stay in the vault; nothing is printed.
 
   oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
@@ -2763,6 +2938,18 @@ async function withClient(fn) {
 async function req(request) {
   return withClient((c) => c.request(request));
 }
+async function removeOne(provider, profile) {
+  const res = await req({ protocol: 1, action: "remove", provider, profile });
+  if (!res.ok)
+    throw new Error(res.error);
+  console.log(`removed ${provider}/${profile}`);
+  const data = res.data;
+  for (const path of data.authSlotsCleared ?? [])
+    console.log(`auth slot cleared: ${path}`);
+  for (const path of data.authSlotsKept ?? []) {
+    console.log(`auth slot kept: ${path} (different account)`);
+  }
+}
 async function warnIfDaemonDown(scope) {
   try {
     const res = await req({ protocol: 1, action: "ping" });
@@ -2786,7 +2973,7 @@ function printStatus(data, opts) {
 async function daemonStart() {
   const root = process.env.OAR_HOME ?? defaultOarRoot2();
   const sock = process.env.OAR_SOCK ?? oarSocketPath2(root);
-  if (existsSync7(sock)) {
+  if (existsSync9(sock)) {
     try {
       const client = new OarClient({ socketPath: sock });
       const pong = await client.request({ protocol: 1, action: "ping" });
@@ -2796,9 +2983,9 @@ async function daemonStart() {
       }
     } catch {}
   }
-  const daemonTs = join7(__dirname2, "daemon-main.ts");
-  const daemonJs = join7(__dirname2, "daemon-main.js");
-  const daemonEntry = existsSync7(daemonTs) ? daemonTs : daemonJs;
+  const daemonTs = join8(__dirname2, "daemon-main.ts");
+  const daemonJs = join8(__dirname2, "daemon-main.js");
+  const daemonEntry = existsSync9(daemonTs) ? daemonTs : daemonJs;
   const runtimeBin = typeof process.execPath === "string" && process.execPath.length > 0 ? process.execPath : "node";
   const useBunForTs = daemonEntry.endsWith(".ts") && !runtimeBin.includes("bun");
   const spawnBin = useBunForTs ? "bun" : runtimeBin;
@@ -2822,11 +3009,11 @@ async function daemonStart() {
 async function daemonStop() {
   const sock = process.env.OAR_SOCK ?? oarSocketPath2();
   const pidPath = `${sock}.pid`;
-  if (!existsSync7(pidPath)) {
+  if (!existsSync9(pidPath)) {
     console.log("oar-daemon not running (no pid file)");
     return;
   }
-  const pid = Number(readFileSync7(pidPath, "utf8").trim());
+  const pid = Number(readFileSync9(pidPath, "utf8").trim());
   if (!Number.isFinite(pid))
     throw new Error("invalid pid file");
   try {
@@ -2888,6 +3075,13 @@ async function main(argv) {
       printStatus(res.data, { json: rest.includes("--json") });
       return;
     }
+    case "who": {
+      const root = process.env.OAR_HOME ?? defaultOarRoot2();
+      const store = new OarStore({ rootDir: root });
+      const rows = describeLiveAuth(resolveActiveAuthPaths2(), store.listAccounts(), (provider, profile) => store.getVaultCredential(provider, profile));
+      console.log(formatWho(rows));
+      return;
+    }
     case "accounts": {
       const res = await req({ protocol: 1, action: "accounts", provider: rest[0] });
       if (!res.ok)
@@ -2918,19 +3112,26 @@ async function main(argv) {
       return;
     }
     case "remove": {
+      if (rest[0] === "*") {
+        const listed = await req({ protocol: 1, action: "accounts" });
+        if (!listed.ok)
+          throw new Error(listed.error);
+        const accounts = listed.data;
+        if (accounts.length === 0) {
+          console.log("removed 0 accounts");
+          return;
+        }
+        for (const account of accounts) {
+          await removeOne(account.provider, account.profile);
+        }
+        console.log(`removed ${accounts.length} accounts`);
+        return;
+      }
       const [provider, profile] = rest;
       if (!provider || !profile)
-        throw new Error("usage: oar remove <provider> <profile>");
-      const res = await req({ protocol: 1, action: "remove", provider, profile });
-      if (!res.ok)
-        throw new Error(res.error);
-      console.log(`removed ${provider}/${profile}`);
-      const data = res.data;
-      for (const path of data.authSlotsCleared ?? [])
-        console.log(`auth slot cleared: ${path}`);
-      for (const path of data.authSlotsKept ?? []) {
-        console.log(`auth slot kept: ${path} (different account)`);
-      }
+        throw new Error(`usage: oar remove <provider> <profile>
+   or: oar remove *`);
+      await removeOne(provider, profile);
       return;
     }
     case "use": {
@@ -3013,7 +3214,7 @@ ${suggestAccounts(provider)}`);
       } else {
         rejectUnknownFlags(rest, new Set(["--from", "--account"]), new Set(["--from", "--account"]));
       }
-      let from = join7(homedir4(), ".omo", "agent", "auth.json");
+      let from = join8(homedir4(), ".omo", "agent", "auth.json");
       const fromIdx = rest.indexOf("--from");
       if (fromIdx >= 0 && rest[fromIdx + 1])
         from = rest[fromIdx + 1];
@@ -3036,16 +3237,29 @@ ${suggestAccounts(provider)}`);
           process.exitCode = 1;
         return;
       }
+      if (rest[0] === "default") {
+        const value = rest[1];
+        if (!value) {
+          console.log(readImportAccountSetting());
+          return;
+        }
+        writeImportAccountSetting(value);
+        console.log(`import account default: ${value}`);
+        return;
+      }
       const [provider, profile] = positionalArgs(rest, new Set(["--from", "--account"]));
       if (!provider || !profile) {
-        throw new Error(`usage: oar import-auth <provider> <profile> [--from path] [--account <n|name>]
+        throw new Error(`usage: oar import-auth <provider> <profile> [--from path] [--account <n|name|latest>]
+   or: oar import-auth default [primary|latest|<slot>]
    or: oar import-auth --all [--from path] [--profile name] [--force]`);
       }
-      let account;
       const accountIdx = rest.indexOf("--account");
-      if (accountIdx >= 0 && rest[accountIdx + 1])
-        account = rest[accountIdx + 1];
-      const credential = readCredentialFromAuthJson(from, provider, account ? { account } : undefined);
+      const flagged = accountIdx >= 0 ? rest[accountIdx + 1] : undefined;
+      const positional = positionalArgs(rest, new Set(["--from", "--account"]));
+      const extra = positional[2];
+      const account = flagged ?? extra ?? readImportAccountSetting();
+      const credential = readCredentialFromAuthJson(from, provider, { account });
+      const used = importSelectionUsed(from, provider, account);
       const res = await req({
         protocol: 1,
         action: "import-credential",
@@ -3055,7 +3269,7 @@ ${suggestAccounts(provider)}`);
       });
       if (!res.ok)
         throw new Error(res.error);
-      console.log(`imported ${provider}/${profile} from ${from} (secrets stored under OAR vault, not logged)`);
+      console.log(`imported ${provider}/${profile} from ${from} using ${used} (secrets stored under OAR vault, not logged)`);
       return;
     }
     case "login": {
@@ -3087,8 +3301,8 @@ ${suggestAccounts(provider)}`);
       return;
     }
     case "install": {
-      const scriptPath = join7(__dirname2, "..", "scripts", "install.sh");
-      if (!existsSync7(scriptPath)) {
+      const scriptPath = join8(__dirname2, "..", "scripts", "install.sh");
+      if (!existsSync9(scriptPath)) {
         throw new Error(`install script not found at ${scriptPath}. Run scripts/install.sh directly from a full checkout.`);
       }
       const result = spawnSync(scriptPath, rest, { stdio: "inherit" });
@@ -3404,7 +3618,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       }
       console.log("active auth paths:");
       for (const p of resolveActiveAuthPaths2()) {
-        console.log(`  ${existsSync7(p) ? "OK" : "--"} ${p}`);
+        console.log(`  ${existsSync9(p) ? "OK" : "--"} ${p}`);
       }
       console.log("discovered auth.json:");
       for (const p of discoverAuthJsonFiles()) {
