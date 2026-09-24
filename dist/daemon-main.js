@@ -6,6 +6,21 @@ import { chmodSync as chmodSync3, existsSync as existsSync8, mkdirSync as mkdirS
 import { createServer } from "node:net";
 import { dirname as dirname5 } from "node:path";
 
+// src/provider-alias.ts
+var PROVIDER_ALIASES = {
+  "chatgpt-subscription": "chatgpt-subscription",
+  "openai-codex": "chatgpt-subscription",
+  openai: "chatgpt-subscription",
+  codex: "chatgpt-subscription",
+  chatgpt: "chatgpt-subscription",
+  xai: "xai",
+  grok: "xai"
+};
+function resolveProvider(input) {
+  const key = input.trim().toLowerCase();
+  return PROVIDER_ALIASES[key] ?? input.trim();
+}
+
 // src/classifier.ts
 function norm(s) {
   return (s ?? "").toLowerCase();
@@ -247,12 +262,12 @@ var DEFAULT_TOKEN_LIFETIME_SECONDS2 = 3600;
 
 class OpenaiCodexAdapter {
   store;
-  provider = "openai-codex";
+  provider = "chatgpt-subscription";
   constructor(store) {
     this.store = store;
   }
   async discoverAccounts() {
-    return this.store.listAccounts("openai-codex");
+    return this.store.listAccounts(this.provider);
   }
   async healthCheck(account) {
     const cred = this.store.getVaultCredential(account.provider, account.profile);
@@ -499,12 +514,12 @@ class XaiAdapter {
 // src/adapters/index.ts
 var KNOWN_GENERIC_PROVIDERS = new Set(["opencode-go", "zai-coding-cn"]);
 function createAdapter(provider, store) {
-  switch (provider) {
+  switch (resolveProvider(provider)) {
     case "xai":
       return new XaiAdapter(store);
     case "anthropic":
       return new AnthropicAdapter(store);
-    case "openai-codex":
+    case "chatgpt-subscription":
       return new OpenaiCodexAdapter(store);
     case "openrouter":
       return new OpenrouterAdapter(store);
@@ -692,6 +707,12 @@ class AuthSlotActivator {
   getAuthPaths() {
     return [...this.authPaths];
   }
+  clearMatchingSlots(provider, credential) {
+    return this.authPaths.map((path) => ({
+      path,
+      result: clearMatchingProviderSlot(path, provider, credential)
+    }));
+  }
   async activate(provider, profile) {
     const cred = this.store.getVaultCredential(provider, profile);
     if (!cred) {
@@ -700,7 +721,7 @@ class AuthSlotActivator {
     const written = [];
     let via = "atomic-rename";
     for (const path of this.authPaths) {
-      const usedSenpi = this.preferSenpiLock ? await this.writeSlotViaSenpi(path, provider, cred) : false;
+      const usedSenpi = await this.writeAliasSlots(path, provider, cred);
       if (!usedSenpi)
         this.writeSlot(path, provider, cred);
       else
@@ -797,6 +818,29 @@ class AuthSlotActivator {
       });
     }
   }
+  async writeAliasSlots(authPath, provider, credential) {
+    if (!this.preferSenpiLock)
+      return false;
+    const aliases = authJsonKeysForProvider(provider);
+    let present = [];
+    if (existsSync3(authPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync2(authPath, "utf8"));
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          present = aliases.filter((key) => (key in parsed));
+        }
+      } catch {
+        present = [];
+      }
+    }
+    const writeKeys = present.length > 0 ? present : [resolveProvider(provider)];
+    for (const key of writeKeys) {
+      const used = await this.writeSlotViaSenpi(authPath, key, credential);
+      if (!used)
+        return false;
+    }
+    return true;
+  }
   async writeSlotViaSenpi(authPath, provider, credential) {
     try {
       const storage = await createSenpiAuthStorage(authPath);
@@ -820,7 +864,12 @@ class AuthSlotActivator {
         data = {};
       }
     }
-    data[provider] = mergeProviderSlot(data[provider], credential);
+    const aliases = authJsonKeysForProvider(provider);
+    const present = aliases.filter((key) => (key in data));
+    const writeKeys = present.length > 0 ? present : [provider];
+    for (const key of writeKeys) {
+      data[key] = mergeProviderSlot(data[key], credential);
+    }
     const tmp = `${authPath}.oar.${process.pid}.${Date.now()}.tmp`;
     writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 384 });
     renameSync(tmp, authPath);
@@ -868,6 +917,55 @@ function credentialsSameSecrets(a, b) {
     return a.access === b.access && a.refresh === b.refresh;
   }
   return false;
+}
+function authJsonKeysForProvider(provider) {
+  const canonical = resolveProvider(provider);
+  if (canonical === "chatgpt-subscription")
+    return ["chatgpt-subscription", "openai-codex"];
+  return [canonical];
+}
+function sameAccountLineage(live, vault) {
+  if (credentialsSameSecrets(live, vault))
+    return true;
+  if (live.type !== "oauth" || vault.type !== "oauth")
+    return false;
+  if (live.refresh && live.refresh === vault.refresh)
+    return true;
+  return Boolean(live.accountId && vault.accountId && live.accountId === vault.accountId);
+}
+function clearMatchingProviderSlot(authPath, provider, credential) {
+  if (!existsSync3(authPath))
+    return "absent";
+  let data;
+  try {
+    const parsed = JSON.parse(readFileSync2(authPath, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return "kept";
+    data = parsed;
+  } catch {
+    throw new Error(`unable to read auth slot ${authPath}`);
+  }
+  let cleared = false;
+  let sawSlot = false;
+  for (const key of authJsonKeysForProvider(provider)) {
+    const slot = data[key];
+    if (!slot || typeof slot !== "object" || Array.isArray(slot))
+      continue;
+    sawSlot = true;
+    if (!sameAccountLineage(slot, credential))
+      continue;
+    delete data[key];
+    cleared = true;
+  }
+  if (!cleared)
+    return sawSlot ? "kept" : "absent";
+  const tmp = `${authPath}.oar.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 384 });
+  renameSync(tmp, authPath);
+  try {
+    chmodSync(authPath, 384);
+  } catch {}
+  return "cleared";
 }
 function isFresherOAuth(candidate, baseline) {
   if (candidate.type !== "oauth" || baseline.type !== "oauth")
@@ -1144,7 +1242,7 @@ function applyCodexAuthFile(path, credential) {
 function createCodexHomeSink(env) {
   return {
     id: CODEX_HOME_SINK_ID,
-    providers: ["openai-codex"],
+    providers: ["chatgpt-subscription", "openai-codex"],
     apply(credential) {
       if (credential.type !== "oauth") {
         return { id: CODEX_HOME_SINK_ID, status: "skipped", detail: "not_oauth" };
@@ -1275,6 +1373,17 @@ class LeaseManager {
     let n = 0;
     for (const [id, lease] of this.leases) {
       if (lease.holder === holder) {
+        this.leases.delete(id);
+        n += 1;
+      }
+    }
+    return n;
+  }
+  releaseAccount(provider, profile) {
+    this.sweep();
+    let n = 0;
+    for (const [id, lease] of this.leases) {
+      if (lease.provider === provider && lease.profile === profile) {
         this.leases.delete(id);
         n += 1;
       }
@@ -1737,6 +1846,9 @@ class OarDaemon {
     if (!req || req.protocol !== 1) {
       return { ok: false, error: "unsupported protocol" };
     }
+    if ("provider" in req && typeof req.provider === "string") {
+      req = { ...req, provider: resolveProvider(req.provider) };
+    }
     switch (req.action) {
       case "ping":
         return { ok: true, data: { pong: true, pid: process.pid } };
@@ -1900,14 +2012,42 @@ class OarDaemon {
             error: `unknown account ${req.provider}/${req.profile}`
           };
         }
-        this.store.removeAccount(req.provider, req.profile);
+        const credential = this.store.getVaultCredential(req.provider, req.profile);
+        let authSlots = [];
+        if (credential) {
+          try {
+            authSlots = this.activator.clearMatchingSlots(req.provider, credential);
+          } catch (error) {
+            return {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error)
+            };
+          }
+        }
+        try {
+          this.store.removeAccount(req.provider, req.profile);
+        } catch (error) {
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+        this.leases.releaseAccount(req.provider, req.profile);
         this.events.append({
           ts: new Date().toISOString(),
           event: "remove",
           provider: req.provider,
           profile: req.profile
         });
-        return { ok: true, data: { provider: req.provider, profile: req.profile } };
+        return {
+          ok: true,
+          data: {
+            provider: req.provider,
+            profile: req.profile,
+            authSlotsCleared: authSlots.filter((slot) => slot.result === "cleared").map((slot) => slot.path),
+            authSlotsKept: authSlots.filter((slot) => slot.result === "kept").map((slot) => slot.path)
+          }
+        };
       }
       case "import-credential": {
         const credential = req.credential;
@@ -2189,6 +2329,36 @@ class OarStore {
     mkdirSync5(this.rootDir, { recursive: true, mode: 448 });
     mkdirSync5(this.vaultDir, { recursive: true, mode: 448 });
     this.state = this.load();
+    if (this.migrateLegacyProviders())
+      this.persist();
+  }
+  migrateLegacyProviders() {
+    let changed = false;
+    const accounts = this.state.accounts.map((account) => {
+      const provider = resolveProvider(account.provider);
+      if (provider === account.provider)
+        return account;
+      changed = true;
+      this.renameVaultFile(account.provider, provider, account.profile);
+      return { ...account, provider, credentialRef: `vault:${provider}:${account.profile}` };
+    });
+    const providers = {};
+    for (const [key, policy] of Object.entries(this.state.providers)) {
+      const provider = resolveProvider(key);
+      if (provider !== key)
+        changed = true;
+      providers[provider] = { ...providers[provider] ?? {}, ...policy };
+    }
+    if (!changed)
+      return false;
+    this.state = { ...this.state, accounts, providers };
+    return true;
+  }
+  renameVaultFile(from, to, profile) {
+    const oldPath = join6(this.vaultDir, `${from}__${profile}.json`);
+    const nextPath = join6(this.vaultDir, `${to}__${profile}.json`);
+    if (existsSync10(oldPath) && !existsSync10(nextPath))
+      renameSync3(oldPath, nextPath);
   }
   load() {
     if (!existsSync10(this.statePath))
@@ -2215,13 +2385,20 @@ class OarStore {
     return structuredClone(this.state);
   }
   listAccounts(provider) {
-    return this.state.accounts.filter((a) => provider ? a.provider === provider : true);
+    if (!provider)
+      return this.state.accounts;
+    const canonical = resolveProvider(provider);
+    return this.state.accounts.filter((a) => resolveProvider(a.provider) === canonical);
   }
   getAccount(provider, profile) {
-    return this.state.accounts.find((a) => a.provider === provider && a.profile === profile);
+    const canonical = resolveProvider(provider);
+    return this.state.accounts.find((a) => resolveProvider(a.provider) === canonical && a.profile === profile);
   }
   upsertAccount(account) {
-    const idx = this.state.accounts.findIndex((a) => a.provider === account.provider && a.profile === account.profile);
+    const provider = resolveProvider(account.provider);
+    const next = provider === account.provider ? account : { ...account, provider, credentialRef: `vault:${provider}:${account.profile}` };
+    const idx = this.state.accounts.findIndex((a) => resolveProvider(a.provider) === provider && a.profile === next.profile);
+    account = next;
     if (idx >= 0)
       this.state.accounts[idx] = account;
     else
@@ -2229,35 +2406,48 @@ class OarStore {
     this.persist();
   }
   removeAccount(provider, profile) {
-    this.state.accounts = this.state.accounts.filter((a) => !(a.provider === provider && a.profile === profile));
-    this.persist();
-    const vaultPath = this.vaultPath(provider, profile);
+    const canonical = resolveProvider(provider);
+    const vaultPath = this.vaultPath(canonical, profile);
+    const legacyPath = join6(this.vaultDir, `${provider}__${profile}.json`);
     if (existsSync10(vaultPath)) {
-      try {
-        unlinkSync2(vaultPath);
-      } catch {}
+      unlinkSync2(vaultPath);
     }
+    if (legacyPath !== vaultPath && existsSync10(legacyPath))
+      unlinkSync2(legacyPath);
+    this.state.accounts = this.state.accounts.filter((a) => !(resolveProvider(a.provider) === canonical && a.profile === profile));
+    const policy = this.state.providers[canonical] ?? this.state.providers[provider];
+    if (policy?.preferred === profile) {
+      const next = { ...policy };
+      delete next.preferred;
+      delete this.state.providers[provider];
+      this.state.providers[canonical] = next;
+    }
+    this.persist();
   }
   getProviderPolicy(provider) {
-    return { ...DEFAULT_POLICY, ...this.state.providers[provider] ?? {} };
+    const canonical = resolveProvider(provider);
+    return { ...DEFAULT_POLICY, ...this.state.providers[canonical] ?? this.state.providers[provider] ?? {} };
   }
   setProviderMode(provider, mode) {
-    const cur = this.getProviderPolicy(provider);
-    this.state.providers[provider] = { ...cur, mode };
+    const canonical = resolveProvider(provider);
+    const cur = this.getProviderPolicy(canonical);
+    this.state.providers[canonical] = { ...cur, mode };
     this.persist();
   }
   setAutoFailover(provider, enabled) {
-    const cur = this.getProviderPolicy(provider);
-    this.state.providers[provider] = { ...cur, autoFailover: enabled };
+    const canonical = resolveProvider(provider);
+    const cur = this.getProviderPolicy(canonical);
+    this.state.providers[canonical] = { ...cur, autoFailover: enabled };
     this.persist();
   }
   setPreferred(provider, profile) {
-    const cur = this.getProviderPolicy(provider);
-    this.state.providers[provider] = { ...cur, preferred: profile };
+    const canonical = resolveProvider(provider);
+    const cur = this.getProviderPolicy(canonical);
+    this.state.providers[canonical] = { ...cur, preferred: profile };
     this.persist();
   }
   vaultPath(provider, profile) {
-    return join6(this.vaultDir, `${provider}__${profile}.json`);
+    return join6(this.vaultDir, `${resolveProvider(provider)}__${profile}.json`);
   }
   putVaultCredential(provider, profile, credential) {
     atomicWriteJson2(this.vaultPath(provider, profile), credential, 384);

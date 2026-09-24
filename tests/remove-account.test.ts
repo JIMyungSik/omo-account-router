@@ -181,7 +181,7 @@ describe("oar remove account deletion", () => {
     expect(`${missOut}${missErr}`).toMatch(/unknown account xai\/ghost/);
   });
 
-  test("remove does not rewrite live auth slot or subscription records", async () => {
+  test("remove keeps a different live account and subscription records", async () => {
     const subs = new SubscriptionsStore({ rootDir: root });
     subs.set({ provider: "xai", profile: "account-a", monthlyUsd: 30, planLabel: "keep-me" });
     const liveBefore = readFileSync(authPath, "utf8");
@@ -194,9 +194,35 @@ describe("oar remove account deletion", () => {
       profile: "account-a",
     });
     expect(removed.ok).toBe(true);
+    if (removed.ok) {
+      expect((removed.data as { authSlotsKept: string[] }).authSlotsKept).toEqual([authPath]);
+    }
 
     expect(readFileSync(authPath, "utf8")).toBe(liveBefore);
     expect(subs.get("xai", "account-a")?.planLabel).toBe("keep-me");
+  });
+
+  test("remove clears the live provider slot when it is the same account", async () => {
+    writeFileSync(
+      authPath,
+      JSON.stringify({
+        xai: { type: "oauth", access: "tok-A", refresh: "ref-A", expires: 1 },
+        anthropic: { type: "oauth", access: "other", refresh: "other-r", expires: 1 },
+      }),
+      { mode: 0o600 },
+    );
+    const client = new OarClient({ socketPath: sock });
+    const removed = await client.request({
+      protocol: 1,
+      action: "remove",
+      provider: "xai",
+      profile: "account-a",
+    });
+    expect(removed.ok).toBe(true);
+    const live = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>;
+    expect(live.xai).toBeUndefined();
+    expect(live.anthropic).toBeTruthy();
+    expect(store.getVaultCredential("xai", "account-b")?.type).toBe("oauth");
   });
 
   test("stale in-memory leases for the removed account leave daemon status", async () => {

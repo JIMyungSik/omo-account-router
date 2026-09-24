@@ -19,6 +19,7 @@ import type {
 } from "./types.ts";
 import { loginFromCredential } from "./credential-identity.ts";
 import { defaultOarRoot, oarStatePath, oarVaultDir } from "./paths.ts";
+import { resolveProvider } from "./provider-alias.ts";
 
 const DEFAULT_POLICY: ProviderPolicy = {
   mode: "manual",
@@ -54,6 +55,33 @@ export class OarStore {
     mkdirSync(this.rootDir, { recursive: true, mode: 0o700 });
     mkdirSync(this.vaultDir, { recursive: true, mode: 0o700 });
     this.state = this.load();
+    if (this.migrateLegacyProviders()) this.persist();
+  }
+
+  private migrateLegacyProviders(): boolean {
+    let changed = false;
+    const accounts = this.state.accounts.map((account) => {
+      const provider = resolveProvider(account.provider);
+      if (provider === account.provider) return account;
+      changed = true;
+      this.renameVaultFile(account.provider, provider, account.profile);
+      return { ...account, provider, credentialRef: `vault:${provider}:${account.profile}` };
+    });
+    const providers: OarState["providers"] = {};
+    for (const [key, policy] of Object.entries(this.state.providers)) {
+      const provider = resolveProvider(key);
+      if (provider !== key) changed = true;
+      providers[provider] = { ...(providers[provider] ?? {}), ...policy };
+    }
+    if (!changed) return false;
+    this.state = { ...this.state, accounts, providers };
+    return true;
+  }
+
+  private renameVaultFile(from: string, to: string, profile: string): void {
+    const oldPath = join(this.vaultDir, `${from}__${profile}.json`);
+    const nextPath = join(this.vaultDir, `${to}__${profile}.json`);
+    if (existsSync(oldPath) && !existsSync(nextPath)) renameSync(oldPath, nextPath);
   }
 
   private load(): OarState {
@@ -82,63 +110,81 @@ export class OarStore {
   }
 
   listAccounts(provider?: ProviderId): AccountRecord[] {
-    return this.state.accounts.filter((a) => (provider ? a.provider === provider : true));
+    if (!provider) return this.state.accounts;
+    const canonical = resolveProvider(provider);
+    return this.state.accounts.filter((a) => resolveProvider(a.provider) === canonical);
   }
 
   getAccount(provider: ProviderId, profile: ProfileId): AccountRecord | undefined {
-    return this.state.accounts.find((a) => a.provider === provider && a.profile === profile);
+    const canonical = resolveProvider(provider);
+    return this.state.accounts.find(
+      (a) => resolveProvider(a.provider) === canonical && a.profile === profile,
+    );
   }
 
   upsertAccount(account: AccountRecord): void {
+    const provider = resolveProvider(account.provider);
+    const next = provider === account.provider
+      ? account
+      : { ...account, provider, credentialRef: `vault:${provider}:${account.profile}` };
     const idx = this.state.accounts.findIndex(
-      (a) => a.provider === account.provider && a.profile === account.profile,
+      (a) => resolveProvider(a.provider) === provider && a.profile === next.profile,
     );
+    account = next;
     if (idx >= 0) this.state.accounts[idx] = account;
     else this.state.accounts.push(account);
     this.persist();
   }
 
   removeAccount(provider: ProviderId, profile: ProfileId): void {
-    const vaultPath = this.vaultPath(provider, profile);
+    const canonical = resolveProvider(provider);
+    const vaultPath = this.vaultPath(canonical, profile);
+    const legacyPath = join(this.vaultDir, `${provider}__${profile}.json`);
     if (existsSync(vaultPath)) {
       unlinkSync(vaultPath);
     }
+    if (legacyPath !== vaultPath && existsSync(legacyPath)) unlinkSync(legacyPath);
     this.state.accounts = this.state.accounts.filter(
-      (a) => !(a.provider === provider && a.profile === profile),
+      (a) => !(resolveProvider(a.provider) === canonical && a.profile === profile),
     );
-    const policy = this.state.providers[provider];
+    const policy = this.state.providers[canonical] ?? this.state.providers[provider];
     if (policy?.preferred === profile) {
       const next = { ...policy };
       delete next.preferred;
-      this.state.providers[provider] = next;
+      delete this.state.providers[provider];
+      this.state.providers[canonical] = next;
     }
     this.persist();
   }
 
   getProviderPolicy(provider: ProviderId): ProviderPolicy {
-    return { ...DEFAULT_POLICY, ...(this.state.providers[provider] ?? {}) };
+    const canonical = resolveProvider(provider);
+    return { ...DEFAULT_POLICY, ...(this.state.providers[canonical] ?? this.state.providers[provider] ?? {}) };
   }
 
   setProviderMode(provider: ProviderId, mode: ProviderMode): void {
-    const cur = this.getProviderPolicy(provider);
-    this.state.providers[provider] = { ...cur, mode };
+    const canonical = resolveProvider(provider);
+    const cur = this.getProviderPolicy(canonical);
+    this.state.providers[canonical] = { ...cur, mode };
     this.persist();
   }
 
   setAutoFailover(provider: ProviderId, enabled: boolean): void {
-    const cur = this.getProviderPolicy(provider);
-    this.state.providers[provider] = { ...cur, autoFailover: enabled };
+    const canonical = resolveProvider(provider);
+    const cur = this.getProviderPolicy(canonical);
+    this.state.providers[canonical] = { ...cur, autoFailover: enabled };
     this.persist();
   }
 
   setPreferred(provider: ProviderId, profile: ProfileId): void {
-    const cur = this.getProviderPolicy(provider);
-    this.state.providers[provider] = { ...cur, preferred: profile };
+    const canonical = resolveProvider(provider);
+    const cur = this.getProviderPolicy(canonical);
+    this.state.providers[canonical] = { ...cur, preferred: profile };
     this.persist();
   }
 
   private vaultPath(provider: ProviderId, profile: ProfileId): string {
-    return join(this.vaultDir, `${provider}__${profile}.json`);
+    return join(this.vaultDir, `${resolveProvider(provider)}__${profile}.json`);
   }
 
   putVaultCredential(provider: ProviderId, profile: ProfileId, credential: StoredCredential): void {

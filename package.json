@@ -9,6 +9,7 @@
   "scripts": {
     "build": "bun build ./src/cli.ts --outdir dist --target node --format esm --packages=bundle && bun build ./src/daemon-main.ts --outdir dist --target node --format esm --outfile dist/daemon-main.js --packages=bundle && node scripts/fix-shebang.mjs",
     "test": "bun test",
+    "style": "node scripts/check-style.mjs",
     "oar": "bun run src/cli.ts",
     "daemon": "bun run src/daemon-main.ts",
     "install:oar": "bash scripts/install.sh",

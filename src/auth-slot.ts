@@ -11,6 +11,7 @@ import { createSenpiAuthStorage } from "./senpi-auth.ts";
 import type { OarStore } from "./store.ts";
 import type { ProfileId, ProviderId, StoredCredential } from "./types.ts";
 import { resolveActiveAuthPaths } from "./paths.ts";
+import { resolveProvider } from "./provider-alias.ts";
 import type { AccountSink, SinkApplyResult } from "./sinks/types.ts";
 
 /**
@@ -64,6 +65,16 @@ export class AuthSlotActivator {
     return [...this.authPaths];
   }
 
+  clearMatchingSlots(
+    provider: ProviderId,
+    credential: StoredCredential,
+  ): Array<{ path: string; result: SlotClearResult }> {
+    return this.authPaths.map((path) => ({
+      path,
+      result: clearMatchingProviderSlot(path, provider, credential),
+    }));
+  }
+
   async activate(provider: ProviderId, profile: ProfileId): Promise<{ paths: string[]; via: string; sinks: SinkApplyResult[] }> {
     const cred = this.store.getVaultCredential(provider, profile);
     if (!cred) {
@@ -72,7 +83,7 @@ export class AuthSlotActivator {
     const written: string[] = [];
     let via = "atomic-rename";
     for (const path of this.authPaths) {
-      const usedSenpi = this.preferSenpiLock ? await this.writeSlotViaSenpi(path, provider, cred) : false;
+      const usedSenpi = await this.writeAliasSlots(path, provider, cred);
       if (!usedSenpi) this.writeSlot(path, provider, cred);
       else via = "senpi-auth-storage";
       written.push(path);
@@ -187,6 +198,32 @@ export class AuthSlotActivator {
     }
   }
 
+  private async writeAliasSlots(
+    authPath: string,
+    provider: ProviderId,
+    credential: StoredCredential,
+  ): Promise<boolean> {
+    if (!this.preferSenpiLock) return false;
+    const aliases = authJsonKeysForProvider(provider);
+    let present: string[] = [];
+    if (existsSync(authPath)) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(authPath, "utf8"));
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          present = aliases.filter((key) => key in (parsed as Record<string, unknown>));
+        }
+      } catch {
+        present = [];
+      }
+    }
+    const writeKeys = present.length > 0 ? present : [resolveProvider(provider)];
+    for (const key of writeKeys) {
+      const used = await this.writeSlotViaSenpi(authPath, key, credential);
+      if (!used) return false;
+    }
+    return true;
+  }
+
   private async writeSlotViaSenpi(
     authPath: string,
     provider: ProviderId,
@@ -216,7 +253,14 @@ export class AuthSlotActivator {
     }
     // Preserve other providers; merge target slot so Senpi native
     // multi-account fields (accounts, extra oauth keys) are not wiped.
-    data[provider] = mergeProviderSlot(data[provider], credential);
+    // Update an existing alias key (chatgpt-subscription) instead of only
+    // the OAR provider id, so current OMO still sees the switched account.
+    const aliases = authJsonKeysForProvider(provider);
+    const present = aliases.filter((key) => key in data);
+    const writeKeys = present.length > 0 ? present : [provider];
+    for (const key of writeKeys) {
+      data[key] = mergeProviderSlot(data[key], credential);
+    }
     const tmp = `${authPath}.oar.${process.pid}.${Date.now()}.tmp`;
     writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
     renameSync(tmp, authPath);
@@ -296,6 +340,59 @@ export function credentialsSameSecrets(a: StoredCredential, b: StoredCredential)
     return a.access === b.access && a.refresh === b.refresh;
   }
   return false;
+}
+
+/** Current OMO stores Codex subscription OAuth under chatgpt-subscription. */
+export function authJsonKeysForProvider(provider: string): readonly string[] {
+  const canonical = resolveProvider(provider);
+  if (canonical === "chatgpt-subscription") return ["chatgpt-subscription", "openai-codex"];
+  return [canonical];
+}
+
+export type SlotClearResult = "cleared" | "kept" | "absent";
+
+function sameAccountLineage(live: StoredCredential, vault: StoredCredential): boolean {
+  if (credentialsSameSecrets(live, vault)) return true;
+  if (live.type !== "oauth" || vault.type !== "oauth") return false;
+  if (live.refresh && live.refresh === vault.refresh) return true;
+  return Boolean(live.accountId && vault.accountId && live.accountId === vault.accountId);
+}
+
+/** Drop one provider key when the live slot is the removed account. Other providers stay. */
+export function clearMatchingProviderSlot(
+  authPath: string,
+  provider: string,
+  credential: StoredCredential,
+): SlotClearResult {
+  if (!existsSync(authPath)) return "absent";
+  let data: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(authPath, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "kept";
+    data = parsed as Record<string, unknown>;
+  } catch {
+    throw new Error(`unable to read auth slot ${authPath}`);
+  }
+  let cleared = false;
+  let sawSlot = false;
+  for (const key of authJsonKeysForProvider(provider)) {
+    const slot = data[key];
+    if (!slot || typeof slot !== "object" || Array.isArray(slot)) continue;
+    sawSlot = true;
+    if (!sameAccountLineage(slot as StoredCredential, credential)) continue;
+    delete data[key];
+    cleared = true;
+  }
+  if (!cleared) return sawSlot ? "kept" : "absent";
+  const tmp = `${authPath}.oar.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
+  renameSync(tmp, authPath);
+  try {
+    chmodSync(authPath, 0o600);
+  } catch {
+    // ignore
+  }
+  return "cleared";
 }
 
 /**

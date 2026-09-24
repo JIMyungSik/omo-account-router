@@ -1,3 +1,4 @@
+import { isCodexProvider, isXaiProvider } from "../provider-alias.ts";
 import { isEligible } from "../router.ts";
 import { defaultOarRoot } from "../paths.ts";
 import type { OarStore } from "../store.ts";
@@ -106,7 +107,7 @@ export async function buildRecommendations(
   }
 
   const targets = accounts
-    .filter((a) => a.provider === "xai" || a.provider === "openai-codex")
+    .filter((a) => isXaiProvider(a.provider) || isCodexProvider(a.provider))
     .map((a) => ({ provider: a.provider, profile: a.profile }));
 
   // Also include other providers without remote usage (eligibility only)

@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { authJsonKeysForProvider } from "./auth-slot.ts";
+import { resolveProvider } from "./provider-alias.ts";
 import type { OarClient } from "./client.ts";
 import { decodeJwtPayload } from "./credential-identity.ts";
 import type { OAuthCredential, StoredCredential } from "./types.ts";
@@ -101,16 +103,21 @@ export function readCredentialFromAuthJson(
   opts?: { account?: string },
 ): StoredCredential {
   const data = parseAuthJsonFile(authPath);
-  const slot = data[provider];
-  if (isStoredCredential(slot)) {
+  for (const key of authJsonKeysForProvider(provider)) {
+    const slot = data[key];
+    if (!isStoredCredential(slot)) continue;
     if (opts?.account) return selectLinkedAccount(slot, provider, authPath, opts.account);
     return slot;
   }
-  if (provider === "openai-codex") {
+  if (provider === "openai-codex" || provider === "chatgpt-subscription") {
     const native = credentialFromNativeCodexAuth(data);
     if (native) return native;
   }
-  throw new Error(`provider ${provider} not found in ${authPath}`);
+  const available = Object.keys(data).filter((key) => isStoredCredential(data[key]));
+  const looked = authJsonKeysForProvider(provider).join(", ");
+  throw new Error(
+    `provider ${provider} not found in ${authPath} (looked for ${looked}; available: ${available.join(", ") || "none"})`,
+  );
 }
 
 /**
@@ -155,11 +162,19 @@ export function readAllCredentialsFromAuthJson(authPath: string): Record<string,
       out[provider] = value;
     }
   }
-  if (!out["openai-codex"]) {
-    const native = credentialFromNativeCodexAuth(data);
-    if (native) out["openai-codex"] = native;
+  if (!out["chatgpt-subscription"] && out["openai-codex"]) {
+    out["chatgpt-subscription"] = out["openai-codex"];
   }
-  return out;
+  delete out["openai-codex"];
+  if (!out["chatgpt-subscription"]) {
+    const native = credentialFromNativeCodexAuth(data);
+    if (native) out["chatgpt-subscription"] = native;
+  }
+  const canonical: Record<string, StoredCredential> = {};
+  for (const [provider, credential] of Object.entries(out)) {
+    canonical[resolveProvider(provider)] = credential;
+  }
+  return canonical;
 }
 
 export type ImportAllOptions = {

@@ -1,0 +1,74 @@
+name: pr-gate
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun test $(find tests -name '*.test.ts' ! -name '*integration*' ! -name 'hot-switch.test.ts' ! -name 'remove-account.test.ts')
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/sinks-integration.test.ts tests/hot-switch.test.ts tests/remove-account.test.ts
+
+  style:
+    name: style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/check-style.mjs
+
+  gate:
+    name: gate
+    needs: [unit, integration, style]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Merge or request changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          UNIT: ${{ needs.unit.result }}
+          INTEGRATION: ${{ needs.integration.result }}
+          STYLE: ${{ needs.style.result }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          set -eu
+          body="unit=${UNIT} integration=${INTEGRATION} style=${STYLE}"
+          if [ "$UNIT" = "success" ] && [ "$INTEGRATION" = "success" ] && [ "$STYLE" = "success" ]; then
+            gh pr review "$PR" --approve --body "Checks passed. ${body}" || true
+            if [ "$SAME_REPO" = "true" ]; then
+              gh pr merge "$PR" --squash --auto
+            else
+              gh pr comment "$PR" --body "Checks passed. Fork PRs are not auto-merged; a maintainer merges after this review."
+            fi
+          else
+            gh pr review "$PR" --request-changes --body "Checks failed. Fix the failing job and push again. ${body}"
+            exit 1
+          fi

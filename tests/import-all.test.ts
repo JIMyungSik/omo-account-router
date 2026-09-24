@@ -64,7 +64,7 @@ describe("import-auth --all", () => {
   test("readAllCredentialsFromAuthJson skips malformed entries", () => {
     const creds = readAllCredentialsFromAuthJson(authPath);
     expect(Object.keys(creds).sort()).toEqual(
-      ["anthropic", "openai-codex", "opencode-go", "openrouter", "xai", "zai-coding-cn"].sort(),
+      ["anthropic", "chatgpt-subscription", "opencode-go", "openrouter", "xai", "zai-coding-cn"].sort(),
     );
     expect(creds.malformed).toBeUndefined();
   });
@@ -74,7 +74,7 @@ describe("import-auth --all", () => {
 
     expect(result.errors).toEqual([]);
     expect(result.imported.sort()).toEqual(
-      ["anthropic", "openai-codex", "opencode-go", "openrouter", "xai", "zai-coding-cn"].sort(),
+      ["anthropic", "chatgpt-subscription", "opencode-go", "openrouter", "xai", "zai-coding-cn"].sort(),
     );
 
     const accounts = await client.request({ protocol: 1, action: "accounts" });
@@ -84,7 +84,7 @@ describe("import-auth --all", () => {
       const providers = new Set(list.map((a) => a.provider));
       expect(providers.has("xai")).toBe(true);
       expect(providers.has("anthropic")).toBe(true);
-      expect(providers.has("openai-codex")).toBe(true);
+      expect(providers.has("chatgpt-subscription")).toBe(true);
       expect(providers.has("openrouter")).toBe(true);
       expect(providers.has("opencode-go")).toBe(true);
       expect(providers.has("zai-coding-cn")).toBe(true);
@@ -121,8 +121,8 @@ describe("import-auth --all", () => {
     writeFileSync(nativePath, nativeCodexAuthJson(tokens), { mode: 0o600 });
 
     const creds = readAllCredentialsFromAuthJson(nativePath);
-    expect(Object.keys(creds)).toEqual(["openai-codex"]);
-    const cred = creds["openai-codex"];
+    expect(Object.keys(creds)).toEqual(["chatgpt-subscription"]);
+    const cred = creds["chatgpt-subscription"];
     expect(cred?.type).toBe("oauth");
     if (cred?.type === "oauth") {
       expect(cred.access).toBe(tokens.access);
@@ -133,7 +133,7 @@ describe("import-auth --all", () => {
     }
 
     const single = readCredentialFromAuthJson(nativePath, "openai-codex");
-    expect(single).toEqual(creds["openai-codex"]);
+    expect(single).toEqual(creds["chatgpt-subscription"]);
   });
 
   test("keeps Senpi openai-codex slots compatible when idToken is present", () => {
@@ -151,5 +151,30 @@ describe("import-auth --all", () => {
     writeFileSync(senpiPath, JSON.stringify(senpi), { mode: 0o600 });
     const cred = readCredentialFromAuthJson(senpiPath, "openai-codex");
     expect(cred).toEqual(senpi["openai-codex"]);
+  });
+
+  test("openai-codex import reads chatgpt-subscription when that is the live key", () => {
+    const aliasPath = join(root, "alias-auth.json");
+    writeFileSync(
+      aliasPath,
+      JSON.stringify({
+        xai: { type: "oauth", access: "xa", refresh: "xr", expires: 1 },
+        "chatgpt-subscription": {
+          type: "oauth",
+          access: "codex-access",
+          refresh: "codex-refresh",
+          expires: 9,
+          accountId: "acct-live",
+          idToken: "id-live",
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const cred = readCredentialFromAuthJson(aliasPath, "openai-codex");
+    expect(cred.type === "oauth" && cred.access === "codex-access" && cred.accountId === "acct-live").toBe(true);
+    const all = readAllCredentialsFromAuthJson(aliasPath);
+    expect(all["chatgpt-subscription"]).toEqual(cred);
+    expect(all["openai-codex"]).toBeUndefined();
+    expect(all.xai).toBeTruthy();
   });
 });

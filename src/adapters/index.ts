@@ -1,3 +1,4 @@
+import { resolveProvider } from "../provider-alias.ts";
 import type { OarStore } from "../store.ts";
 import type { ProviderAdapter } from "./types.ts";
 import { AnthropicAdapter } from "./anthropic.ts";
@@ -15,12 +16,12 @@ import { XaiAdapter } from "./xai.ts";
 const KNOWN_GENERIC_PROVIDERS = new Set(["opencode-go", "zai-coding-cn"]);
 
 export function createAdapter(provider: string, store: OarStore): ProviderAdapter | undefined {
-  switch (provider) {
+  switch (resolveProvider(provider)) {
     case "xai":
       return new XaiAdapter(store);
     case "anthropic":
       return new AnthropicAdapter(store);
-    case "openai-codex":
+    case "chatgpt-subscription":
       return new OpenaiCodexAdapter(store);
     case "openrouter":
       return new OpenrouterAdapter(store);

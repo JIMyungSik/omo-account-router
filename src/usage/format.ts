@@ -1,3 +1,4 @@
+import { isCodexProvider, isXaiProvider } from "../provider-alias.ts";
 import { formatMarkdownTable } from "../table.ts";
 import type { AccountRemoteUsage, UsageWindow } from "./types.ts";
 
@@ -62,20 +63,20 @@ export function formatUsageTable(rows: AccountRemoteUsage[]): string {
       const weekly = pick(u.windows, (w) => w.kind === "weekly");
       const grok = pick(
         u.windows,
-        (w) => w.label === "grok" || (u.provider === "xai" && (w.kind === "weekly" || w.kind === "period")),
+        (w) => w.label === "grok" || (isXaiProvider(u.provider) && (w.kind === "weekly" || w.kind === "period")),
       );
 
       // Primary used/reset for display
       const primary =
-        u.provider === "xai" ? grok : weekly ?? session ?? u.windows[0];
+        isXaiProvider(u.provider) ? grok : weekly ?? session ?? u.windows[0];
 
       return {
         provider: u.provider,
         profile: u.profile,
         ok: "yes",
-        session: u.provider === "openai-codex" ? fmtPct(session?.remainingPercent) : "-",
-        weekly: u.provider === "openai-codex" ? fmtPct(weekly?.remainingPercent) : "-",
-        grok: u.provider === "xai" ? fmtPct(grok?.remainingPercent) : "-",
+        session: isCodexProvider(u.provider) ? fmtPct(session?.remainingPercent) : "-",
+        weekly: isCodexProvider(u.provider) ? fmtPct(weekly?.remainingPercent) : "-",
+        grok: isXaiProvider(u.provider) ? fmtPct(grok?.remainingPercent) : "-",
         used: fmtPct(primary?.usedPercent),
         reset: shortReset(primary?.resetsAt),
         source: u.source,

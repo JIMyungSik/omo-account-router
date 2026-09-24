@@ -10,6 +10,7 @@ import { EventLog } from "./events.ts";
 import { LeaseManager } from "./lease.ts";
 import type { OarRequest, OarResponse } from "./protocol.ts";
 import { AccountRefreshLock } from "./refresh-lock.ts";
+import { resolveProvider } from "./provider-alias.ts";
 import { parseReportResult } from "./report-results.ts";
 import { OarRouter } from "./router.ts";
 import type { OarStore } from "./store.ts";
@@ -156,6 +157,9 @@ export class OarDaemon {
   async dispatch(req: OarRequest): Promise<OarResponse> {
     if (!req || req.protocol !== 1) {
       return { ok: false, error: "unsupported protocol" };
+    }
+    if ("provider" in req && typeof req.provider === "string") {
+      req = { ...req, provider: resolveProvider(req.provider) };
     }
 
     switch (req.action) {
@@ -334,6 +338,18 @@ export class OarDaemon {
             error: `unknown account ${req.provider}/${req.profile}`,
           };
         }
+        const credential = this.store.getVaultCredential(req.provider, req.profile);
+        let authSlots: Array<{ path: string; result: string }> = [];
+        if (credential) {
+          try {
+            authSlots = this.activator.clearMatchingSlots(req.provider, credential);
+          } catch (error) {
+            return {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
         try {
           this.store.removeAccount(req.provider, req.profile);
         } catch (error) {
@@ -349,7 +365,15 @@ export class OarDaemon {
           provider: req.provider,
           profile: req.profile,
         });
-        return { ok: true, data: { provider: req.provider, profile: req.profile } };
+        return {
+          ok: true,
+          data: {
+            provider: req.provider,
+            profile: req.profile,
+            authSlotsCleared: authSlots.filter((slot) => slot.result === "cleared").map((slot) => slot.path),
+            authSlotsKept: authSlots.filter((slot) => slot.result === "kept").map((slot) => slot.path),
+          },
+        };
       }
       case "import-credential": {
         const credential = req.credential as StoredCredential;

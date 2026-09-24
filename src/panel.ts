@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { formatProfileLabel } from "./credential-identity.ts";
+import { isCodexProvider, isXaiProvider } from "./provider-alias.ts";
 import { oarEventsPath } from "./paths.ts";
 import { formatMarkdownTable } from "./table.ts";
 import type { AccountRemoteUsage } from "./usage/types.ts";
@@ -261,7 +262,7 @@ function remoteCols(r: PanelRow): { session: string; weekly: string; grok: strin
   }
   const session = remote.windows.find((w) => w.kind === "session");
   const weekly = remote.windows.find((w) => w.kind === "weekly");
-  const grok = remote.windows.find((w) => w.label === "grok" || (r.provider === "xai" && (w.kind === "weekly" || w.kind === "period")));
+  const grok = remote.windows.find((w) => w.label === "grok" || (isXaiProvider(r.provider) && (w.kind === "weekly" || w.kind === "period")));
   const fmt = (w?: { remainingPercent: number | null; usedPercent: number | null }) => {
     if (!w) return "-";
     if (w.remainingPercent != null) return `${w.remainingPercent}%`;
@@ -269,9 +270,9 @@ function remoteCols(r: PanelRow): { session: string; weekly: string; grok: strin
     return "-";
   };
   return {
-    session: r.provider === "openai-codex" ? fmt(session) : "-",
-    weekly: r.provider === "openai-codex" ? fmt(weekly) : "-",
-    grok: r.provider === "xai" ? fmt(grok) : "-",
+    session: isCodexProvider(r.provider) ? fmt(session) : "-",
+    weekly: isCodexProvider(r.provider) ? fmt(weekly) : "-",
+    grok: isXaiProvider(r.provider) ? fmt(grok) : "-",
   };
 }
 
@@ -374,9 +375,9 @@ export function formatPanelXbar(snap: PanelSnapshot): string {
     const star = r.active ? "* " : "  ";
     const rc = remoteCols(r);
     const remote =
-      r.provider === "openai-codex"
+      isCodexProvider(r.provider)
         ? `5h=${rc.session} wk=${rc.weekly}`
-        : r.provider === "xai"
+        : isXaiProvider(r.provider)
           ? `grok=${rc.grok}`
           : "";
     const stats = `ok=${r.usage.success} rl=${r.usage.rateLimited}${remote ? " " + remote : ""}`;
@@ -393,7 +394,7 @@ export function formatPanelXbar(snap: PanelSnapshot): string {
 }
 
 function shortProv(p: string): string {
-  if (p === "openai-codex") return "codex";
+  if (isCodexProvider(p)) return "codex";
   if (p === "zai-coding-cn") return "zai";
   if (p === "opencode-go") return "ocgo";
   return p;

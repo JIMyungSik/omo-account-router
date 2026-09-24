@@ -16,12 +16,12 @@ const DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
  * socket until idle TTL — documented limitation, not a Grok blocker.
  */
 export class OpenaiCodexAdapter implements ProviderAdapter {
-  readonly provider = "openai-codex";
+  readonly provider = "chatgpt-subscription";
 
   constructor(private readonly store: OarStore) {}
 
   async discoverAccounts(): Promise<AccountRecord[]> {
-    return this.store.listAccounts("openai-codex");
+    return this.store.listAccounts(this.provider);
   }
 
   async healthCheck(account: AccountRecord): Promise<AccountState> {

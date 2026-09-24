@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { applyAuthStaleHints } from "./auth-stale.ts";
 import { OarClient } from "./client.ts";
 import { positionalArgs, rejectUnknownFlags } from "./cli-flags.ts";
+import { isCodexProvider, isXaiProvider } from "./provider-alias.ts";
 import { importAllFromAuthJson, readCredentialFromAuthJson } from "./import-all.ts";
 import { parseReportResult } from "./report-results.ts";
 import { formatSinkResultLines } from "./sinks/index.ts";
@@ -86,8 +87,9 @@ COMMANDS
 
   oar remove <provider> <profile>
       Delete that profile from daemon state and its vault credential.
-      Clears preferred if it pointed here. Other profiles, live auth.json
-      slots, and subscription records are left unchanged.
+      Clears preferred if it pointed here. If the live auth.json slot is
+      this same account, that provider key is removed. A different live
+      account, other providers, and subscription records stay.
 
   oar use <provider> <profile> [--force]
       Switch live auth slot to this vault profile. Refreshes remote usage first;
@@ -104,7 +106,8 @@ COMMANDS
 
   oar import-auth <provider> <profile> [--from <auth.json>] [--account <n|name>]
       Copy one provider credential from Senpi auth.json (default ~/.omo/agent/auth.json)
-      into the OAR vault. For openai-codex, --from may also be a native Codex
+      into the OAR vault. openai, codex, chatgpt, and openai-codex all mean
+      chatgpt-subscription. grok means xai. For chatgpt-subscription, --from may also be a native Codex
       auth.json (tokens.id_token + account_id; expiry from access-token JWT exp).
       When the provider slot carries a multi-login accounts[] array (e.g. xAI
       Google + Sign-in-with-Apple under one entry), --account selects one by
@@ -446,6 +449,11 @@ async function main(argv: string[]) {
       const res = await req({ protocol: 1, action: "remove", provider, profile });
       if (!res.ok) throw new Error(res.error);
       console.log(`removed ${provider}/${profile}`);
+      const data = res.data as { authSlotsCleared?: string[]; authSlotsKept?: string[] };
+      for (const path of data.authSlotsCleared ?? []) console.log(`auth slot cleared: ${path}`);
+      for (const path of data.authSlotsKept ?? []) {
+        console.log(`auth slot kept: ${path} (different account)`);
+      }
       return;
     }
     case "use": {
@@ -716,7 +724,7 @@ async function main(argv: string[]) {
         let remoteUsage = undefined as undefined | Awaited<ReturnType<typeof fetchRemoteUsageForAccounts>>;
         if (!noRemote) {
           const targets = (status.accounts ?? [])
-            .filter((a) => a.provider === "openai-codex" || a.provider === "xai")
+            .filter((a) => isCodexProvider(a.provider) || isXaiProvider(a.provider))
             .map((a) => ({ provider: a.provider, profile: a.profile }));
           remoteUsage = await fetchRemoteUsageForAccounts(store, targets, {
             root,
@@ -760,7 +768,7 @@ async function main(argv: string[]) {
           ? [{ provider, profile }]
           : store
               .listAccounts()
-              .filter((a) => a.provider === "openai-codex" || a.provider === "xai")
+              .filter((a) => isCodexProvider(a.provider) || isXaiProvider(a.provider))
               .map((a) => ({ provider: a.provider, profile: a.profile }));
       if (targets.length === 0) {
         console.log("no openai-codex / xai accounts in vault");
@@ -971,7 +979,7 @@ async function main(argv: string[]) {
       const store = new OarStore({ rootDir: root });
       const codexAccounts = store
         .listAccounts()
-        .filter((a) => a.provider === "openai-codex")
+        .filter((a) => isCodexProvider(a.provider))
         .map((a) => ({ provider: a.provider, profile: a.profile }));
       if (codexAccounts.length > 0) {
         const usageRows = await fetchRemoteUsageForAccounts(store, codexAccounts, {
