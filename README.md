@@ -30,6 +30,17 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 Verified against **OMO `5.0.0-0.beta.42` / Senpi `2026.9.4-3`**: header-only `after_provider_response` classification, and live `auth.json` writes merge instead of replacing native multi-account fields (`accounts`).
 
+## Platforms
+
+The CLI, daemon, and vault work on macOS, Linux, and Windows. Checked on 2026-09-24 with Bun 1.3.14:
+
+| OS | How | Result |
+|----|-----|--------|
+| Linux arm64 | Docker `oven/bun:1.3.14`, `bun test` | 51 pass, 3 skip, 0 fail |
+| Ubuntu | GitHub `ubuntu-latest`, `bun test` + style check | pass ([run 35945289044](https://github.com/JIMyungSik/omo-account-router/actions/runs/35945289044)) |
+| Windows | GitHub `windows-latest`, same commands | pass (same run) |
+
+`scripts/install.sh` and the LaunchAgent are macOS only. On Linux or Windows, build with Bun or Node 22 and run `oar daemon start` yourself. The default Argo secrets path is under `~/Library/Application Support`; on other systems set `OAR_ARGO_SECRETS_PATH` if that file exists.
 
 ---
 

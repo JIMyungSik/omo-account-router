@@ -30,6 +30,17 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 **OMO `5.0.0-0.beta.42` / Senpi `2026.9.4-3`** 기준: `after_provider_response`는 status+headers만 오므로 헤더에서 `invalid_grant`를 읽고, live `auth.json` 기록은 native `accounts` 필드를 덮어쓰지 않습니다.
 
+## 플랫폼
+
+CLI, 데몬, vault는 macOS, Linux, Windows에서 동작합니다. 2026-09-24, Bun 1.3.14 기준:
+
+| OS | 방법 | 결과 |
+|----|------|------|
+| Linux arm64 | Docker `oven/bun:1.3.14`, `bun test` | 51 pass, 3 skip, 0 fail |
+| Ubuntu | GitHub `ubuntu-latest`, `bun test` + style | pass ([run 35945289044](https://github.com/JIMyungSik/omo-account-router/actions/runs/35945289044)) |
+| Windows | GitHub `windows-latest`, 같은 명령 | pass (같은 run) |
+
+`scripts/install.sh`와 LaunchAgent는 macOS 전용입니다. Linux/Windows는 Bun 또는 Node 22로 빌드한 뒤 `oar daemon start`로 때웁니다. Argo 시크릿 기본 경로는 `~/Library/Application Support` 아래이므로, 다른 OS에서는 파일이 있으면 `OAR_ARGO_SECRETS_PATH`를 지정합니다.
 
 ---
 
