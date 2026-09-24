@@ -644,31 +644,21 @@ function unique(paths) {
   return out;
 }
 function resolveActiveAuthPaths(env = process.env, home = homedir2()) {
+  if (env.OAR_AUTH_PATH)
+    return unique([env.OAR_AUTH_PATH]);
   const envDirs = [
     env.OAR_AUTH_DIR,
     env.OMO_CODING_AGENT_DIR,
     env.SENPI_CODING_AGENT_DIR,
     env.PI_CODING_AGENT_DIR
   ].filter((v) => typeof v === "string" && v.length > 0);
-  if (env.OAR_AUTH_PATH)
-    return unique([env.OAR_AUTH_PATH]);
-  if (envDirs.length > 0)
-    return unique(envDirs.map((dir) => join2(dir, "auth.json")));
   const known = knownAuthJsonCandidates(home);
-  if (env.OAR_ACTIVATE_ALL === "1") {
-    const existing = known.filter((p) => existsSync2(p));
-    return existing.length > 0 ? existing : [known[0]];
-  }
-  const omoAgent = join2(home, ".omo", "agent", "auth.json");
-  const remoteAgent = join2(home, ".senpi", "remote-agent", "auth.json");
-  const targets = [];
-  if (existsSync2(omoAgent) || existsSync2(join2(home, ".omo")))
-    targets.push(omoAgent);
-  if (existsSync2(join2(home, ".senpi", "remote-agent")))
-    targets.push(remoteAgent);
+  const existing = known.filter((p) => existsSync2(p));
+  const selected = envDirs.length > 0 ? envDirs.map((dir) => join2(dir, "auth.json")) : [];
+  const targets = unique([...selected, ...existing]);
   if (targets.length > 0)
-    return unique(targets);
-  return [join2(home, ".senpi", "agent", "auth.json")];
+    return targets;
+  return [join2(home, ".omo", "agent", "auth.json")];
 }
 function knownAuthJsonCandidates(home) {
   return unique([
@@ -821,19 +811,7 @@ class AuthSlotActivator {
   async writeAliasSlots(authPath, provider, credential) {
     if (!this.preferSenpiLock)
       return false;
-    const aliases = authJsonKeysForProvider(provider);
-    let present = [];
-    if (existsSync3(authPath)) {
-      try {
-        const parsed = JSON.parse(readFileSync2(authPath, "utf8"));
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          present = aliases.filter((key) => (key in parsed));
-        }
-      } catch {
-        present = [];
-      }
-    }
-    const writeKeys = present.length > 0 ? present : [resolveProvider(provider)];
+    const writeKeys = authJsonKeysForProvider(provider);
     for (const key of writeKeys) {
       const used = await this.writeSlotViaSenpi(authPath, key, credential);
       if (!used)
@@ -864,9 +842,7 @@ class AuthSlotActivator {
         data = {};
       }
     }
-    const aliases = authJsonKeysForProvider(provider);
-    const present = aliases.filter((key) => (key in data));
-    const writeKeys = present.length > 0 ? present : [provider];
+    const writeKeys = authJsonKeysForProvider(provider);
     for (const key of writeKeys) {
       data[key] = mergeProviderSlot(data[key], credential);
     }
@@ -2254,31 +2230,21 @@ function unique2(paths) {
   return out;
 }
 function resolveActiveAuthPaths2(env = process.env, home = homedir4()) {
+  if (env.OAR_AUTH_PATH)
+    return unique2([env.OAR_AUTH_PATH]);
   const envDirs = [
     env.OAR_AUTH_DIR,
     env.OMO_CODING_AGENT_DIR,
     env.SENPI_CODING_AGENT_DIR,
     env.PI_CODING_AGENT_DIR
   ].filter((v) => typeof v === "string" && v.length > 0);
-  if (env.OAR_AUTH_PATH)
-    return unique2([env.OAR_AUTH_PATH]);
-  if (envDirs.length > 0)
-    return unique2(envDirs.map((dir) => join5(dir, "auth.json")));
   const known = knownAuthJsonCandidates2(home);
-  if (env.OAR_ACTIVATE_ALL === "1") {
-    const existing = known.filter((p) => existsSync9(p));
-    return existing.length > 0 ? existing : [known[0]];
-  }
-  const omoAgent = join5(home, ".omo", "agent", "auth.json");
-  const remoteAgent = join5(home, ".senpi", "remote-agent", "auth.json");
-  const targets = [];
-  if (existsSync9(omoAgent) || existsSync9(join5(home, ".omo")))
-    targets.push(omoAgent);
-  if (existsSync9(join5(home, ".senpi", "remote-agent")))
-    targets.push(remoteAgent);
+  const existing = known.filter((p) => existsSync9(p));
+  const selected = envDirs.length > 0 ? envDirs.map((dir) => join5(dir, "auth.json")) : [];
+  const targets = unique2([...selected, ...existing]);
   if (targets.length > 0)
-    return unique2(targets);
-  return [join5(home, ".senpi", "agent", "auth.json")];
+    return targets;
+  return [join5(home, ".omo", "agent", "auth.json")];
 }
 function knownAuthJsonCandidates2(home) {
   return unique2([

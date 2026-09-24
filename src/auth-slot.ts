@@ -204,19 +204,7 @@ export class AuthSlotActivator {
     credential: StoredCredential,
   ): Promise<boolean> {
     if (!this.preferSenpiLock) return false;
-    const aliases = authJsonKeysForProvider(provider);
-    let present: string[] = [];
-    if (existsSync(authPath)) {
-      try {
-        const parsed: unknown = JSON.parse(readFileSync(authPath, "utf8"));
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          present = aliases.filter((key) => key in (parsed as Record<string, unknown>));
-        }
-      } catch {
-        present = [];
-      }
-    }
-    const writeKeys = present.length > 0 ? present : [resolveProvider(provider)];
+    const writeKeys = authJsonKeysForProvider(provider);
     for (const key of writeKeys) {
       const used = await this.writeSlotViaSenpi(authPath, key, credential);
       if (!used) return false;
@@ -253,11 +241,9 @@ export class AuthSlotActivator {
     }
     // Preserve other providers; merge target slot so Senpi native
     // multi-account fields (accounts, extra oauth keys) are not wiped.
-    // Update an existing alias key (chatgpt-subscription) instead of only
-    // the OAR provider id, so current OMO still sees the switched account.
-    const aliases = authJsonKeysForProvider(provider);
-    const present = aliases.filter((key) => key in data);
-    const writeKeys = present.length > 0 ? present : [provider];
+    // Write every alias key so an old window reading openai-codex and a
+    // current OMO window reading chatgpt-subscription both see the switch.
+    const writeKeys = authJsonKeysForProvider(provider);
     for (const key of writeKeys) {
       data[key] = mergeProviderSlot(data[key], credential);
     }

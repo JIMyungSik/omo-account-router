@@ -8,7 +8,8 @@ import { applyAuthStaleHints } from "./auth-stale.ts";
 import { OarClient } from "./client.ts";
 import { positionalArgs, rejectUnknownFlags } from "./cli-flags.ts";
 import { isCodexProvider, isXaiProvider } from "./provider-alias.ts";
-import { importAllFromAuthJson, readCredentialFromAuthJson } from "./import-all.ts";
+import { importAllFromAuthJson, importSelectionUsed, readCredentialFromAuthJson } from "./import-all.ts";
+import { readImportAccountSetting, writeImportAccountSetting } from "./import-pref.ts";
 import { parseReportResult } from "./report-results.ts";
 import { formatSinkResultLines } from "./sinks/index.ts";
 import type { SinkApplyResult } from "./sinks/types.ts";
@@ -23,6 +24,7 @@ import { findSenpiInstall } from "./senpi-install.ts";
 import { buildPanelSnapshot, formatPanelText, formatPanelXbar, type StatusPayload } from "./panel.ts";
 import { buildStatusView, formatStatusText, statusViewToJson, wantStatusColor } from "./status-format.ts";
 import { OarStore } from "./store.ts";
+import { describeLiveAuth, formatWho } from "./who.ts";
 import { fetchRemoteUsage, fetchRemoteUsageForAccounts } from "./usage/fetch.ts";
 import { formatUsageTable } from "./usage/format.ts";
 import { buildSubscriptionAudit } from "./subscriptions/audit.ts";
@@ -76,6 +78,11 @@ COMMANDS
       Header counts accounts / active / problematic. No remote usage fetch.
       --json  Structured rows + summary (exit 0).
 
+  oar who
+      Which vault profile is actually in each live auth.json. SLOT is set only
+      when a Senpi accounts[] entry holds that same token. The footer @login-N
+      is a per-session label and can name a different slot.
+
   oar accounts [provider]
       JSON list of vault accounts; optional filter by provider id.
 
@@ -87,9 +94,10 @@ COMMANDS
 
   oar remove <provider> <profile>
       Delete that profile from daemon state and its vault credential.
-      Clears preferred if it pointed here. If the live auth.json slot is
-      this same account, that provider key is removed. A different live
-      account, other providers, and subscription records stay.
+      oar remove * deletes every vault account. Clears preferred if it
+      pointed here. If the live auth.json slot is this same account, that
+      provider key is removed. A different live account and subscription
+      records stay.
 
   oar use <provider> <profile> [--force]
       Switch live auth slot to this vault profile. Refreshes remote usage first;
@@ -109,9 +117,9 @@ COMMANDS
       into the OAR vault. openai, codex, chatgpt, and openai-codex all mean
       chatgpt-subscription. grok means xai. For chatgpt-subscription, --from may also be a native Codex
       auth.json (tokens.id_token + account_id; expiry from access-token JWT exp).
-      When the provider slot carries a multi-login accounts[] array (e.g. xAI
-      Google + Sign-in-with-Apple under one entry), --account selects one by
-      1-based index or by its name field (default: primary/top-level token).
+      When the provider slot carries a multi-login accounts[] array, --account
+      selects one by 1-based index, name, latest, or primary. The default is
+      latest (highest login-N). Pass --account or a third argument to override.
       Secrets stay in the vault; nothing is printed.
 
   oar import-auth --all [--from <auth.json>] [--profile <name>] [--force]
@@ -261,6 +269,17 @@ async function withClient<T>(fn: (c: OarClient) => Promise<T>): Promise<T> {
 
 async function req(request: OarRequest) {
   return withClient((c) => c.request(request));
+}
+
+async function removeOne(provider: string, profile: string): Promise<void> {
+  const res = await req({ protocol: 1, action: "remove", provider, profile });
+  if (!res.ok) throw new Error(res.error);
+  console.log(`removed ${provider}/${profile}`);
+  const data = res.data as { authSlotsCleared?: string[]; authSlotsKept?: string[] };
+  for (const path of data.authSlotsCleared ?? []) console.log(`auth slot cleared: ${path}`);
+  for (const path of data.authSlotsKept ?? []) {
+    console.log(`auth slot kept: ${path} (different account)`);
+  }
 }
 
 async function warnIfDaemonDown(scope: string): Promise<boolean> {
@@ -420,6 +439,15 @@ async function main(argv: string[]) {
       printStatus(res.data as Parameters<typeof printStatus>[0], { json: rest.includes("--json") });
       return;
     }
+    case "who": {
+      const root = process.env.OAR_HOME ?? defaultOarRoot();
+      const store = new OarStore({ rootDir: root });
+      const rows = describeLiveAuth(resolveActiveAuthPaths(), store.listAccounts(), (provider, profile) =>
+        store.getVaultCredential(provider, profile),
+      );
+      console.log(formatWho(rows));
+      return;
+    }
     case "accounts": {
       const res = await req({ protocol: 1, action: "accounts", provider: rest[0] });
       if (!res.ok) throw new Error(res.error);
@@ -444,16 +472,23 @@ async function main(argv: string[]) {
       return;
     }
     case "remove": {
-      const [provider, profile] = rest;
-      if (!provider || !profile) throw new Error("usage: oar remove <provider> <profile>");
-      const res = await req({ protocol: 1, action: "remove", provider, profile });
-      if (!res.ok) throw new Error(res.error);
-      console.log(`removed ${provider}/${profile}`);
-      const data = res.data as { authSlotsCleared?: string[]; authSlotsKept?: string[] };
-      for (const path of data.authSlotsCleared ?? []) console.log(`auth slot cleared: ${path}`);
-      for (const path of data.authSlotsKept ?? []) {
-        console.log(`auth slot kept: ${path} (different account)`);
+      if (rest[0] === "*") {
+        const listed = await req({ protocol: 1, action: "accounts" });
+        if (!listed.ok) throw new Error(listed.error);
+        const accounts = listed.data as Array<{ provider: string; profile: string }>;
+        if (accounts.length === 0) {
+          console.log("removed 0 accounts");
+          return;
+        }
+        for (const account of accounts) {
+          await removeOne(account.provider, account.profile);
+        }
+        console.log(`removed ${accounts.length} accounts`);
+        return;
       }
+      const [provider, profile] = rest;
+      if (!provider || !profile) throw new Error("usage: oar remove <provider> <profile>\n   or: oar remove *");
+      await removeOne(provider, profile);
       return;
     }
     case "use": {
@@ -576,14 +611,27 @@ async function main(argv: string[]) {
         return;
       }
 
+      if (rest[0] === "default") {
+        const value = rest[1];
+        if (!value) {
+          console.log(readImportAccountSetting());
+          return;
+        }
+        writeImportAccountSetting(value);
+        console.log(`import account default: ${value}`);
+        return;
+      }
       const [provider, profile] = positionalArgs(rest, new Set(["--from", "--account"]));
       if (!provider || !profile) {
-        throw new Error("usage: oar import-auth <provider> <profile> [--from path] [--account <n|name>]\n   or: oar import-auth --all [--from path] [--profile name] [--force]");
+        throw new Error("usage: oar import-auth <provider> <profile> [--from path] [--account <n|name|latest>]\n   or: oar import-auth default [primary|latest|<slot>]\n   or: oar import-auth --all [--from path] [--profile name] [--force]");
       }
-      let account: string | undefined;
       const accountIdx = rest.indexOf("--account");
-      if (accountIdx >= 0 && rest[accountIdx + 1]) account = rest[accountIdx + 1]!;
-      const credential = readCredentialFromAuthJson(from, provider, account ? { account } : undefined);
+      const flagged = accountIdx >= 0 ? rest[accountIdx + 1] : undefined;
+      const positional = positionalArgs(rest, new Set(["--from", "--account"]));
+      const extra = positional[2];
+      const account = flagged ?? extra ?? readImportAccountSetting();
+      const credential = readCredentialFromAuthJson(from, provider, { account });
+      const used = importSelectionUsed(from, provider, account);
       const res = await req({
         protocol: 1,
         action: "import-credential",
@@ -592,7 +640,9 @@ async function main(argv: string[]) {
         credential,
       });
       if (!res.ok) throw new Error(res.error);
-      console.log(`imported ${provider}/${profile} from ${from} (secrets stored under OAR vault, not logged)`);
+      console.log(
+        `imported ${provider}/${profile} from ${from} using ${used} (secrets stored under OAR vault, not logged)`,
+      );
       return;
     }
     case "login": {
