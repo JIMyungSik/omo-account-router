@@ -306,9 +306,11 @@ sink 쓰기가 실패해도 OMO `auth.json`은 롤백하지 않습니다. 없는
 | `oar subscriptions set <p> <profile> --monthly-usd <n>` | 월 비용 기록 |
 | `oar subscriptions audit [--json] [--refresh]` | 유지/해지 후보 + 절감액 |
 | `oar accounts [provider]` | JSON 목록 |
-| `oar import-auth …` / `--all` | vault 적재 |
-| `oar use <p> <profile> [--force]` | 전환 (0% 거절) |
-| `oar remove <p> <profile>` | vault 프로필·자격 증명 삭제, stale preferred 해제. 같은 계정이 live auth 슬롯에 있으면 그 provider 키도 삭제 |
+| `oar import-auth <p> <profile> [--account latest\|primary\|<slot>]` | vault 적재. 기본은 방금 추가된 `login-N`. 추가 인자가 있으면 그 슬롯 |
+| `oar who` | 각 live auth.json에 실제로 들어 있는 vault 프로필 |
+| `oar use <p> <profile> [--force]` | 전환. 있는 로컬 auth.json과 Codex 키 두 개를 같이 씀 |
+| `oar remove <p> <profile>` | 그 프로필 삭제. 같은 계정의 live 슬롯도 삭제 |
+| `oar remove *` | vault 계정 전부 삭제 |
 | `oar auto <p> on\|off` | auto failover |
 | `oar doctor` | 경로·엔진·daemon |
 | `oar daemon start\|stop\|status` | 데몬 |
