@@ -6,6 +6,7 @@ import type {
   ResolveResponse,
   AccountRecord,
   OarState,
+  ReportResult,
 } from "./types.ts";
 
 export type OarRequest =
@@ -19,7 +20,7 @@ export type OarRequest =
       action: "report";
       provider: ProviderId;
       account: ProfileId;
-      result: FailureType | "SUCCESS";
+      result: ReportResult;
       retryAfterSec?: number;
       detail?: string;
     }
@@ -49,7 +50,14 @@ export type OarRequest =
       holder: string;
     }
   | { protocol: 1; action: "release-lease"; leaseId?: string; holder?: string }
-  | { protocol: 1; action: "refresh"; provider: ProviderId; profile: ProfileId }
+  | {
+      protocol: 1;
+      action: "refresh";
+      provider: ProviderId;
+      profile: ProfileId;
+      /** Refresh the vault credential without activating it into live auth slots. */
+      activate?: boolean;
+    }
   | { protocol: 1; action: "test"; provider: ProviderId; profile: ProfileId; live?: boolean }
   | { protocol: 1; action: "doctor" }
   /** Enable auto+failover for every provider that has 2+ vault profiles. */

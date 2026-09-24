@@ -113,6 +113,7 @@ oar subscriptions audit --refresh
 oar import-auth --all
 
 # switch account (hot)
+# expired Codex/xAI OAuth is refreshed before the quota check
 oar use xai sub
 oar use openai-codex main
 

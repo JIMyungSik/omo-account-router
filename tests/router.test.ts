@@ -98,4 +98,15 @@ describe("OarRouter resolve/use/report", () => {
     router.reportResult({ provider: "xai", account: "account-a", result: "SUCCESS" });
     expect(store.getAccount("xai", "account-a")?.availability).toBe("QUOTA_EXHAUSTED");
   });
+
+  test("authoritative available quota clears stale QUOTA_EXHAUSTED", () => {
+    router.reportResult({ provider: "xai", account: "account-a", result: "QUOTA_EXHAUSTED" });
+    router.reportResult({ provider: "xai", account: "account-a", result: "QUOTA_AVAILABLE" });
+
+    const account = store.getAccount("xai", "account-a");
+    expect(account?.auth).toBe("valid");
+    expect(account?.availability).toBe("AVAILABLE");
+    expect(account?.reason).toBeUndefined();
+    expect(account?.until).toBeNull();
+  });
 });

@@ -112,6 +112,7 @@ oar subscriptions audit --refresh
 oar import-auth --all
 
 # 계정 전환 (핫스왑)
+# 만료된 Codex/xAI OAuth는 quota 확인 전에 vault에서 갱신
 oar use xai sub
 oar use openai-codex main
 

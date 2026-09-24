@@ -1,5 +1,6 @@
 export const REPORT_RESULTS = [
   "SUCCESS",
+  "QUOTA_AVAILABLE",
   "AUTH_EXPIRED",
   "AUTH_REVOKED",
   "RATE_LIMITED",

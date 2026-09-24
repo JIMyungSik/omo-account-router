@@ -542,6 +542,7 @@ function writeImportAccountSetting(account, root = defaultOarRoot()) {
 // src/report-results.ts
 var REPORT_RESULTS = [
   "SUCCESS",
+  "QUOTA_AVAILABLE",
   "AUTH_EXPIRED",
   "AUTH_REVOKED",
   "RATE_LIMITED",
@@ -2771,8 +2772,9 @@ COMMANDS
       records stay.
 
   oar use <provider> <profile> [--force]
-      Switch live auth slot to this vault profile. Refreshes remote usage first;
-      refuses switch at 0% remaining unless --force. No OMO restart needed.
+      Refreshes expired Codex/xAI OAuth in the vault without activating it,
+      then checks remote usage and syncs quota state before switching.
+      Refuses switch at 0% remaining unless --force. No OMO restart needed.
       Prints each sink id/status/path/detail (no credentials).
 
   oar auto <provider> on|off
@@ -3152,6 +3154,19 @@ async function main(argv) {
       }
       const root = process.env.OAR_HOME ?? defaultOarRoot2();
       const store = new OarStore({ rootDir: root });
+      const credential = store.getVaultCredential(provider, profile);
+      if ((isCodexProvider(provider) || isXaiProvider(provider)) && credential?.type === "oauth" && Date.now() + 5 * 60 * 1000 >= credential.expires) {
+        const refreshed = await req({
+          protocol: 1,
+          action: "refresh",
+          provider,
+          profile,
+          activate: false
+        });
+        if (!refreshed.ok) {
+          throw new Error(`REFUSED: could not refresh ${provider}/${profile} before checking quota: ${refreshed.error}`);
+        }
+      }
       try {
         const u = await fetchRemoteUsage(store, provider, profile, {
           root,
@@ -3160,8 +3175,8 @@ async function main(argv) {
         });
         if (u.ok) {
           const w = u.windows.find((x) => x.remainingPercent != null) ?? u.windows[0];
-          if (w?.remainingPercent != null && w.remainingPercent <= 0) {
-            console.error(`WARNING: ${provider}/${profile} remote remaining is 0% (${w.label ?? w.kind}).`);
+          if (w?.remainingPercent != null && (w.remainingPercent <= 0 || w.limitReached)) {
+            console.error(`WARNING: ${provider}/${profile} remote quota is exhausted (${w.remainingPercent}% remaining, ${w.label ?? w.kind}).`);
             if (w.resetsAt)
               console.error(`  resets ~ ${w.resetsAt}`);
             try {
@@ -3175,12 +3190,43 @@ async function main(argv) {
               });
             } catch {}
             if (!force) {
-              throw new Error(`REFUSED: not switching to ${provider}/${profile} at 0%. ` + `Auto failover will also skip it. Use another profile, or --force to override.`);
+              throw new Error(`REFUSED: not switching to ${provider}/${profile}; remote quota is exhausted ` + `(${w.remainingPercent}% remaining). ` + `Auto failover will also skip it. Use another profile, or --force to override.`);
             }
             console.error("  --force set: switching anyway.");
-          } else if (w?.remainingPercent != null && w.remainingPercent <= 5) {
-            console.log(`warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}).`);
+          } else if (w?.remainingPercent != null) {
+            try {
+              const reported = await req({
+                protocol: 1,
+                action: "report",
+                provider,
+                account: profile,
+                result: "QUOTA_AVAILABLE"
+              });
+              if (!reported.ok)
+                throw new Error(reported.error);
+            } catch (error) {
+              throw new Error(`REFUSED: could not sync current quota for ${provider}/${profile}: ${error instanceof Error ? error.message : error}`);
+            }
+            if (w.remainingPercent <= 5) {
+              console.log(`warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}).`);
+            }
           }
+        } else if (/\bHTTP 401\b/.test(u.error ?? "")) {
+          try {
+            const reported = await req({
+              protocol: 1,
+              action: "report",
+              provider,
+              account: profile,
+              result: "AUTH_EXPIRED",
+              detail: "remote_usage_http_401"
+            });
+            if (!reported.ok)
+              throw new Error(reported.error);
+          } catch (error) {
+            throw new Error(`REFUSED: usage authentication failed for ${provider}/${profile} (HTTP 401); state update failed: ${error instanceof Error ? error.message : error}`);
+          }
+          throw new Error(`REFUSED: usage authentication failed for ${provider}/${profile} (HTTP 401). Refresh or re-login, then try again.`);
         }
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("REFUSED:"))

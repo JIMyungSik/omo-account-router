@@ -1399,6 +1399,7 @@ class AccountRefreshLock {
 // src/report-results.ts
 var REPORT_RESULTS = [
   "SUCCESS",
+  "QUOTA_AVAILABLE",
   "AUTH_EXPIRED",
   "AUTH_REVOKED",
   "RATE_LIMITED",
@@ -1549,6 +1550,18 @@ class OarRouter {
     const account = this.store.getAccount(req.provider, req.account);
     if (!account)
       return;
+    if (req.result === "QUOTA_AVAILABLE") {
+      const next2 = {
+        ...account,
+        auth: "valid",
+        availability: "AVAILABLE",
+        reason: undefined,
+        until: null,
+        lastChecked: new Date().toISOString()
+      };
+      this.store.upsertAccount(next2);
+      return next2;
+    }
     if (req.result === "SUCCESS") {
       if (account.availability === "QUOTA_EXHAUSTED") {
         const kept = {
@@ -2093,7 +2106,7 @@ class OarDaemon {
             }
             const result = await adapter.executeRefresh(account, latest);
             this.store.putVaultCredential(req.provider, req.profile, result.credential);
-            if (this.activateOnUse) {
+            if (this.activateOnUse && req.activate !== false) {
               await this.activator.activate(req.provider, req.profile);
             }
             return { credential: result.credential, skipped: false };

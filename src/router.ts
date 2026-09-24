@@ -164,6 +164,19 @@ export class OarRouter {
     const account = this.store.getAccount(req.provider, req.account);
     if (!account) return undefined;
 
+    if (req.result === "QUOTA_AVAILABLE") {
+      const next: AccountRecord = {
+        ...account,
+        auth: "valid",
+        availability: "AVAILABLE",
+        reason: undefined,
+        until: null,
+        lastChecked: new Date().toISOString(),
+      };
+      this.store.upsertAccount(next);
+      return next;
+    }
+
     if (req.result === "SUCCESS") {
       // Do not clear QUOTA_EXHAUSTED on SUCCESS — 403 was previously mis-labeled SUCCESS.
       if (account.availability === "QUOTA_EXHAUSTED") {

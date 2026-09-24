@@ -442,7 +442,7 @@ export class OarDaemon {
             }
             const result = await adapter.executeRefresh!(account, latest);
             this.store.putVaultCredential(req.provider, req.profile, result.credential);
-            if (this.activateOnUse) {
+            if (this.activateOnUse && req.activate !== false) {
               await this.activator.activate(req.provider, req.profile);
             }
             return { credential: result.credential, skipped: false as const };
