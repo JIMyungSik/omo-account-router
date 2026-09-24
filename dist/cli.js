@@ -153,8 +153,58 @@ function positionalArgs(args, valueFlags = new Set) {
   return out;
 }
 
+// src/provider-alias.ts
+var PROVIDER_ALIASES = {
+  "chatgpt-subscription": "chatgpt-subscription",
+  "openai-codex": "chatgpt-subscription",
+  openai: "chatgpt-subscription",
+  codex: "chatgpt-subscription",
+  chatgpt: "chatgpt-subscription",
+  xai: "xai",
+  grok: "xai"
+};
+function resolveProvider(input) {
+  const key = input.trim().toLowerCase();
+  return PROVIDER_ALIASES[key] ?? input.trim();
+}
+function isCodexProvider(provider) {
+  return resolveProvider(provider) === "chatgpt-subscription";
+}
+function isXaiProvider(provider) {
+  return resolveProvider(provider) === "xai";
+}
+
 // src/import-all.ts
 import { readFileSync } from "node:fs";
+
+// src/provider-alias.ts
+var PROVIDER_ALIASES2 = {
+  "chatgpt-subscription": "chatgpt-subscription",
+  "openai-codex": "chatgpt-subscription",
+  openai: "chatgpt-subscription",
+  codex: "chatgpt-subscription",
+  chatgpt: "chatgpt-subscription",
+  xai: "xai",
+  grok: "xai"
+};
+function resolveProvider2(input) {
+  const key = input.trim().toLowerCase();
+  return PROVIDER_ALIASES2[key] ?? input.trim();
+}
+function isCodexProvider2(provider) {
+  return resolveProvider2(provider) === "chatgpt-subscription";
+}
+function isXaiProvider2(provider) {
+  return resolveProvider2(provider) === "xai";
+}
+
+// src/auth-slot.ts
+function authJsonKeysForProvider(provider) {
+  const canonical = resolveProvider2(provider);
+  if (canonical === "chatgpt-subscription")
+    return ["chatgpt-subscription", "openai-codex"];
+  return [canonical];
+}
 
 // src/credential-identity.ts
 function isRecord(value) {
@@ -301,18 +351,22 @@ function credentialFromNativeCodexAuth(data) {
 }
 function readCredentialFromAuthJson(authPath, provider, opts) {
   const data = parseAuthJsonFile(authPath);
-  const slot = data[provider];
-  if (isStoredCredential(slot)) {
+  for (const key of authJsonKeysForProvider(provider)) {
+    const slot = data[key];
+    if (!isStoredCredential(slot))
+      continue;
     if (opts?.account)
       return selectLinkedAccount(slot, provider, authPath, opts.account);
     return slot;
   }
-  if (provider === "openai-codex") {
+  if (provider === "openai-codex" || provider === "chatgpt-subscription") {
     const native = credentialFromNativeCodexAuth(data);
     if (native)
       return native;
   }
-  throw new Error(`provider ${provider} not found in ${authPath}`);
+  const available = Object.keys(data).filter((key) => isStoredCredential(data[key]));
+  const looked = authJsonKeysForProvider(provider).join(", ");
+  throw new Error(`provider ${provider} not found in ${authPath} (looked for ${looked}; available: ${available.join(", ") || "none"})`);
 }
 function selectLinkedAccount(slot, provider, authPath, account) {
   const linked = slot.accounts;
@@ -340,12 +394,20 @@ function readAllCredentialsFromAuthJson(authPath) {
       out[provider] = value;
     }
   }
-  if (!out["openai-codex"]) {
+  if (!out["chatgpt-subscription"] && out["openai-codex"]) {
+    out["chatgpt-subscription"] = out["openai-codex"];
+  }
+  delete out["openai-codex"];
+  if (!out["chatgpt-subscription"]) {
     const native = credentialFromNativeCodexAuth(data);
     if (native)
-      out["openai-codex"] = native;
+      out["chatgpt-subscription"] = native;
   }
-  return out;
+  const canonical = {};
+  for (const [provider, credential] of Object.entries(out)) {
+    canonical[resolveProvider2(provider)] = credential;
+  }
+  return canonical;
 }
 async function importAllFromAuthJson(client, opts) {
   const credentials = readAllCredentialsFromAuthJson(opts.from);
@@ -443,7 +505,7 @@ function unique(paths) {
   }
   return out;
 }
-function resolveActiveAuthPaths(env = process.env, home = homedir2()) {
+function resolveActiveAuthPaths2(env = process.env, home = homedir2()) {
   const envDirs = [
     env.OAR_AUTH_DIR,
     env.OMO_CODING_AGENT_DIR,
@@ -479,7 +541,7 @@ function knownAuthJsonCandidates(home) {
   ]);
 }
 function discoverAuthJsonFiles(env = process.env, home = homedir2()) {
-  return unique([...resolveActiveAuthPaths(env, home), ...knownAuthJsonCandidates(home)]).filter((p) => existsSync(p));
+  return unique([...resolveActiveAuthPaths2(env, home), ...knownAuthJsonCandidates(home)]).filter((p) => existsSync(p));
 }
 
 // src/senpi-install.ts
@@ -510,7 +572,7 @@ function fromOmoRoot(omoRoot) {
     pluginRoot
   };
 }
-function findSenpiInstall() {
+function findSenpiInstall2() {
   const require2 = createRequire(import.meta.url);
   const candidates = [];
   try {
@@ -747,7 +809,7 @@ function remoteCols(r) {
   }
   const session = remote.windows.find((w) => w.kind === "session");
   const weekly = remote.windows.find((w) => w.kind === "weekly");
-  const grok = remote.windows.find((w) => w.label === "grok" || r.provider === "xai" && (w.kind === "weekly" || w.kind === "period"));
+  const grok = remote.windows.find((w) => w.label === "grok" || isXaiProvider2(r.provider) && (w.kind === "weekly" || w.kind === "period"));
   const fmt = (w) => {
     if (!w)
       return "-";
@@ -758,9 +820,9 @@ function remoteCols(r) {
     return "-";
   };
   return {
-    session: r.provider === "openai-codex" ? fmt(session) : "-",
-    weekly: r.provider === "openai-codex" ? fmt(weekly) : "-",
-    grok: r.provider === "xai" ? fmt(grok) : "-"
+    session: isCodexProvider2(r.provider) ? fmt(session) : "-",
+    weekly: isCodexProvider2(r.provider) ? fmt(weekly) : "-",
+    grok: isXaiProvider2(r.provider) ? fmt(grok) : "-"
   };
 }
 function formatPanelText(snap) {
@@ -837,7 +899,7 @@ function formatPanelXbar(snap) {
     }
     const star = r.active ? "* " : "  ";
     const rc = remoteCols(r);
-    const remote = r.provider === "openai-codex" ? `5h=${rc.session} wk=${rc.weekly}` : r.provider === "xai" ? `grok=${rc.grok}` : "";
+    const remote = isCodexProvider2(r.provider) ? `5h=${rc.session} wk=${rc.weekly}` : isXaiProvider2(r.provider) ? `grok=${rc.grok}` : "";
     const stats = `ok=${r.usage.success} rl=${r.usage.rateLimited}${remote ? " " + remote : ""}`;
     lines.push(`${star}${formatProfileLabel(r.profile, r.login)}  ${r.availability}  ${stats} | bash=${shellQuote(process.env.HOME + "/.local/bin/oar")} param1=use param2=${r.provider} param3=${r.profile} terminal=false refresh=true`);
   }
@@ -850,7 +912,7 @@ function formatPanelXbar(snap) {
 `);
 }
 function shortProv(p) {
-  if (p === "openai-codex")
+  if (isCodexProvider2(p))
     return "codex";
   if (p === "zai-coding-cn")
     return "zai";
@@ -1074,6 +1136,36 @@ class OarStore {
     mkdirSync(this.rootDir, { recursive: true, mode: 448 });
     mkdirSync(this.vaultDir, { recursive: true, mode: 448 });
     this.state = this.load();
+    if (this.migrateLegacyProviders())
+      this.persist();
+  }
+  migrateLegacyProviders() {
+    let changed = false;
+    const accounts = this.state.accounts.map((account) => {
+      const provider = resolveProvider2(account.provider);
+      if (provider === account.provider)
+        return account;
+      changed = true;
+      this.renameVaultFile(account.provider, provider, account.profile);
+      return { ...account, provider, credentialRef: `vault:${provider}:${account.profile}` };
+    });
+    const providers = {};
+    for (const [key, policy] of Object.entries(this.state.providers)) {
+      const provider = resolveProvider2(key);
+      if (provider !== key)
+        changed = true;
+      providers[provider] = { ...providers[provider] ?? {}, ...policy };
+    }
+    if (!changed)
+      return false;
+    this.state = { ...this.state, accounts, providers };
+    return true;
+  }
+  renameVaultFile(from, to, profile) {
+    const oldPath = join4(this.vaultDir, `${from}__${profile}.json`);
+    const nextPath = join4(this.vaultDir, `${to}__${profile}.json`);
+    if (existsSync4(oldPath) && !existsSync4(nextPath))
+      renameSync(oldPath, nextPath);
   }
   load() {
     if (!existsSync4(this.statePath))
@@ -1100,13 +1192,20 @@ class OarStore {
     return structuredClone(this.state);
   }
   listAccounts(provider) {
-    return this.state.accounts.filter((a) => provider ? a.provider === provider : true);
+    if (!provider)
+      return this.state.accounts;
+    const canonical = resolveProvider2(provider);
+    return this.state.accounts.filter((a) => resolveProvider2(a.provider) === canonical);
   }
   getAccount(provider, profile) {
-    return this.state.accounts.find((a) => a.provider === provider && a.profile === profile);
+    const canonical = resolveProvider2(provider);
+    return this.state.accounts.find((a) => resolveProvider2(a.provider) === canonical && a.profile === profile);
   }
   upsertAccount(account) {
-    const idx = this.state.accounts.findIndex((a) => a.provider === account.provider && a.profile === account.profile);
+    const provider = resolveProvider2(account.provider);
+    const next = provider === account.provider ? account : { ...account, provider, credentialRef: `vault:${provider}:${account.profile}` };
+    const idx = this.state.accounts.findIndex((a) => resolveProvider2(a.provider) === provider && a.profile === next.profile);
+    account = next;
     if (idx >= 0)
       this.state.accounts[idx] = account;
     else
@@ -1114,35 +1213,48 @@ class OarStore {
     this.persist();
   }
   removeAccount(provider, profile) {
-    this.state.accounts = this.state.accounts.filter((a) => !(a.provider === provider && a.profile === profile));
-    this.persist();
-    const vaultPath = this.vaultPath(provider, profile);
+    const canonical = resolveProvider2(provider);
+    const vaultPath = this.vaultPath(canonical, profile);
+    const legacyPath = join4(this.vaultDir, `${provider}__${profile}.json`);
     if (existsSync4(vaultPath)) {
-      try {
-        unlinkSync(vaultPath);
-      } catch {}
+      unlinkSync(vaultPath);
     }
+    if (legacyPath !== vaultPath && existsSync4(legacyPath))
+      unlinkSync(legacyPath);
+    this.state.accounts = this.state.accounts.filter((a) => !(resolveProvider2(a.provider) === canonical && a.profile === profile));
+    const policy = this.state.providers[canonical] ?? this.state.providers[provider];
+    if (policy?.preferred === profile) {
+      const next = { ...policy };
+      delete next.preferred;
+      delete this.state.providers[provider];
+      this.state.providers[canonical] = next;
+    }
+    this.persist();
   }
   getProviderPolicy(provider) {
-    return { ...DEFAULT_POLICY, ...this.state.providers[provider] ?? {} };
+    const canonical = resolveProvider2(provider);
+    return { ...DEFAULT_POLICY, ...this.state.providers[canonical] ?? this.state.providers[provider] ?? {} };
   }
   setProviderMode(provider, mode) {
-    const cur = this.getProviderPolicy(provider);
-    this.state.providers[provider] = { ...cur, mode };
+    const canonical = resolveProvider2(provider);
+    const cur = this.getProviderPolicy(canonical);
+    this.state.providers[canonical] = { ...cur, mode };
     this.persist();
   }
   setAutoFailover(provider, enabled) {
-    const cur = this.getProviderPolicy(provider);
-    this.state.providers[provider] = { ...cur, autoFailover: enabled };
+    const canonical = resolveProvider2(provider);
+    const cur = this.getProviderPolicy(canonical);
+    this.state.providers[canonical] = { ...cur, autoFailover: enabled };
     this.persist();
   }
   setPreferred(provider, profile) {
-    const cur = this.getProviderPolicy(provider);
-    this.state.providers[provider] = { ...cur, preferred: profile };
+    const canonical = resolveProvider2(provider);
+    const cur = this.getProviderPolicy(canonical);
+    this.state.providers[canonical] = { ...cur, preferred: profile };
     this.persist();
   }
   vaultPath(provider, profile) {
-    return join4(this.vaultDir, `${provider}__${profile}.json`);
+    return join4(this.vaultDir, `${resolveProvider2(provider)}__${profile}.json`);
   }
   putVaultCredential(provider, profile, credential) {
     atomicWriteJson2(this.vaultPath(provider, profile), credential, 384);
@@ -1588,9 +1700,9 @@ async function fetchRemoteUsage(store, provider, profile, opts) {
     return miss;
   }
   let result;
-  if (provider === "openai-codex") {
+  if (resolveProvider2(provider) === "chatgpt-subscription") {
     result = await fetchCodexUsage(provider, profile, cred, { fetchImpl: opts?.fetchImpl });
-  } else if (provider === "xai") {
+  } else if (resolveProvider2(provider) === "xai") {
     result = await fetchXaiGrokSubscriptionUsage(provider, profile, cred, {
       fetchImpl: opts?.fetchImpl
     });
@@ -1678,15 +1790,15 @@ function formatUsageTable(rows) {
     }
     const session = pick(u.windows, (w) => w.kind === "session");
     const weekly = pick(u.windows, (w) => w.kind === "weekly");
-    const grok = pick(u.windows, (w) => w.label === "grok" || u.provider === "xai" && (w.kind === "weekly" || w.kind === "period"));
-    const primary = u.provider === "xai" ? grok : weekly ?? session ?? u.windows[0];
+    const grok = pick(u.windows, (w) => w.label === "grok" || isXaiProvider2(u.provider) && (w.kind === "weekly" || w.kind === "period"));
+    const primary = isXaiProvider2(u.provider) ? grok : weekly ?? session ?? u.windows[0];
     return {
       provider: u.provider,
       profile: u.profile,
       ok: "yes",
-      session: u.provider === "openai-codex" ? fmtPct(session?.remainingPercent) : "-",
-      weekly: u.provider === "openai-codex" ? fmtPct(weekly?.remainingPercent) : "-",
-      grok: u.provider === "xai" ? fmtPct(grok?.remainingPercent) : "-",
+      session: isCodexProvider2(u.provider) ? fmtPct(session?.remainingPercent) : "-",
+      weekly: isCodexProvider2(u.provider) ? fmtPct(weekly?.remainingPercent) : "-",
+      grok: isXaiProvider2(u.provider) ? fmtPct(grok?.remainingPercent) : "-",
       used: fmtPct(primary?.usedPercent),
       reset: shortReset(primary?.resetsAt),
       source: u.source,
@@ -1775,9 +1887,9 @@ async function fetchRemoteUsage2(store, provider, profile, opts) {
     return miss;
   }
   let result;
-  if (provider === "openai-codex") {
+  if (resolveProvider2(provider) === "chatgpt-subscription") {
     result = await fetchCodexUsage(provider, profile, cred, { fetchImpl: opts?.fetchImpl });
-  } else if (provider === "xai") {
+  } else if (resolveProvider2(provider) === "xai") {
     result = await fetchXaiGrokSubscriptionUsage(provider, profile, cred, {
       fetchImpl: opts?.fetchImpl
     });
@@ -1878,7 +1990,7 @@ async function buildRecommendations(store, opts) {
     const set = new Set(opts.providers);
     accounts = accounts.filter((a) => set.has(a.provider));
   }
-  const targets = accounts.filter((a) => a.provider === "xai" || a.provider === "openai-codex").map((a) => ({ provider: a.provider, profile: a.profile }));
+  const targets = accounts.filter((a) => isXaiProvider2(a.provider) || isCodexProvider2(a.provider)).map((a) => ({ provider: a.provider, profile: a.profile }));
   const usageList = targets.length > 0 ? await fetchRemoteUsageForAccounts2(store, targets, {
     root,
     force: opts?.force ?? true,
@@ -2022,7 +2134,7 @@ async function buildSubscriptionAudit(oarStore, subsStore, opts) {
   const accounts = oarStore.listAccounts();
   const plans = subsStore.list();
   const planMap = new Map(plans.map((p) => [`${p.provider}\x00${p.profile}`, p]));
-  const usageTargets = accounts.filter((a) => a.provider === "xai" || a.provider === "openai-codex").map((a) => ({ provider: a.provider, profile: a.profile }));
+  const usageTargets = accounts.filter((a) => isXaiProvider2(a.provider) || isCodexProvider2(a.provider)).map((a) => ({ provider: a.provider, profile: a.profile }));
   const usageList = usageTargets.length > 0 ? await fetchRemoteUsageForAccounts2(oarStore, usageTargets, {
     root,
     force: opts?.force ?? false,
@@ -2315,7 +2427,7 @@ async function buildRecommendations2(store, opts) {
     const set = new Set(opts.providers);
     accounts = accounts.filter((a) => set.has(a.provider));
   }
-  const targets = accounts.filter((a) => a.provider === "xai" || a.provider === "openai-codex").map((a) => ({ provider: a.provider, profile: a.profile }));
+  const targets = accounts.filter((a) => isXaiProvider2(a.provider) || isCodexProvider2(a.provider)).map((a) => ({ provider: a.provider, profile: a.profile }));
   const usageList = targets.length > 0 ? await fetchRemoteUsageForAccounts2(store, targets, {
     root,
     force: opts?.force ?? true,
@@ -2478,7 +2590,10 @@ COMMANDS
       Register a named profile slot (no credential yet).
 
   oar remove <provider> <profile>
-      Remove profile from vault and daemon state.
+      Delete that profile from daemon state and its vault credential.
+      Clears preferred if it pointed here. If the live auth.json slot is
+      this same account, that provider key is removed. A different live
+      account, other providers, and subscription records stay.
 
   oar use <provider> <profile> [--force]
       Switch live auth slot to this vault profile. Refreshes remote usage first;
@@ -2495,7 +2610,8 @@ COMMANDS
 
   oar import-auth <provider> <profile> [--from <auth.json>] [--account <n|name>]
       Copy one provider credential from Senpi auth.json (default ~/.omo/agent/auth.json)
-      into the OAR vault. For openai-codex, --from may also be a native Codex
+      into the OAR vault. openai, codex, chatgpt, and openai-codex all mean
+      chatgpt-subscription. grok means xai. For chatgpt-subscription, --from may also be a native Codex
       auth.json (tokens.id_token + account_id; expiry from access-token JWT exp).
       When the provider slot carries a multi-login accounts[] array (e.g. xAI
       Google + Sign-in-with-Apple under one entry), --account selects one by
@@ -2809,6 +2925,12 @@ async function main(argv) {
       if (!res.ok)
         throw new Error(res.error);
       console.log(`removed ${provider}/${profile}`);
+      const data = res.data;
+      for (const path of data.authSlotsCleared ?? [])
+        console.log(`auth slot cleared: ${path}`);
+      for (const path of data.authSlotsKept ?? []) {
+        console.log(`auth slot kept: ${path} (different account)`);
+      }
       return;
     }
     case "use": {
@@ -3067,7 +3189,7 @@ ${suggestAccounts(provider)}`);
         const status = res.data;
         let remoteUsage = undefined;
         if (!noRemote) {
-          const targets = (status.accounts ?? []).filter((a) => a.provider === "openai-codex" || a.provider === "xai").map((a) => ({ provider: a.provider, profile: a.profile }));
+          const targets = (status.accounts ?? []).filter((a) => isCodexProvider(a.provider) || isXaiProvider(a.provider)).map((a) => ({ provider: a.provider, profile: a.profile }));
           remoteUsage = await fetchRemoteUsageForAccounts(store, targets, {
             root,
             force: refresh,
@@ -3108,7 +3230,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       const store = new OarStore({ rootDir: root });
       const provider = args[0];
       const profile = args[1];
-      const targets = provider && profile ? [{ provider, profile }] : store.listAccounts().filter((a) => a.provider === "openai-codex" || a.provider === "xai").map((a) => ({ provider: a.provider, profile: a.profile }));
+      const targets = provider && profile ? [{ provider, profile }] : store.listAccounts().filter((a) => isCodexProvider(a.provider) || isXaiProvider(a.provider)).map((a) => ({ provider: a.provider, profile: a.profile }));
       if (targets.length === 0) {
         console.log("no openai-codex / xai accounts in vault");
         return;
@@ -3272,7 +3394,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       console.log("OAR doctor");
       console.log(`root: ${process.env.OAR_HOME ?? defaultOarRoot2()}`);
       console.log(`sock: ${process.env.OAR_SOCK ?? oarSocketPath2()}`);
-      const install = findSenpiInstall();
+      const install = findSenpiInstall2();
       if (install) {
         console.log(`omo-ai: ${install.omoAiVersion}`);
         console.log(`senpi:  ${install.senpiVersion}`);
@@ -3281,7 +3403,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
         console.log("omo-ai/senpi install: not found");
       }
       console.log("active auth paths:");
-      for (const p of resolveActiveAuthPaths()) {
+      for (const p of resolveActiveAuthPaths2()) {
         console.log(`  ${existsSync7(p) ? "OK" : "--"} ${p}`);
       }
       console.log("discovered auth.json:");
@@ -3291,7 +3413,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       await daemonStatus();
       const root = process.env.OAR_HOME ?? defaultOarRoot2();
       const store = new OarStore({ rootDir: root });
-      const codexAccounts = store.listAccounts().filter((a) => a.provider === "openai-codex").map((a) => ({ provider: a.provider, profile: a.profile }));
+      const codexAccounts = store.listAccounts().filter((a) => isCodexProvider(a.provider)).map((a) => ({ provider: a.provider, profile: a.profile }));
       if (codexAccounts.length > 0) {
         const usageRows = await fetchRemoteUsageForAccounts(store, codexAccounts, {
           root,

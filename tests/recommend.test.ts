@@ -53,13 +53,17 @@ describe("recommend ranking", () => {
       accountId: "acc",
     });
 
+    let grokCalls = 0;
     const fetchImpl: typeof fetch = async (input) => {
       const url = String(input);
       if (url.includes("cli-chat-proxy")) {
-        // xai - both hit same; distinguish impossible; return based on call order via body
+        grokCalls += 1;
         return new Response(
           JSON.stringify({
-            config: { creditUsagePercent: 5, currentPeriod: { type: "WEEKLY", end: "2026-08-22T00:00:00Z" } },
+            config: {
+              creditUsagePercent: grokCalls === 1 ? 100 : 5,
+              currentPeriod: { type: "WEEKLY", end: "2026-08-22T00:00:00Z" },
+            },
           }),
           { status: 200 },
         );
@@ -84,8 +88,7 @@ describe("recommend ranking", () => {
     try {
       const rows = await buildRecommendations(store, { root, force: true });
       expect(rows.length).toBe(3);
-      // exhausted should not be rank 1
-      expect(rows[0]?.profile).not.toBe("main");
+      expect(rows[0]?.provider === "xai" && rows[0]?.profile === "main").toBe(false);
       const exhausted = rows.find((r) => r.provider === "xai" && r.profile === "main");
       expect(exhausted?.eligibility).toBe("QUOTA_EXHAUSTED");
       expect(exhausted!.rank).toBeGreaterThan(rows[0]!.rank);

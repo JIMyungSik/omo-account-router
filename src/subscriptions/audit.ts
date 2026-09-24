@@ -1,3 +1,4 @@
+import { isCodexProvider, isXaiProvider } from "../provider-alias.ts";
 import { isEligible } from "../router.ts";
 import type { OarStore } from "../store.ts";
 import type { AccountRecord } from "../types.ts";
@@ -158,7 +159,7 @@ export async function buildSubscriptionAudit(
   const planMap = new Map(plans.map((p) => [`${p.provider}\0${p.profile}`, p]));
 
   const usageTargets = accounts
-    .filter((a) => a.provider === "xai" || a.provider === "openai-codex")
+    .filter((a) => isXaiProvider(a.provider) || isCodexProvider(a.provider))
     .map((a) => ({ provider: a.provider, profile: a.profile }));
   const usageList =
     usageTargets.length > 0

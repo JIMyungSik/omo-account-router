@@ -20,6 +20,11 @@ function oarBin() {
   return process.env.OAR_BIN || join(homedir(), ".local/bin/oar");
 }
 
+function isCodexProvider(provider) {
+  const key = String(provider || "").trim().toLowerCase();
+  return key === "chatgpt-subscription" || key === "openai-codex" || key === "openai" || key === "codex" || key === "chatgpt";
+}
+
 function remoteCols(row) {
   const remote = row?.remote;
   if (!remote?.ok) {
@@ -40,8 +45,8 @@ function remoteCols(row) {
     return "-";
   };
   return {
-    session: row.provider === "openai-codex" ? fmt(session) : "-",
-    weekly: row.provider === "openai-codex" ? fmt(weekly) : "-",
+    session: isCodexProvider(row.provider) ? fmt(session) : "-",
+    weekly: isCodexProvider(row.provider) ? fmt(weekly) : "-",
     grok: row.provider === "xai" ? fmt(grok) : "-",
   };
 }
@@ -54,7 +59,7 @@ export function formatOarUsageStatus(snap) {
     if (!row?.active) continue;
     const cols = remoteCols(row);
     if (row.provider === "xai") grok = `Grok ${cols.grok}`;
-    if (row.provider === "openai-codex") {
+    if (isCodexProvider(row.provider)) {
       const bits = [];
       if (cols.session !== "-") bits.push(`5h ${cols.session}`);
       if (cols.weekly !== "-") bits.push(`W ${cols.weekly}`);

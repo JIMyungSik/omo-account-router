@@ -135,7 +135,7 @@ export function applyCodexAuthFile(path: string, credential: OAuthCredential): S
 export function createCodexHomeSink(env: SinkEnv): AccountSink {
   return {
     id: CODEX_HOME_SINK_ID,
-    providers: ["openai-codex"],
+    providers: ["chatgpt-subscription", "openai-codex"],
     apply(credential: StoredCredential): SinkApplyResult {
       if (credential.type !== "oauth") {
         return { id: CODEX_HOME_SINK_ID, status: "skipped", detail: "not_oauth" };

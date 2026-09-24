@@ -27,6 +27,7 @@ function applyUsageToAccountState(store: OarStore, usage: AccountRemoteUsage): v
 }
 
 import { defaultOarRoot } from "../paths.ts";
+import { resolveProvider } from "../provider-alias.ts";
 import type { OarStore } from "../store.ts";
 import type { AccountRecord } from "../types.ts";
 import { getCachedUsage, putCachedUsage } from "./cache.ts";
@@ -72,9 +73,9 @@ export async function fetchRemoteUsage(
   }
 
   let result: AccountRemoteUsage;
-  if (provider === "openai-codex") {
+  if (resolveProvider(provider) === "chatgpt-subscription") {
     result = await fetchCodexUsage(provider, profile, cred, { fetchImpl: opts?.fetchImpl });
-  } else if (provider === "xai") {
+  } else if (resolveProvider(provider) === "xai") {
     result = await fetchXaiGrokSubscriptionUsage(provider, profile, cred, {
       fetchImpl: opts?.fetchImpl,
     });

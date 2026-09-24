@@ -166,7 +166,7 @@ describe("sinks through Unix-socket client", () => {
     const omo = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, { access?: string }>;
     expect(omo.xai.access).toBe("xai-live");
     expect(omo.anthropic.access).toBe("anth-live");
-    expect(omo["openai-codex"]?.access).toBe(sub.access);
+    expect(omo["chatgpt-subscription"]?.access).toBe(sub.access);
   });
 
   test("missing id_token leaves Codex bytes unchanged while OMO activate succeeds", async () => {
@@ -193,7 +193,7 @@ describe("sinks through Unix-socket client", () => {
     expect(codex?.detail).toBe("missing_id_token");
     expect(readFileSync(codexAuth)).toEqual(before);
     const omo = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, { access?: string }>;
-    expect(omo["openai-codex"]?.access).toBe("other-access");
+    expect(omo["chatgpt-subscription"]?.access).toBe("other-access");
     expect(omo.xai.access).toBe("xai-live");
   });
 
