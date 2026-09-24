@@ -99,10 +99,10 @@ bash scripts/install.sh --import-auth
 
 ```bash
 # snapshot
-oar                         # quick status (no args)
+oar                         # status + freshly fetched remote remaining %
 oar status
 oar panel --refresh         # table: live slot + local signals + remote %
-oar usage --refresh         # Codex 5h/week + Grok subscription remaining
+oar usage                   # fetch Codex 5h/week + Grok subscription remaining
 oar recommend --refresh     # ranked “what to use next”
 
 # subscription cost audit (manual monthly $ + usage heuristics)
@@ -309,10 +309,10 @@ Sink failures do not roll back the OMO slot. Missing files are skipped, not crea
 
 | Command | Description |
 |---------|-------------|
-| `oar` | Quick status snapshot |
-| `oar status` | Profiles + active `*` |
+| `oar` | Status snapshot + freshly fetched remote remaining % |
+| `oar status` | Profiles + active `*` (no remote usage fetch) |
 | `oar panel [--refresh] [--watch N] [--json] [--xbar]` | Full dashboard table |
-| `oar usage [provider] [profile] [--refresh]` | Remaining % table |
+| `oar usage [provider] [profile] [--refresh]` | Fetch and show remaining % table |
 | `oar recommend [--refresh] [--json] [provider...]` | Ranked accounts by remaining % |
 | `oar subscriptions list` | Configured monthly plan costs |
 | `oar subscriptions set <p> <profile> --monthly-usd <n>` | Record plan cost |

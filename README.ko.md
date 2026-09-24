@@ -98,10 +98,10 @@ bash scripts/install.sh --import-auth
 
 ```bash
 # 현황
-oar                         # 인자 없이 빠른 status
+oar                         # status + 원격 잔여 한도 즉시 조회
 oar status
 oar panel --refresh         # 표: 활성 슬롯 + 로컬 신호 + 원격 %
-oar usage --refresh         # Codex 5h/주간 + Grok 구독 잔여
+oar usage                   # Codex 5h/주간 + Grok 구독 잔여 즉시 조회
 oar recommend --refresh     # 다음에 쓸 계정 순위 표
 
 # 구독료 절감 감사 (월 $ 수동 입력 + usage 휴리스틱)
@@ -308,10 +308,10 @@ sink 쓰기가 실패해도 OMO `auth.json`은 롤백하지 않습니다. 없는
 
 | 명령 | 설명 |
 |------|------|
-| `oar` | 빠른 status |
-| `oar status` | 프로필 + 활성 `*` |
+| `oar` | status + 원격 잔여 한도 즉시 조회 |
+| `oar status` | 프로필 + 활성 `*` (원격 한도 조회 안 함) |
 | `oar panel [--refresh] [--watch N] [--json] [--xbar]` | 대시보드 표 |
-| `oar usage [provider] [profile] [--refresh]` | 잔여 % 표 |
+| `oar usage [provider] [profile] [--refresh]` | 원격 잔여 % 조회 및 표시 |
 | `oar recommend [--refresh] [--json] [provider...]` | 잔여 % 기준 순위 표 |
 | `oar subscriptions list` | 설정된 월 구독료 |
 | `oar subscriptions set <p> <profile> --monthly-usd <n>` | 월 비용 기록 |

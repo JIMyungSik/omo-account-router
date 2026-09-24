@@ -112,4 +112,43 @@ describe("remote usage adapters", () => {
     expect(second.ok).toBe(true);
     expect(second.windows[0]?.remainingPercent).toBe(90);
   });
+
+  test("forced refresh bypasses a fresh cached auth failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "oar-usage-refresh-"));
+    const store = new OarStore({ rootDir: root });
+    store.putVaultCredential("xai", "main", {
+      type: "oauth",
+      access: "access-token",
+      refresh: "refresh-token",
+      expires: Date.now() + 3600_000,
+    });
+    const failed = await fetchRemoteUsage(store, "xai", "main", {
+      root,
+      force: true,
+      fetchImpl: async () => new Response("unauthorized", { status: 401 }),
+    });
+    expect(failed.ok).toBe(false);
+
+    let calls = 0;
+    const refreshed = await fetchRemoteUsage(store, "xai", "main", {
+      root,
+      force: true,
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(
+          JSON.stringify({
+            config: {
+              creditUsagePercent: 4,
+              currentPeriod: { type: "PERIOD_TYPE_WEEKLY", end: "2026-08-20T00:00:00Z" },
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(refreshed.ok).toBe(true);
+    expect(refreshed.windows[0]?.remainingPercent).toBe(96);
+  });
 });

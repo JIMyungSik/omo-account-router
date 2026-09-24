@@ -2725,7 +2725,7 @@ copies the active profile into live auth.json slot(s), and tracks routing state.
 OAR routes and copies credentials; it does NOT automate OAuth login and does NOT
 revoke provider refresh tokens.
 
-Tip: run \`oar\` with no args for a quick status snapshot (not this help text).
+Tip: run \`oar\` with no args for status and freshly fetched remote usage.
 
 STATUS TABLE (oar / oar status)
   AUTH     Local/vault metadata from import or last check (valid|expired|revoked|unknown).
@@ -2741,7 +2741,7 @@ STATUS TABLE (oar / oar status)
 COMMANDS
 
   oar
-      Quick status snapshot when the daemon is up; same table as \`oar status\`.
+      Quick status snapshot and freshly fetched remote usage when the daemon is up.
       On daemon failure, prints this help plus a start hint.
 
   oar status [--json]
@@ -2828,8 +2828,8 @@ COMMANDS
       --no-remote    Skip remote usage fetches.
 
   oar usage [provider] [profile] [--refresh]
-      Remote quota table for openai-codex and xai (5H/WK/Grok %). OK = request ok.
-      Omit args to list all supported accounts. Updates daemon on 0% exhaustion.
+      Always fetch and show remote quota for openai-codex and xai (5H/WK/Grok %).
+      OK = request ok. Omit args to list all supported accounts.
 
   oar recommend [--refresh] [--json] [provider...]
       Rank profiles by eligibility + remote remaining %. Optional provider filter.
@@ -3057,6 +3057,14 @@ async function main(argv) {
         throw new Error(res.error);
       const data = res.data;
       printStatus(data);
+      const root = process.env.OAR_HOME ?? defaultOarRoot2();
+      const store = new OarStore({ rootDir: root });
+      const targets = data.accounts.filter((account) => isCodexProvider(account.provider) || isXaiProvider(account.provider)).map((account) => ({ provider: account.provider, profile: account.profile }));
+      if (targets.length > 0) {
+        const rows = await fetchRemoteUsageForAccounts(store, targets, { root, force: true });
+        console.log("");
+        console.log(formatUsageTable(rows));
+      }
     } catch (error) {
       console.log(usage());
       console.error(`
@@ -3438,7 +3446,6 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
     case "usage": {
       rejectUnknownFlags(rest, new Set(["--refresh"]));
       await warnIfDaemonDown("usage");
-      const refresh = rest.includes("--refresh");
       const args = rest.filter((a) => !a.startsWith("--"));
       const root = process.env.OAR_HOME ?? defaultOarRoot2();
       const store = new OarStore({ rootDir: root });
@@ -3451,8 +3458,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       }
       const rows = await fetchRemoteUsageForAccounts(store, targets, {
         root,
-        force: refresh || true,
-        maxAgeMs: 0
+        force: true
       });
       rows.sort((a, b) => a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider));
       for (const u of rows) {
