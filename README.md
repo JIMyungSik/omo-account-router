@@ -100,7 +100,7 @@ bash scripts/install.sh --import-auth
 ```bash
 # snapshot
 oar                         # status + freshly fetched remote remaining %
-oar status
+oar status                  # refresh credentials + quota before rendering
 oar panel --refresh         # table: live slot + local signals + remote %
 oar usage                   # fetch Codex 5h/week + Grok subscription remaining
 oar recommend --refresh     # ranked “what to use next”
@@ -125,6 +125,13 @@ oar use xai main --force    # override (not recommended)
 oar auto xai on
 oar auto xai off
 ```
+
+Every account-facing command refreshes expired Codex/xAI OAuth credentials and
+fetches current remote remaining percentages before it runs. Commands that
+already own a remote-usage flow (`oar`, `oar usage`, `oar panel`,
+`oar recommend`, and `oar use`) reuse that flow rather than issuing an extra
+request. Help, version, and daemon lifecycle commands remain offline-safe.
+An explicit `oar panel --no-remote` also skips credential and quota network calls.
 
 ### Second account (same provider)
 

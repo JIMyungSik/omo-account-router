@@ -99,7 +99,7 @@ bash scripts/install.sh --import-auth
 ```bash
 # 현황
 oar                         # status + 원격 잔여 한도 즉시 조회
-oar status
+oar status                  # 인증 갱신 + 최신 quota 조회 후 출력
 oar panel --refresh         # 표: 활성 슬롯 + 로컬 신호 + 원격 %
 oar usage                   # Codex 5h/주간 + Grok 구독 잔여 즉시 조회
 oar recommend --refresh     # 다음에 쓸 계정 순위 표
@@ -124,6 +124,14 @@ oar use xai main --force    # 강제 (비권장)
 oar auto xai on
 oar auto xai off
 ```
+
+계정 정보를 다루는 모든 명령은 실행 전에 만료된 Codex/xAI OAuth를 갱신하고
+원격 잔여 퍼센트를 새로 조회합니다. 이미 자체 원격 조회 흐름이 있는 `oar`,
+`oar usage`, `oar panel`, `oar recommend`, `oar use`는 중복 요청 없이 해당
+흐름을 사용합니다. 도움말, 버전, daemon 시작·종료 명령은 오프라인에서도
+동작하도록 자동 조회에서 제외합니다.
+명시적으로 `oar panel --no-remote`를 사용하면 인증·quota 네트워크 요청도
+건너뜁니다.
 
 ### 같은 provider에 2번째 계정
 

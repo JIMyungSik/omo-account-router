@@ -272,6 +272,61 @@ async function req(request: OarRequest) {
   return withClient((c) => c.request(request));
 }
 
+const COMMANDS_WITH_OWN_REMOTE_USAGE = new Set<string>([
+  "recommand",
+  "recommend",
+  "usage",
+  "use",
+]);
+
+async function refreshQuotaBeforeCommand(
+  cmd: string | undefined,
+  rest: readonly string[],
+): Promise<void> {
+  if (cmd === "daemon" || (cmd === "panel" && rest.includes("--no-remote"))) return;
+
+  const root = process.env.OAR_HOME ?? defaultOarRoot();
+  const store = new OarStore({ rootDir: root });
+  const targets = store
+    .listAccounts()
+    .filter((account) => isCodexProvider(account.provider) || isXaiProvider(account.provider))
+    .map((account) => ({ provider: account.provider, profile: account.profile }));
+
+  for (const target of targets) {
+    const credential = store.getVaultCredential(target.provider, target.profile);
+    if (
+      credential?.type !== "oauth" ||
+      Date.now() + 5 * 60 * 1000 < credential.expires
+    ) {
+      continue;
+    }
+    try {
+      await req({
+        protocol: 1,
+        action: "refresh",
+        provider: target.provider,
+        profile: target.profile,
+        activate: false,
+      });
+    } catch (error) {
+      if (error instanceof Error) continue;
+      throw error;
+    }
+  }
+
+  const commandFetchesUsage =
+    cmd === undefined ||
+    COMMANDS_WITH_OWN_REMOTE_USAGE.has(cmd) ||
+    (cmd === "panel" && rest.includes("--refresh"));
+  if (commandFetchesUsage || targets.length === 0) return;
+
+  await fetchRemoteUsageForAccounts(store, targets, {
+    root,
+    force: true,
+    maxAgeMs: 0,
+  });
+}
+
 async function removeOne(provider: string, profile: string): Promise<void> {
   const res = await req({ protocol: 1, action: "remove", provider, profile });
   if (!res.ok) throw new Error(res.error);
@@ -416,6 +471,7 @@ async function main(argv: string[]) {
     console.log(usage());
     return;
   }
+  await refreshQuotaBeforeCommand(cmd, rest);
   // Bare \`oar\` → friendly snapshot (not a wall of help).
   if (!cmd) {
     try {

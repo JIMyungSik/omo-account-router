@@ -119,6 +119,138 @@ describe("oar use refreshes expired usage credentials safely", () => {
     return { stdout, stderr, exitCode };
   }
 
+  async function runStatus() {
+    const script = `
+      globalThis.fetch = async (input) => {
+        if (String(input) === "https://cli-chat-proxy.grok.com/v1/billing?format=credits") {
+          return new Response(JSON.stringify({ config: {
+            creditUsagePercent: 4,
+            currentPeriod: { type: "PERIOD_TYPE_WEEKLY", end: "2026-10-01T00:00:00Z" }
+          } }), { status: 200 });
+        }
+        throw new Error("unexpected CLI fetch target");
+      };
+      process.argv = [process.execPath, ${JSON.stringify(cliPath)}, "status"];
+      await import(${JSON.stringify(pathToFileURL(cliPath).href)});
+    `;
+    const proc = Bun.spawn([process.execPath, "-e", script], {
+      env: {
+        ...process.env,
+        OAR_HOME: root,
+        OAR_SOCK: socketPath,
+        OAR_SINKS: "0",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode };
+  }
+
+  async function runPanelWithoutRemote() {
+    const script = `
+      globalThis.fetch = async (input) => {
+        throw new Error("unexpected offline fetch target: " + String(input));
+      };
+      process.argv = [process.execPath, ${JSON.stringify(cliPath)}, "panel", "--no-remote"];
+      await import(${JSON.stringify(pathToFileURL(cliPath).href)});
+    `;
+    const proc = Bun.spawn([process.execPath, "-e", script], {
+      env: {
+        ...process.env,
+        OAR_HOME: root,
+        OAR_SOCK: socketPath,
+        OAR_SINKS: "0",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode };
+  }
+
+  async function runPanel() {
+    const script = `
+      globalThis.fetch = async (input) => {
+        if (String(input) === "https://cli-chat-proxy.grok.com/v1/billing?format=credits") {
+          return new Response(JSON.stringify({ config: {
+            creditUsagePercent: 4,
+            currentPeriod: { type: "PERIOD_TYPE_WEEKLY", end: "2026-10-01T00:00:00Z" }
+          } }), { status: 200 });
+        }
+        throw new Error("unexpected panel fetch target: " + String(input));
+      };
+      process.argv = [process.execPath, ${JSON.stringify(cliPath)}, "panel", "--json"];
+      await import(${JSON.stringify(pathToFileURL(cliPath).href)});
+    `;
+    const proc = Bun.spawn([process.execPath, "-e", script], {
+      env: {
+        ...process.env,
+        OAR_HOME: root,
+        OAR_SOCK: socketPath,
+        OAR_SINKS: "0",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode };
+  }
+
+  test("refreshes remote quota for panel without requiring --refresh", async () => {
+    const result = await runPanel();
+
+    expect(result.exitCode).toBe(0);
+    const panel = JSON.parse(result.stdout) as {
+      rows: Array<{
+        provider: string;
+        profile: string;
+        remote?: { windows: Array<{ remainingPercent: number | null }> };
+      }>;
+    };
+    const row = panel.rows.find((item) => item.provider === "xai" && item.profile === "main");
+    expect(row?.remote?.windows[0]?.remainingPercent).toBe(96);
+  });
+
+  test("keeps panel --no-remote offline", async () => {
+    const result = await runPanelWithoutRemote();
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain("unexpected offline fetch target");
+    const credential = store.getVaultCredential("xai", "main");
+    expect(credential?.type).toBe("oauth");
+    if (credential?.type === "oauth") {
+      expect(credential.access).toBe("vault-expired-access");
+    }
+  });
+
+  test("refreshes expired credentials and quota before an account-facing command", async () => {
+    const result = await runStatus();
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("AVAILABLE");
+    const refreshedStore = new OarStore({ rootDir: root });
+    expect(refreshedStore.getAccount("xai", "main")?.availability).toBe("AVAILABLE");
+    const credential = refreshedStore.getVaultCredential("xai", "main");
+    expect(credential?.type).toBe("oauth");
+    if (credential?.type === "oauth") {
+      expect(credential.access).toBe("vault-fresh-access");
+      expect(credential.refresh).toBe("vault-fresh-refresh");
+    }
+  });
+
   test("refreshes first, then clears stale quota only after usage confirms availability", async () => {
     const result = await runUse("available");
 
