@@ -32,6 +32,7 @@ import { auditToJson, formatAuditText, formatSubscriptionsList } from "./subscri
 import { SubscriptionsStore } from "./subscriptions/store.ts";
 import { buildRecommendations, formatRecommendTable } from "./usage/recommend.ts";
 import type { AccountRecord } from "./types.ts";
+import { findXaiReloginHealCandidate } from "./xai-relogin-heal.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -279,6 +280,41 @@ const COMMANDS_WITH_OWN_REMOTE_USAGE = new Set<string>([
   "use",
 ]);
 
+async function healXaiRelogin(store: OarStore): Promise<boolean> {
+  const candidate = findXaiReloginHealCandidate(store, resolveActiveAuthPaths());
+  if (!candidate) return false;
+  try {
+    const imported = await req({
+      protocol: 1,
+      action: "import-credential",
+      provider: "xai",
+      profile: candidate.profile,
+      credential: candidate.credential,
+    });
+    if (!imported.ok) {
+      console.error(`warning: could not import fresh xAI login: ${imported.error}`);
+      return false;
+    }
+    const activated = await req({
+      protocol: 1,
+      action: "activate",
+      provider: "xai",
+      profile: candidate.profile,
+    });
+    if (!activated.ok) {
+      console.error(`warning: could not activate fresh xAI login: ${activated.error}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error(`warning: could not auto-heal xAI re-login: ${error.message}`);
+      return false;
+    }
+    throw error;
+  }
+}
+
 async function refreshQuotaBeforeCommand(
   cmd: string | undefined,
   rest: readonly string[],
@@ -286,7 +322,10 @@ async function refreshQuotaBeforeCommand(
   if (cmd === "daemon" || (cmd === "panel" && rest.includes("--no-remote"))) return;
 
   const root = process.env.OAR_HOME ?? defaultOarRoot();
-  const store = new OarStore({ rootDir: root });
+  let store = new OarStore({ rootDir: root });
+  if (await healXaiRelogin(store)) {
+    store = new OarStore({ rootDir: root });
+  }
   const targets = store
     .listAccounts()
     .filter((account) => isCodexProvider(account.provider) || isXaiProvider(account.provider))

@@ -311,6 +311,26 @@ sink: argo-grok error …/bad.json: invalid_json
 
 sink 쓰기가 실패해도 OMO `auth.json`은 롤백하지 않습니다. 없는 파일은 skip합니다. `touch`로 빈 파일을 만들지 마세요. 자격 증명을 캐시하는 앱은 `oar use` 후 재시작하거나 새 세션을 여세요. 픽스처/스모크는 실제 GUI 로그인이나 유료 모델 요청을 검증하지 않습니다.
 
+### 재로그인 후에도 xAI `invalid_grant`가 나는 경우
+
+xAI 재로그인은 `auth.json`의 `accounts[]`에 새 `login-N`을 추가하지만,
+폐기된 최상위 `default` credential을 활성 상태로 남길 수 있습니다.
+OAR 계정 명령(`bootstrap-auto` 포함)은 최신 슬롯·최상위 슬롯·선호 vault
+프로필의 JWT subject가 모두 같을 때만 최신 슬롯을 자동 import·activate합니다.
+이 과정에서 `accounts[]`는 보존합니다. subject가 다르면 자동 승격하지 않습니다.
+
+수동 복구:
+
+```bash
+oar import-auth xai main --account latest
+oar use xai main
+oar test xai main --live
+```
+
+`latest`는 가장 최근 `login-N`을 선택합니다. 이어서 `oar use`가 vault
+credential을 모든 live auth 경로에 반영합니다. 토큰을 직접 복사하거나
+셸에 붙여 넣지 마세요.
+
 ---
 
 ## 명령어
@@ -318,8 +338,8 @@ sink 쓰기가 실패해도 OMO `auth.json`은 롤백하지 않습니다. 없는
 | 명령 | 설명 |
 |------|------|
 | `oar` | status + 원격 잔여 한도 즉시 조회 |
-| `oar status` | 프로필 + 활성 `*` (원격 한도 조회 안 함) |
-| `oar panel [--refresh] [--watch N] [--json] [--xbar]` | 대시보드 표 |
+| `oar status` | 원격 한도 갱신 후 프로필 + 활성 `*` |
+| `oar panel [--refresh] [--watch N] [--json] [--xbar] [--no-remote]` | 대시보드 표. `--no-remote` 외에는 최신 원격 한도 조회 |
 | `oar usage [provider] [profile] [--refresh]` | 원격 잔여 % 조회 및 표시 |
 | `oar recommend [--refresh] [--json] [provider...]` | 잔여 % 기준 순위 표 |
 | `oar subscriptions list` | 설정된 월 구독료 |

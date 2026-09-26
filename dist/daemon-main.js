@@ -617,6 +617,65 @@ async function createSenpiAuthStorage(authPath) {
   return ctor.create(authPath);
 }
 
+// src/credential-identity.ts
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function decodeJwtPayload(token) {
+  const parts = token.split(".");
+  if (parts.length < 2)
+    return;
+  const payload = parts[1];
+  if (!payload)
+    return;
+  try {
+    const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - padded.length % 4);
+    const json = Buffer.from(padded + pad, "base64").toString("utf8");
+    const parsed = JSON.parse(json);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return;
+  }
+}
+var OPENAI_PROFILE = "https://api.openai.com/profile";
+function looksLikeEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+function emailFromUnknown(value) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return looksLikeEmail(trimmed) ? trimmed : undefined;
+}
+function emailFromJwtPayload(payload) {
+  if (!payload)
+    return;
+  const nested = payload[OPENAI_PROFILE];
+  if (isRecord(nested)) {
+    const fromProfile = emailFromUnknown(nested.email);
+    if (fromProfile)
+      return fromProfile;
+  }
+  return emailFromUnknown(payload.email) ?? emailFromUnknown(payload.preferred_username);
+}
+function loginFromCredential(cred) {
+  if (!cred || cred.type !== "oauth")
+    return;
+  if (cred.idToken) {
+    const fromId = emailFromJwtPayload(decodeJwtPayload(cred.idToken));
+    if (fromId)
+      return fromId;
+  }
+  return emailFromJwtPayload(decodeJwtPayload(cred.access));
+}
+function subjectFromCredential(cred) {
+  if (!cred || cred.type !== "oauth")
+    return;
+  const subject = decodeJwtPayload(cred.access)?.sub;
+  return typeof subject === "string" && subject.length > 0 ? subject : undefined;
+}
+
 // src/paths.ts
 import { existsSync as existsSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
@@ -860,7 +919,10 @@ function mergeProviderSlot(existing, credential) {
     return next;
   }
   const prev = existing;
-  const same = (prev.type === "oauth" || prev.type === "api_key") && credentialsSameSecrets(prev, credential);
+  const sameSecrets = (prev.type === "oauth" || prev.type === "api_key") && credentialsSameSecrets(prev, credential);
+  const previousSubject = prev.type === "oauth" ? subjectFromCredential(prev) : undefined;
+  const nextSubject = subjectFromCredential(credential);
+  const same = sameSecrets || Boolean(previousSubject && previousSubject === nextSubject);
   for (const [key, value] of Object.entries(prev)) {
     if (key in next)
       continue;
@@ -965,7 +1027,7 @@ import { join as join3 } from "node:path";
 // src/sinks/write-json.ts
 import { existsSync as existsSync4, mkdirSync as mkdirSync2, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname as dirname3 } from "node:path";
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function parseJsonText(text) {
@@ -1025,10 +1087,10 @@ function discoverArgoSecretFiles(env) {
   return out;
 }
 function patchArgoSecrets(raw, grok) {
-  if (!isRecord(raw))
+  if (!isRecord2(raw))
     return null;
   const runners = raw.runners;
-  if (!isRecord(runners))
+  if (!isRecord2(runners))
     return null;
   if (!("grok" in runners))
     return null;
@@ -1156,8 +1218,8 @@ function tokenFingerprint(tokens, authMode, apiKey) {
   });
 }
 function mapCodexAuthFile(existing, credential) {
-  const prev = isRecord(existing) ? existing : {};
-  const prevTokens = isRecord(prev.tokens) ? prev.tokens : {};
+  const prev = isRecord2(existing) ? existing : {};
+  const prevTokens = isRecord2(prev.tokens) ? prev.tokens : {};
   const sameIdentity = isSameCodexIdentity(prevTokens, credential);
   const idToken = resolveCodexIdToken(prevTokens, credential, sameIdentity);
   const accountId = resolveCodexAccountId(prevTokens, credential, sameIdentity);
@@ -1196,14 +1258,14 @@ function applyCodexAuthFile(path, credential) {
   if (!parsed.ok) {
     return { id: CODEX_HOME_SINK_ID, status: "error", path, detail: "invalid_json" };
   }
-  const prev = isRecord(parsed.value) ? parsed.value : {};
-  const prevTokens = isRecord(prev.tokens) ? prev.tokens : {};
+  const prev = isRecord2(parsed.value) ? parsed.value : {};
+  const prevTokens = isRecord2(prev.tokens) ? prev.tokens : {};
   const sameIdentity = isSameCodexIdentity(prevTokens, credential);
   if (!resolveCodexIdToken(prevTokens, credential, sameIdentity)) {
     return { id: CODEX_HOME_SINK_ID, status: "error", path, detail: "missing_id_token" };
   }
   const next = mapCodexAuthFile(parsed.value, credential);
-  const nextTokens = isRecord(next.tokens) ? next.tokens : {};
+  const nextTokens = isRecord2(next.tokens) ? next.tokens : {};
   const unchanged = tokenFingerprint(prevTokens, prev.auth_mode, prev.OPENAI_API_KEY ?? null) === tokenFingerprint(nextTokens, next.auth_mode, next.OPENAI_API_KEY ?? null);
   if (unchanged) {
     return { id: CODEX_HOME_SINK_ID, status: "skipped", path, detail: "unchanged" };
@@ -1638,59 +1700,6 @@ class OarRouter {
   }
 }
 
-// src/credential-identity.ts
-function isRecord2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function decodeJwtPayload(token) {
-  const parts = token.split(".");
-  if (parts.length < 2)
-    return;
-  const payload = parts[1];
-  if (!payload)
-    return;
-  try {
-    const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
-    const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - padded.length % 4);
-    const json = Buffer.from(padded + pad, "base64").toString("utf8");
-    const parsed = JSON.parse(json);
-    return isRecord2(parsed) ? parsed : undefined;
-  } catch {
-    return;
-  }
-}
-var OPENAI_PROFILE = "https://api.openai.com/profile";
-function looksLikeEmail(value) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
-function emailFromUnknown(value) {
-  if (typeof value !== "string")
-    return;
-  const trimmed = value.trim();
-  return looksLikeEmail(trimmed) ? trimmed : undefined;
-}
-function emailFromJwtPayload(payload) {
-  if (!payload)
-    return;
-  const nested = payload[OPENAI_PROFILE];
-  if (isRecord2(nested)) {
-    const fromProfile = emailFromUnknown(nested.email);
-    if (fromProfile)
-      return fromProfile;
-  }
-  return emailFromUnknown(payload.email) ?? emailFromUnknown(payload.preferred_username);
-}
-function loginFromCredential(cred) {
-  if (!cred || cred.type !== "oauth")
-    return;
-  if (cred.idToken) {
-    const fromId = emailFromJwtPayload(decodeJwtPayload(cred.idToken));
-    if (fromId)
-      return fromId;
-  }
-  return emailFromJwtPayload(decodeJwtPayload(cred.access));
-}
-
 // src/xai-login.ts
 var XAI_USERINFO_URL = "https://auth.x.ai/oauth2/userinfo";
 async function loginFromXaiUserinfo(cred, opts) {
@@ -1716,6 +1725,211 @@ async function loginFromXaiUserinfo(cred, opts) {
   } catch {
     return;
   }
+}
+
+// src/import-all.ts
+import { readFileSync as readFileSync5 } from "node:fs";
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isStoredCredential(value) {
+  if (!isRecord3(value))
+    return false;
+  if (value.type === "oauth") {
+    if (typeof value.access !== "string" || typeof value.refresh !== "string" || typeof value.expires !== "number") {
+      return false;
+    }
+    if (value.accountId !== undefined && typeof value.accountId !== "string")
+      return false;
+    if (value.idToken !== undefined && typeof value.idToken !== "string")
+      return false;
+    return true;
+  }
+  if (value.type === "api_key") {
+    return typeof value.key === "string";
+  }
+  return false;
+}
+function parseAuthJsonFile(authPath) {
+  let raw;
+  try {
+    raw = readFileSync5(authPath, "utf8");
+  } catch {
+    throw new Error(`unable to read ${authPath}`);
+  }
+  try {
+    const data = JSON.parse(raw);
+    if (!isRecord3(data))
+      throw new Error("invalid auth.json");
+    return data;
+  } catch {
+    throw new Error(`invalid auth.json: ${authPath}`);
+  }
+}
+function expiresFromAccessJwt(access) {
+  const payload = decodeJwtPayload(access);
+  const exp = payload?.exp;
+  if (typeof exp === "number" && Number.isFinite(exp) && exp > 0) {
+    return exp * 1000;
+  }
+  return;
+}
+function accountIdFromIdToken(idToken) {
+  const payload = decodeJwtPayload(idToken);
+  if (!payload)
+    return;
+  const auth = payload["https://api.openai.com/auth"];
+  if (isRecord3(auth)) {
+    const id = auth.chatgpt_account_id;
+    if (typeof id === "string" && id.length > 0)
+      return id;
+  }
+  if (typeof payload.chatgpt_account_id === "string" && payload.chatgpt_account_id.length > 0) {
+    return payload.chatgpt_account_id;
+  }
+  return;
+}
+function credentialFromNativeCodexAuth(data) {
+  if (!isRecord3(data))
+    return;
+  const tokens = data.tokens;
+  if (!isRecord3(tokens))
+    return;
+  const access = tokens.access_token;
+  const refresh = tokens.refresh_token;
+  if (typeof access !== "string" || access.length === 0)
+    return;
+  if (typeof refresh !== "string" || refresh.length === 0)
+    return;
+  const idToken = typeof tokens.id_token === "string" && tokens.id_token.length > 0 ? tokens.id_token : undefined;
+  let accountId = typeof tokens.account_id === "string" && tokens.account_id.length > 0 ? tokens.account_id : undefined;
+  if (!accountId && idToken)
+    accountId = accountIdFromIdToken(idToken);
+  const expires = expiresFromAccessJwt(access) ?? 0;
+  return {
+    type: "oauth",
+    access,
+    refresh,
+    expires,
+    ...accountId ? { accountId } : {},
+    ...idToken ? { idToken } : {}
+  };
+}
+function readCredentialFromAuthJson(authPath, provider, opts) {
+  const data = parseAuthJsonFile(authPath);
+  for (const key of authJsonKeysForProvider(provider)) {
+    const slot = data[key];
+    if (!isStoredCredential(slot))
+      continue;
+    return selectImportAccount(slot, provider, authPath, opts?.account ?? "latest").credential;
+  }
+  if (provider === "openai-codex" || provider === "chatgpt-subscription") {
+    const native = credentialFromNativeCodexAuth(data);
+    if (native)
+      return native;
+  }
+  return missingProvider(data, provider, authPath);
+}
+function missingProvider(data, provider, authPath) {
+  const available = Object.keys(data).filter((key) => isStoredCredential(data[key]));
+  const looked = authJsonKeysForProvider(provider).join(", ");
+  throw new Error(`provider ${provider} not found in ${authPath} (looked for ${looked}; available: ${available.join(", ") || "none"})`);
+}
+function latestLoginSlotName(linked) {
+  let best = 0;
+  let name;
+  for (const item of linked) {
+    if (!isRecord3(item) || typeof item.name !== "string")
+      continue;
+    const match = /^login-(\d+)$/.exec(item.name);
+    if (!match)
+      continue;
+    const n = Number(match[1]);
+    if (n > best) {
+      best = n;
+      name = item.name;
+    }
+  }
+  return name;
+}
+function credentialFromSlotEntry(parent, entry) {
+  if (isStoredCredential(entry))
+    return entry;
+  if (!isRecord3(entry) || parent.type !== "oauth" || typeof entry.access !== "string") {
+    throw new Error("selected accounts[] entry is not a credential");
+  }
+  const refresh = typeof entry.refresh === "string" ? entry.refresh : parent.refresh;
+  const expires = typeof entry.expires === "number" ? entry.expires : parent.expires;
+  return {
+    type: "oauth",
+    access: entry.access,
+    refresh,
+    expires,
+    ...parent.accountId ? { accountId: parent.accountId } : {},
+    ...typeof entry.idToken === "string" ? { idToken: entry.idToken } : parent.idToken ? { idToken: parent.idToken } : {}
+  };
+}
+function selectImportAccount(slot, provider, authPath, account = "latest") {
+  if (account === "primary")
+    return { used: "primary", credential: slot };
+  const linked = slot.accounts;
+  if (account === "latest") {
+    const name = Array.isArray(linked) ? latestLoginSlotName(linked) : undefined;
+    if (!name)
+      return { used: "primary", credential: slot };
+    return { used: name, credential: selectLinkedAccount(slot, provider, authPath, name) };
+  }
+  return { used: account, credential: selectLinkedAccount(slot, provider, authPath, account) };
+}
+function selectLinkedAccount(slot, provider, authPath, account) {
+  const linked = slot.accounts;
+  if (!Array.isArray(linked) || linked.length === 0) {
+    throw new Error(`${provider} in ${authPath} has no accounts[] array; --account cannot be applied`);
+  }
+  const selected = account === "latest" ? latestLoginSlotName(linked) : account;
+  if (!selected) {
+    throw new Error(`${provider} in ${authPath} has no login-N slot to use as latest`);
+  }
+  const idx = /^\d+$/.test(selected) ? Number(selected) - 1 : linked.findIndex((a) => {
+    return isRecord3(a) && a["name"] === selected;
+  });
+  if (idx < 0 || idx >= linked.length) {
+    const names = linked.map((a, i) => isRecord3(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`).join(", ");
+    throw new Error(`--account ${account} not found in ${provider} accounts[] (available: ${names})`);
+  }
+  return credentialFromSlotEntry(slot, linked[idx]);
+}
+
+// src/xai-relogin-heal.ts
+function findXaiReloginHealCandidate(store, authPaths, now = Date.now()) {
+  const preferred = store.getState().providers.xai?.preferred;
+  if (!preferred)
+    return;
+  const vault = store.getVaultCredential("xai", preferred);
+  const vaultSubject = subjectFromCredential(vault);
+  if (!vaultSubject)
+    return;
+  for (const authPath of authPaths) {
+    let primary;
+    let latest;
+    try {
+      primary = readCredentialFromAuthJson(authPath, "xai", { account: "primary" });
+      latest = readCredentialFromAuthJson(authPath, "xai", { account: "latest" });
+    } catch (error) {
+      if (error instanceof Error)
+        continue;
+      throw error;
+    }
+    if (primary.type !== "oauth" || latest.type !== "oauth")
+      continue;
+    const primarySubject = subjectFromCredential(primary);
+    const latestSubject = subjectFromCredential(latest);
+    if (!primarySubject || primarySubject !== latestSubject || latestSubject !== vaultSubject || latest.expires <= primary.expires || latest.expires <= now + 5 * 60 * 1000 || latest.refresh === primary.refresh) {
+      continue;
+    }
+    return { authPath, profile: preferred, credential: latest };
+  }
+  return;
 }
 
 // src/daemon.ts
@@ -1830,6 +2044,22 @@ class OarDaemon {
         return;
       this.store.upsertAccount({ ...latest, login });
     }));
+  }
+  async healXaiRelogin() {
+    const candidate = findXaiReloginHealCandidate(this.store, this.activator.getAuthPaths());
+    if (!candidate)
+      return false;
+    this.store.putVaultCredential("xai", candidate.profile, candidate.credential);
+    await this.activator.activate("xai", candidate.profile);
+    this.router.use("xai", candidate.profile);
+    this.events.append({
+      ts: new Date().toISOString(),
+      event: "xai_relogin_heal",
+      provider: "xai",
+      profile: candidate.profile,
+      reason: "same_subject_newer_login"
+    });
+    return true;
   }
   async dispatch(req) {
     if (!req || req.protocol !== 1) {
@@ -2174,6 +2404,7 @@ class OarDaemon {
         return { ok: true, data: { provider: req.provider, profile: req.profile, ...health, live } };
       }
       case "bootstrap-auto": {
+        await this.healXaiRelogin();
         const state = this.store.getState();
         const byProvider = new Map;
         for (const a of state.accounts) {
@@ -2273,7 +2504,7 @@ import {
   chmodSync as chmodSync4,
   existsSync as existsSync10,
   mkdirSync as mkdirSync5,
-  readFileSync as readFileSync5,
+  readFileSync as readFileSync6,
   renameSync as renameSync3,
   unlinkSync as unlinkSync2,
   writeFileSync as writeFileSync4
@@ -2343,7 +2574,7 @@ class OarStore {
     if (!existsSync10(this.statePath))
       return emptyState();
     try {
-      const parsed = JSON.parse(readFileSync5(this.statePath, "utf8"));
+      const parsed = JSON.parse(readFileSync6(this.statePath, "utf8"));
       if (parsed?.version !== 1)
         return emptyState();
       return {
@@ -2466,7 +2697,7 @@ class OarStore {
     if (!existsSync10(path))
       return;
     try {
-      return JSON.parse(readFileSync5(path, "utf8"));
+      return JSON.parse(readFileSync6(path, "utf8"));
     } catch {
       return;
     }

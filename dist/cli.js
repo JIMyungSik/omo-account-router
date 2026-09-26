@@ -3,7 +3,7 @@
 
 // src/cli.ts
 import { spawn, spawnSync } from "child_process";
-import { existsSync as existsSync9, readFileSync as readFileSync9 } from "fs";
+import { existsSync as existsSync9, readFileSync as readFileSync10 } from "fs";
 import { homedir as homedir4 } from "os";
 import { dirname as dirname5, join as join8 } from "path";
 import { fileURLToPath } from "url";
@@ -177,45 +177,6 @@ function isXaiProvider(provider) {
 // src/import-all.ts
 import { readFileSync } from "node:fs";
 
-// src/provider-alias.ts
-var PROVIDER_ALIASES2 = {
-  "chatgpt-subscription": "chatgpt-subscription",
-  "openai-codex": "chatgpt-subscription",
-  openai: "chatgpt-subscription",
-  codex: "chatgpt-subscription",
-  chatgpt: "chatgpt-subscription",
-  xai: "xai",
-  grok: "xai"
-};
-function resolveProvider2(input) {
-  const key = input.trim().toLowerCase();
-  return PROVIDER_ALIASES2[key] ?? input.trim();
-}
-function isCodexProvider2(provider) {
-  return resolveProvider2(provider) === "chatgpt-subscription";
-}
-function isXaiProvider2(provider) {
-  return resolveProvider2(provider) === "xai";
-}
-
-// src/auth-slot.ts
-function credentialsSameSecrets(a, b) {
-  if (a.type !== b.type)
-    return false;
-  if (a.type === "api_key" && b.type === "api_key")
-    return a.key === b.key;
-  if (a.type === "oauth" && b.type === "oauth") {
-    return a.access === b.access && a.refresh === b.refresh;
-  }
-  return false;
-}
-function authJsonKeysForProvider(provider) {
-  const canonical = resolveProvider2(provider);
-  if (canonical === "chatgpt-subscription")
-    return ["chatgpt-subscription", "openai-codex"];
-  return [canonical];
-}
-
 // src/credential-identity.ts
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -270,6 +231,51 @@ function loginFromCredential(cred) {
       return fromId;
   }
   return emailFromJwtPayload(decodeJwtPayload(cred.access));
+}
+function subjectFromCredential(cred) {
+  if (!cred || cred.type !== "oauth")
+    return;
+  const subject = decodeJwtPayload(cred.access)?.sub;
+  return typeof subject === "string" && subject.length > 0 ? subject : undefined;
+}
+
+// src/provider-alias.ts
+var PROVIDER_ALIASES2 = {
+  "chatgpt-subscription": "chatgpt-subscription",
+  "openai-codex": "chatgpt-subscription",
+  openai: "chatgpt-subscription",
+  codex: "chatgpt-subscription",
+  chatgpt: "chatgpt-subscription",
+  xai: "xai",
+  grok: "xai"
+};
+function resolveProvider2(input) {
+  const key = input.trim().toLowerCase();
+  return PROVIDER_ALIASES2[key] ?? input.trim();
+}
+function isCodexProvider2(provider) {
+  return resolveProvider2(provider) === "chatgpt-subscription";
+}
+function isXaiProvider2(provider) {
+  return resolveProvider2(provider) === "xai";
+}
+
+// src/auth-slot.ts
+function credentialsSameSecrets(a, b) {
+  if (a.type !== b.type)
+    return false;
+  if (a.type === "api_key" && b.type === "api_key")
+    return a.key === b.key;
+  if (a.type === "oauth" && b.type === "oauth") {
+    return a.access === b.access && a.refresh === b.refresh;
+  }
+  return false;
+}
+function authJsonKeysForProvider(provider) {
+  const canonical = resolveProvider2(provider);
+  if (canonical === "chatgpt-subscription")
+    return ["chatgpt-subscription", "openai-codex"];
+  return [canonical];
 }
 
 // src/import-all.ts
@@ -2705,6 +2711,211 @@ function formatRecommendTable(rows) {
 `);
 }
 
+// src/import-all.ts
+import { readFileSync as readFileSync9 } from "node:fs";
+function isRecord4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isStoredCredential2(value) {
+  if (!isRecord4(value))
+    return false;
+  if (value.type === "oauth") {
+    if (typeof value.access !== "string" || typeof value.refresh !== "string" || typeof value.expires !== "number") {
+      return false;
+    }
+    if (value.accountId !== undefined && typeof value.accountId !== "string")
+      return false;
+    if (value.idToken !== undefined && typeof value.idToken !== "string")
+      return false;
+    return true;
+  }
+  if (value.type === "api_key") {
+    return typeof value.key === "string";
+  }
+  return false;
+}
+function parseAuthJsonFile2(authPath) {
+  let raw;
+  try {
+    raw = readFileSync9(authPath, "utf8");
+  } catch {
+    throw new Error(`unable to read ${authPath}`);
+  }
+  try {
+    const data = JSON.parse(raw);
+    if (!isRecord4(data))
+      throw new Error("invalid auth.json");
+    return data;
+  } catch {
+    throw new Error(`invalid auth.json: ${authPath}`);
+  }
+}
+function expiresFromAccessJwt2(access) {
+  const payload = decodeJwtPayload(access);
+  const exp = payload?.exp;
+  if (typeof exp === "number" && Number.isFinite(exp) && exp > 0) {
+    return exp * 1000;
+  }
+  return;
+}
+function accountIdFromIdToken2(idToken) {
+  const payload = decodeJwtPayload(idToken);
+  if (!payload)
+    return;
+  const auth = payload["https://api.openai.com/auth"];
+  if (isRecord4(auth)) {
+    const id = auth.chatgpt_account_id;
+    if (typeof id === "string" && id.length > 0)
+      return id;
+  }
+  if (typeof payload.chatgpt_account_id === "string" && payload.chatgpt_account_id.length > 0) {
+    return payload.chatgpt_account_id;
+  }
+  return;
+}
+function credentialFromNativeCodexAuth2(data) {
+  if (!isRecord4(data))
+    return;
+  const tokens = data.tokens;
+  if (!isRecord4(tokens))
+    return;
+  const access = tokens.access_token;
+  const refresh = tokens.refresh_token;
+  if (typeof access !== "string" || access.length === 0)
+    return;
+  if (typeof refresh !== "string" || refresh.length === 0)
+    return;
+  const idToken = typeof tokens.id_token === "string" && tokens.id_token.length > 0 ? tokens.id_token : undefined;
+  let accountId = typeof tokens.account_id === "string" && tokens.account_id.length > 0 ? tokens.account_id : undefined;
+  if (!accountId && idToken)
+    accountId = accountIdFromIdToken2(idToken);
+  const expires = expiresFromAccessJwt2(access) ?? 0;
+  return {
+    type: "oauth",
+    access,
+    refresh,
+    expires,
+    ...accountId ? { accountId } : {},
+    ...idToken ? { idToken } : {}
+  };
+}
+function readCredentialFromAuthJson2(authPath, provider, opts) {
+  const data = parseAuthJsonFile2(authPath);
+  for (const key of authJsonKeysForProvider(provider)) {
+    const slot = data[key];
+    if (!isStoredCredential2(slot))
+      continue;
+    return selectImportAccount2(slot, provider, authPath, opts?.account ?? "latest").credential;
+  }
+  if (provider === "openai-codex" || provider === "chatgpt-subscription") {
+    const native = credentialFromNativeCodexAuth2(data);
+    if (native)
+      return native;
+  }
+  return missingProvider2(data, provider, authPath);
+}
+function missingProvider2(data, provider, authPath) {
+  const available = Object.keys(data).filter((key) => isStoredCredential2(data[key]));
+  const looked = authJsonKeysForProvider(provider).join(", ");
+  throw new Error(`provider ${provider} not found in ${authPath} (looked for ${looked}; available: ${available.join(", ") || "none"})`);
+}
+function latestLoginSlotName2(linked) {
+  let best = 0;
+  let name;
+  for (const item of linked) {
+    if (!isRecord4(item) || typeof item.name !== "string")
+      continue;
+    const match = /^login-(\d+)$/.exec(item.name);
+    if (!match)
+      continue;
+    const n = Number(match[1]);
+    if (n > best) {
+      best = n;
+      name = item.name;
+    }
+  }
+  return name;
+}
+function credentialFromSlotEntry2(parent, entry) {
+  if (isStoredCredential2(entry))
+    return entry;
+  if (!isRecord4(entry) || parent.type !== "oauth" || typeof entry.access !== "string") {
+    throw new Error("selected accounts[] entry is not a credential");
+  }
+  const refresh = typeof entry.refresh === "string" ? entry.refresh : parent.refresh;
+  const expires = typeof entry.expires === "number" ? entry.expires : parent.expires;
+  return {
+    type: "oauth",
+    access: entry.access,
+    refresh,
+    expires,
+    ...parent.accountId ? { accountId: parent.accountId } : {},
+    ...typeof entry.idToken === "string" ? { idToken: entry.idToken } : parent.idToken ? { idToken: parent.idToken } : {}
+  };
+}
+function selectImportAccount2(slot, provider, authPath, account = "latest") {
+  if (account === "primary")
+    return { used: "primary", credential: slot };
+  const linked = slot.accounts;
+  if (account === "latest") {
+    const name = Array.isArray(linked) ? latestLoginSlotName2(linked) : undefined;
+    if (!name)
+      return { used: "primary", credential: slot };
+    return { used: name, credential: selectLinkedAccount2(slot, provider, authPath, name) };
+  }
+  return { used: account, credential: selectLinkedAccount2(slot, provider, authPath, account) };
+}
+function selectLinkedAccount2(slot, provider, authPath, account) {
+  const linked = slot.accounts;
+  if (!Array.isArray(linked) || linked.length === 0) {
+    throw new Error(`${provider} in ${authPath} has no accounts[] array; --account cannot be applied`);
+  }
+  const selected = account === "latest" ? latestLoginSlotName2(linked) : account;
+  if (!selected) {
+    throw new Error(`${provider} in ${authPath} has no login-N slot to use as latest`);
+  }
+  const idx = /^\d+$/.test(selected) ? Number(selected) - 1 : linked.findIndex((a) => {
+    return isRecord4(a) && a["name"] === selected;
+  });
+  if (idx < 0 || idx >= linked.length) {
+    const names = linked.map((a, i) => isRecord4(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`).join(", ");
+    throw new Error(`--account ${account} not found in ${provider} accounts[] (available: ${names})`);
+  }
+  return credentialFromSlotEntry2(slot, linked[idx]);
+}
+
+// src/xai-relogin-heal.ts
+function findXaiReloginHealCandidate(store, authPaths, now = Date.now()) {
+  const preferred = store.getState().providers.xai?.preferred;
+  if (!preferred)
+    return;
+  const vault = store.getVaultCredential("xai", preferred);
+  const vaultSubject = subjectFromCredential(vault);
+  if (!vaultSubject)
+    return;
+  for (const authPath of authPaths) {
+    let primary;
+    let latest;
+    try {
+      primary = readCredentialFromAuthJson2(authPath, "xai", { account: "primary" });
+      latest = readCredentialFromAuthJson2(authPath, "xai", { account: "latest" });
+    } catch (error) {
+      if (error instanceof Error)
+        continue;
+      throw error;
+    }
+    if (primary.type !== "oauth" || latest.type !== "oauth")
+      continue;
+    const primarySubject = subjectFromCredential(primary);
+    const latestSubject = subjectFromCredential(latest);
+    if (!primarySubject || primarySubject !== latestSubject || latestSubject !== vaultSubject || latest.expires <= primary.expires || latest.expires <= now + 5 * 60 * 1000 || latest.refresh === primary.refresh) {
+      continue;
+    }
+    return { authPath, profile: preferred, credential: latest };
+  }
+  return;
+}
+
 // src/cli.ts
 var __dirname2 = dirname5(fileURLToPath(import.meta.url));
 function readPackageVersion() {
@@ -2712,7 +2923,7 @@ function readPackageVersion() {
   if (!existsSync9(pkgPath))
     return "unknown";
   try {
-    const parsed = JSON.parse(readFileSync9(pkgPath, "utf8"));
+    const parsed = JSON.parse(readFileSync10(pkgPath, "utf8"));
     return parsed.version ?? "unknown";
   } catch {
     return "unknown";
@@ -2946,11 +3157,49 @@ var COMMANDS_WITH_OWN_REMOTE_USAGE = new Set([
   "usage",
   "use"
 ]);
+async function healXaiRelogin(store) {
+  const candidate = findXaiReloginHealCandidate(store, resolveActiveAuthPaths2());
+  if (!candidate)
+    return false;
+  try {
+    const imported = await req({
+      protocol: 1,
+      action: "import-credential",
+      provider: "xai",
+      profile: candidate.profile,
+      credential: candidate.credential
+    });
+    if (!imported.ok) {
+      console.error(`warning: could not import fresh xAI login: ${imported.error}`);
+      return false;
+    }
+    const activated = await req({
+      protocol: 1,
+      action: "activate",
+      provider: "xai",
+      profile: candidate.profile
+    });
+    if (!activated.ok) {
+      console.error(`warning: could not activate fresh xAI login: ${activated.error}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error(`warning: could not auto-heal xAI re-login: ${error.message}`);
+      return false;
+    }
+    throw error;
+  }
+}
 async function refreshQuotaBeforeCommand(cmd, rest) {
   if (cmd === "daemon" || cmd === "panel" && rest.includes("--no-remote"))
     return;
   const root = process.env.OAR_HOME ?? defaultOarRoot2();
-  const store = new OarStore({ rootDir: root });
+  let store = new OarStore({ rootDir: root });
+  if (await healXaiRelogin(store)) {
+    store = new OarStore({ rootDir: root });
+  }
   const targets = store.listAccounts().filter((account) => isCodexProvider(account.provider) || isXaiProvider(account.provider)).map((account) => ({ provider: account.provider, profile: account.profile }));
   for (const target of targets) {
     const credential = store.getVaultCredential(target.provider, target.profile);
@@ -3055,7 +3304,7 @@ async function daemonStop() {
     console.log("oar-daemon not running (no pid file)");
     return;
   }
-  const pid = Number(readFileSync9(pidPath, "utf8").trim());
+  const pid = Number(readFileSync10(pidPath, "utf8").trim());
   if (!Number.isFinite(pid))
     throw new Error("invalid pid file");
   try {

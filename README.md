@@ -311,6 +311,26 @@ sink: argo-grok error …/bad.json: invalid_json
 
 Sink failures do not roll back the OMO slot. Missing files are skipped, not created. Apps that cache credentials need a restart or a new session after `oar use`. Fixture/smoke checks do **not** include live authenticated GUI or paid model requests.
 
+### xAI `invalid_grant` after re-login
+
+An xAI re-login can append a fresh `login-N` entry under `auth.json`'s
+`accounts[]` while leaving the revoked top-level `default` credential active.
+OAR account-facing commands (including `bootstrap-auto`) detect this only when
+the newest slot, top-level slot, and preferred vault profile share the same JWT
+subject. OAR then imports and activates the newer slot automatically while
+preserving `accounts[]`. A different subject is never promoted.
+
+Manual fallback:
+
+```bash
+oar import-auth xai main --account latest
+oar use xai main
+oar test xai main --live
+```
+
+`latest` selects the newest `login-N` slot. `oar use` then promotes the vault
+credential into every live auth path. Do not paste or manually copy tokens.
+
 ---
 
 ## Command reference
@@ -318,8 +338,8 @@ Sink failures do not roll back the OMO slot. Missing files are skipped, not crea
 | Command | Description |
 |---------|-------------|
 | `oar` | Status snapshot + freshly fetched remote remaining % |
-| `oar status` | Profiles + active `*` (no remote usage fetch) |
-| `oar panel [--refresh] [--watch N] [--json] [--xbar]` | Full dashboard table |
+| `oar status` | Profiles + active `*`, after refreshing remote usage |
+| `oar panel [--refresh] [--watch N] [--json] [--xbar] [--no-remote]` | Full dashboard; fresh remote usage unless `--no-remote` |
 | `oar usage [provider] [profile] [--refresh]` | Fetch and show remaining % table |
 | `oar recommend [--refresh] [--json] [provider...]` | Ranked accounts by remaining % |
 | `oar subscriptions list` | Configured monthly plan costs |
