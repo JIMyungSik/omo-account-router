@@ -9,6 +9,7 @@ import { OarRouter } from "../src/router.ts";
 describe("parseReportResult", () => {
   test("accepts SUCCESS and known failure types", () => {
     expect(parseReportResult("SUCCESS")).toBe("SUCCESS");
+    expect(parseReportResult("QUOTA_AVAILABLE")).toBe("QUOTA_AVAILABLE");
     expect(parseReportResult("AUTH_EXPIRED")).toBe("AUTH_EXPIRED");
     expect(parseReportResult("NETWORK_ERROR")).toBe("NETWORK_ERROR");
   });

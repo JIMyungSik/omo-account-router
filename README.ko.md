@@ -30,6 +30,17 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 **OMO `5.0.0-0.beta.42` / Senpi `2026.9.4-3`** 기준: `after_provider_response`는 status+headers만 오므로 헤더에서 `invalid_grant`를 읽고, live `auth.json` 기록은 native `accounts` 필드를 덮어쓰지 않습니다.
 
+## 플랫폼
+
+CLI, 데몬, vault는 macOS, Linux, Windows에서 동작합니다. 2026-09-24, Bun 1.3.14 기준:
+
+| OS | 방법 | 결과 |
+|----|------|------|
+| Linux arm64 | Docker `oven/bun:1.3.14`, `bun test` | 51 pass, 3 skip, 0 fail |
+| Ubuntu | GitHub `ubuntu-latest`, `bun test` + style | pass ([run 35945289044](https://github.com/JIMyungSik/omo-account-router/actions/runs/35945289044)) |
+| Windows | GitHub `windows-latest`, 같은 명령 | pass (같은 run) |
+
+`scripts/install.sh`와 LaunchAgent는 macOS 전용입니다. Linux/Windows는 Bun 또는 Node 22로 빌드한 뒤 `oar daemon start`로 때웁니다. Argo 시크릿 기본 경로는 `~/Library/Application Support` 아래이므로, 다른 OS에서는 파일이 있으면 `OAR_ARGO_SECRETS_PATH`를 지정합니다.
 
 ---
 
@@ -87,10 +98,10 @@ bash scripts/install.sh --import-auth
 
 ```bash
 # 현황
-oar                         # 인자 없이 빠른 status
-oar status
+oar                         # status + 원격 잔여 한도 즉시 조회
+oar status                  # 인증 갱신 + 최신 quota 조회 후 출력
 oar panel --refresh         # 표: 활성 슬롯 + 로컬 신호 + 원격 %
-oar usage --refresh         # Codex 5h/주간 + Grok 구독 잔여
+oar usage                   # Codex 5h/주간 + Grok 구독 잔여 즉시 조회
 oar recommend --refresh     # 다음에 쓸 계정 순위 표
 
 # 구독료 절감 감사 (월 $ 수동 입력 + usage 휴리스틱)
@@ -101,6 +112,7 @@ oar subscriptions audit --refresh
 oar import-auth --all
 
 # 계정 전환 (핫스왑)
+# 만료된 Codex/xAI OAuth는 quota 확인 전에 vault에서 갱신
 oar use xai sub
 oar use openai-codex main
 
@@ -112,6 +124,14 @@ oar use xai main --force    # 강제 (비권장)
 oar auto xai on
 oar auto xai off
 ```
+
+계정 정보를 다루는 모든 명령은 실행 전에 만료된 Codex/xAI OAuth를 갱신하고
+원격 잔여 퍼센트를 새로 조회합니다. 이미 자체 원격 조회 흐름이 있는 `oar`,
+`oar usage`, `oar panel`, `oar recommend`, `oar use`는 중복 요청 없이 해당
+흐름을 사용합니다. 도움말, 버전, daemon 시작·종료 명령은 오프라인에서도
+동작하도록 자동 조회에서 제외합니다.
+명시적으로 `oar panel --no-remote`를 사용하면 인증·quota 네트워크 요청도
+건너뜁니다.
 
 ### 같은 provider에 2번째 계정
 
@@ -291,16 +311,36 @@ sink: argo-grok error …/bad.json: invalid_json
 
 sink 쓰기가 실패해도 OMO `auth.json`은 롤백하지 않습니다. 없는 파일은 skip합니다. `touch`로 빈 파일을 만들지 마세요. 자격 증명을 캐시하는 앱은 `oar use` 후 재시작하거나 새 세션을 여세요. 픽스처/스모크는 실제 GUI 로그인이나 유료 모델 요청을 검증하지 않습니다.
 
+### 재로그인 후에도 xAI `invalid_grant`가 나는 경우
+
+xAI 재로그인은 `auth.json`의 `accounts[]`에 새 `login-N`을 추가하지만,
+폐기된 최상위 `default` credential을 활성 상태로 남길 수 있습니다.
+OAR 계정 명령(`bootstrap-auto` 포함)은 최신 슬롯·최상위 슬롯·선호 vault
+프로필의 JWT subject가 모두 같을 때만 최신 슬롯을 자동 import·activate합니다.
+이 과정에서 `accounts[]`는 보존합니다. subject가 다르면 자동 승격하지 않습니다.
+
+수동 복구:
+
+```bash
+oar import-auth xai main --account latest
+oar use xai main
+oar test xai main --live
+```
+
+`latest`는 가장 최근 `login-N`을 선택합니다. 이어서 `oar use`가 vault
+credential을 모든 live auth 경로에 반영합니다. 토큰을 직접 복사하거나
+셸에 붙여 넣지 마세요.
+
 ---
 
 ## 명령어
 
 | 명령 | 설명 |
 |------|------|
-| `oar` | 빠른 status |
-| `oar status` | 프로필 + 활성 `*` |
-| `oar panel [--refresh] [--watch N] [--json] [--xbar]` | 대시보드 표 |
-| `oar usage [provider] [profile] [--refresh]` | 잔여 % 표 |
+| `oar` | status + 원격 잔여 한도 즉시 조회 |
+| `oar status` | 원격 한도 갱신 후 프로필 + 활성 `*` |
+| `oar panel [--refresh] [--watch N] [--json] [--xbar] [--no-remote]` | 대시보드 표. `--no-remote` 외에는 최신 원격 한도 조회 |
+| `oar usage [provider] [profile] [--refresh]` | 원격 잔여 % 조회 및 표시 |
 | `oar recommend [--refresh] [--json] [provider...]` | 잔여 % 기준 순위 표 |
 | `oar subscriptions list` | 설정된 월 구독료 |
 | `oar subscriptions set <p> <profile> --monthly-usd <n>` | 월 비용 기록 |
@@ -398,6 +438,9 @@ bun run build
 ```
 
 npm 배포 메모: [docs/npm-publish.md](docs/npm-publish.md)
+
+변경은 보호된 `main`에 직접 push하지 않고 PR로만 반영합니다.
+[CONTRIBUTOR.md](CONTRIBUTOR.md)를 참고하세요.
 
 ---
 

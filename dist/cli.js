@@ -3,7 +3,7 @@
 
 // src/cli.ts
 import { spawn, spawnSync } from "child_process";
-import { existsSync as existsSync9, readFileSync as readFileSync9 } from "fs";
+import { existsSync as existsSync9, readFileSync as readFileSync10 } from "fs";
 import { homedir as homedir4 } from "os";
 import { dirname as dirname5, join as join8 } from "path";
 import { fileURLToPath } from "url";
@@ -177,45 +177,6 @@ function isXaiProvider(provider) {
 // src/import-all.ts
 import { readFileSync } from "node:fs";
 
-// src/provider-alias.ts
-var PROVIDER_ALIASES2 = {
-  "chatgpt-subscription": "chatgpt-subscription",
-  "openai-codex": "chatgpt-subscription",
-  openai: "chatgpt-subscription",
-  codex: "chatgpt-subscription",
-  chatgpt: "chatgpt-subscription",
-  xai: "xai",
-  grok: "xai"
-};
-function resolveProvider2(input) {
-  const key = input.trim().toLowerCase();
-  return PROVIDER_ALIASES2[key] ?? input.trim();
-}
-function isCodexProvider2(provider) {
-  return resolveProvider2(provider) === "chatgpt-subscription";
-}
-function isXaiProvider2(provider) {
-  return resolveProvider2(provider) === "xai";
-}
-
-// src/auth-slot.ts
-function credentialsSameSecrets(a, b) {
-  if (a.type !== b.type)
-    return false;
-  if (a.type === "api_key" && b.type === "api_key")
-    return a.key === b.key;
-  if (a.type === "oauth" && b.type === "oauth") {
-    return a.access === b.access && a.refresh === b.refresh;
-  }
-  return false;
-}
-function authJsonKeysForProvider(provider) {
-  const canonical = resolveProvider2(provider);
-  if (canonical === "chatgpt-subscription")
-    return ["chatgpt-subscription", "openai-codex"];
-  return [canonical];
-}
-
 // src/credential-identity.ts
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -270,6 +231,51 @@ function loginFromCredential(cred) {
       return fromId;
   }
   return emailFromJwtPayload(decodeJwtPayload(cred.access));
+}
+function subjectFromCredential(cred) {
+  if (!cred || cred.type !== "oauth")
+    return;
+  const subject = decodeJwtPayload(cred.access)?.sub;
+  return typeof subject === "string" && subject.length > 0 ? subject : undefined;
+}
+
+// src/provider-alias.ts
+var PROVIDER_ALIASES2 = {
+  "chatgpt-subscription": "chatgpt-subscription",
+  "openai-codex": "chatgpt-subscription",
+  openai: "chatgpt-subscription",
+  codex: "chatgpt-subscription",
+  chatgpt: "chatgpt-subscription",
+  xai: "xai",
+  grok: "xai"
+};
+function resolveProvider2(input) {
+  const key = input.trim().toLowerCase();
+  return PROVIDER_ALIASES2[key] ?? input.trim();
+}
+function isCodexProvider2(provider) {
+  return resolveProvider2(provider) === "chatgpt-subscription";
+}
+function isXaiProvider2(provider) {
+  return resolveProvider2(provider) === "xai";
+}
+
+// src/auth-slot.ts
+function credentialsSameSecrets(a, b) {
+  if (a.type !== b.type)
+    return false;
+  if (a.type === "api_key" && b.type === "api_key")
+    return a.key === b.key;
+  if (a.type === "oauth" && b.type === "oauth") {
+    return a.access === b.access && a.refresh === b.refresh;
+  }
+  return false;
+}
+function authJsonKeysForProvider(provider) {
+  const canonical = resolveProvider2(provider);
+  if (canonical === "chatgpt-subscription")
+    return ["chatgpt-subscription", "openai-codex"];
+  return [canonical];
 }
 
 // src/import-all.ts
@@ -542,6 +548,7 @@ function writeImportAccountSetting(account, root = defaultOarRoot()) {
 // src/report-results.ts
 var REPORT_RESULTS = [
   "SUCCESS",
+  "QUOTA_AVAILABLE",
   "AUTH_EXPIRED",
   "AUTH_REVOKED",
   "RATE_LIMITED",
@@ -2704,6 +2711,211 @@ function formatRecommendTable(rows) {
 `);
 }
 
+// src/import-all.ts
+import { readFileSync as readFileSync9 } from "node:fs";
+function isRecord4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isStoredCredential2(value) {
+  if (!isRecord4(value))
+    return false;
+  if (value.type === "oauth") {
+    if (typeof value.access !== "string" || typeof value.refresh !== "string" || typeof value.expires !== "number") {
+      return false;
+    }
+    if (value.accountId !== undefined && typeof value.accountId !== "string")
+      return false;
+    if (value.idToken !== undefined && typeof value.idToken !== "string")
+      return false;
+    return true;
+  }
+  if (value.type === "api_key") {
+    return typeof value.key === "string";
+  }
+  return false;
+}
+function parseAuthJsonFile2(authPath) {
+  let raw;
+  try {
+    raw = readFileSync9(authPath, "utf8");
+  } catch {
+    throw new Error(`unable to read ${authPath}`);
+  }
+  try {
+    const data = JSON.parse(raw);
+    if (!isRecord4(data))
+      throw new Error("invalid auth.json");
+    return data;
+  } catch {
+    throw new Error(`invalid auth.json: ${authPath}`);
+  }
+}
+function expiresFromAccessJwt2(access) {
+  const payload = decodeJwtPayload(access);
+  const exp = payload?.exp;
+  if (typeof exp === "number" && Number.isFinite(exp) && exp > 0) {
+    return exp * 1000;
+  }
+  return;
+}
+function accountIdFromIdToken2(idToken) {
+  const payload = decodeJwtPayload(idToken);
+  if (!payload)
+    return;
+  const auth = payload["https://api.openai.com/auth"];
+  if (isRecord4(auth)) {
+    const id = auth.chatgpt_account_id;
+    if (typeof id === "string" && id.length > 0)
+      return id;
+  }
+  if (typeof payload.chatgpt_account_id === "string" && payload.chatgpt_account_id.length > 0) {
+    return payload.chatgpt_account_id;
+  }
+  return;
+}
+function credentialFromNativeCodexAuth2(data) {
+  if (!isRecord4(data))
+    return;
+  const tokens = data.tokens;
+  if (!isRecord4(tokens))
+    return;
+  const access = tokens.access_token;
+  const refresh = tokens.refresh_token;
+  if (typeof access !== "string" || access.length === 0)
+    return;
+  if (typeof refresh !== "string" || refresh.length === 0)
+    return;
+  const idToken = typeof tokens.id_token === "string" && tokens.id_token.length > 0 ? tokens.id_token : undefined;
+  let accountId = typeof tokens.account_id === "string" && tokens.account_id.length > 0 ? tokens.account_id : undefined;
+  if (!accountId && idToken)
+    accountId = accountIdFromIdToken2(idToken);
+  const expires = expiresFromAccessJwt2(access) ?? 0;
+  return {
+    type: "oauth",
+    access,
+    refresh,
+    expires,
+    ...accountId ? { accountId } : {},
+    ...idToken ? { idToken } : {}
+  };
+}
+function readCredentialFromAuthJson2(authPath, provider, opts) {
+  const data = parseAuthJsonFile2(authPath);
+  for (const key of authJsonKeysForProvider(provider)) {
+    const slot = data[key];
+    if (!isStoredCredential2(slot))
+      continue;
+    return selectImportAccount2(slot, provider, authPath, opts?.account ?? "latest").credential;
+  }
+  if (provider === "openai-codex" || provider === "chatgpt-subscription") {
+    const native = credentialFromNativeCodexAuth2(data);
+    if (native)
+      return native;
+  }
+  return missingProvider2(data, provider, authPath);
+}
+function missingProvider2(data, provider, authPath) {
+  const available = Object.keys(data).filter((key) => isStoredCredential2(data[key]));
+  const looked = authJsonKeysForProvider(provider).join(", ");
+  throw new Error(`provider ${provider} not found in ${authPath} (looked for ${looked}; available: ${available.join(", ") || "none"})`);
+}
+function latestLoginSlotName2(linked) {
+  let best = 0;
+  let name;
+  for (const item of linked) {
+    if (!isRecord4(item) || typeof item.name !== "string")
+      continue;
+    const match = /^login-(\d+)$/.exec(item.name);
+    if (!match)
+      continue;
+    const n = Number(match[1]);
+    if (n > best) {
+      best = n;
+      name = item.name;
+    }
+  }
+  return name;
+}
+function credentialFromSlotEntry2(parent, entry) {
+  if (isStoredCredential2(entry))
+    return entry;
+  if (!isRecord4(entry) || parent.type !== "oauth" || typeof entry.access !== "string") {
+    throw new Error("selected accounts[] entry is not a credential");
+  }
+  const refresh = typeof entry.refresh === "string" ? entry.refresh : parent.refresh;
+  const expires = typeof entry.expires === "number" ? entry.expires : parent.expires;
+  return {
+    type: "oauth",
+    access: entry.access,
+    refresh,
+    expires,
+    ...parent.accountId ? { accountId: parent.accountId } : {},
+    ...typeof entry.idToken === "string" ? { idToken: entry.idToken } : parent.idToken ? { idToken: parent.idToken } : {}
+  };
+}
+function selectImportAccount2(slot, provider, authPath, account = "latest") {
+  if (account === "primary")
+    return { used: "primary", credential: slot };
+  const linked = slot.accounts;
+  if (account === "latest") {
+    const name = Array.isArray(linked) ? latestLoginSlotName2(linked) : undefined;
+    if (!name)
+      return { used: "primary", credential: slot };
+    return { used: name, credential: selectLinkedAccount2(slot, provider, authPath, name) };
+  }
+  return { used: account, credential: selectLinkedAccount2(slot, provider, authPath, account) };
+}
+function selectLinkedAccount2(slot, provider, authPath, account) {
+  const linked = slot.accounts;
+  if (!Array.isArray(linked) || linked.length === 0) {
+    throw new Error(`${provider} in ${authPath} has no accounts[] array; --account cannot be applied`);
+  }
+  const selected = account === "latest" ? latestLoginSlotName2(linked) : account;
+  if (!selected) {
+    throw new Error(`${provider} in ${authPath} has no login-N slot to use as latest`);
+  }
+  const idx = /^\d+$/.test(selected) ? Number(selected) - 1 : linked.findIndex((a) => {
+    return isRecord4(a) && a["name"] === selected;
+  });
+  if (idx < 0 || idx >= linked.length) {
+    const names = linked.map((a, i) => isRecord4(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`).join(", ");
+    throw new Error(`--account ${account} not found in ${provider} accounts[] (available: ${names})`);
+  }
+  return credentialFromSlotEntry2(slot, linked[idx]);
+}
+
+// src/xai-relogin-heal.ts
+function findXaiReloginHealCandidate(store, authPaths, now = Date.now()) {
+  const preferred = store.getState().providers.xai?.preferred;
+  if (!preferred)
+    return;
+  const vault = store.getVaultCredential("xai", preferred);
+  const vaultSubject = subjectFromCredential(vault);
+  if (!vaultSubject)
+    return;
+  for (const authPath of authPaths) {
+    let primary;
+    let latest;
+    try {
+      primary = readCredentialFromAuthJson2(authPath, "xai", { account: "primary" });
+      latest = readCredentialFromAuthJson2(authPath, "xai", { account: "latest" });
+    } catch (error) {
+      if (error instanceof Error)
+        continue;
+      throw error;
+    }
+    if (primary.type !== "oauth" || latest.type !== "oauth")
+      continue;
+    const primarySubject = subjectFromCredential(primary);
+    const latestSubject = subjectFromCredential(latest);
+    if (!primarySubject || primarySubject !== latestSubject || latestSubject !== vaultSubject || latest.expires <= primary.expires || latest.expires <= now + 5 * 60 * 1000 || latest.refresh === primary.refresh) {
+      continue;
+    }
+    return { authPath, profile: preferred, credential: latest };
+  }
+  return;
+}
+
 // src/cli.ts
 var __dirname2 = dirname5(fileURLToPath(import.meta.url));
 function readPackageVersion() {
@@ -2711,7 +2923,7 @@ function readPackageVersion() {
   if (!existsSync9(pkgPath))
     return "unknown";
   try {
-    const parsed = JSON.parse(readFileSync9(pkgPath, "utf8"));
+    const parsed = JSON.parse(readFileSync10(pkgPath, "utf8"));
     return parsed.version ?? "unknown";
   } catch {
     return "unknown";
@@ -2725,7 +2937,7 @@ copies the active profile into live auth.json slot(s), and tracks routing state.
 OAR routes and copies credentials; it does NOT automate OAuth login and does NOT
 revoke provider refresh tokens.
 
-Tip: run \`oar\` with no args for a quick status snapshot (not this help text).
+Tip: run \`oar\` with no args for status and freshly fetched remote usage.
 
 STATUS TABLE (oar / oar status)
   AUTH     Local/vault metadata from import or last check (valid|expired|revoked|unknown).
@@ -2741,7 +2953,7 @@ STATUS TABLE (oar / oar status)
 COMMANDS
 
   oar
-      Quick status snapshot when the daemon is up; same table as \`oar status\`.
+      Quick status snapshot and freshly fetched remote usage when the daemon is up.
       On daemon failure, prints this help plus a start hint.
 
   oar status [--json]
@@ -2771,8 +2983,9 @@ COMMANDS
       records stay.
 
   oar use <provider> <profile> [--force]
-      Switch live auth slot to this vault profile. Refreshes remote usage first;
-      refuses switch at 0% remaining unless --force. No OMO restart needed.
+      Refreshes expired Codex/xAI OAuth in the vault without activating it,
+      then checks remote usage and syncs quota state before switching.
+      Refuses switch at 0% remaining unless --force. No OMO restart needed.
       Prints each sink id/status/path/detail (no credentials).
 
   oar auto <provider> on|off
@@ -2828,8 +3041,8 @@ COMMANDS
       --no-remote    Skip remote usage fetches.
 
   oar usage [provider] [profile] [--refresh]
-      Remote quota table for openai-codex and xai (5H/WK/Grok %). OK = request ok.
-      Omit args to list all supported accounts. Updates daemon on 0% exhaustion.
+      Always fetch and show remote quota for openai-codex and xai (5H/WK/Grok %).
+      OK = request ok. Omit args to list all supported accounts.
 
   oar recommend [--refresh] [--json] [provider...]
       Rank profiles by eligibility + remote remaining %. Optional provider filter.
@@ -2938,6 +3151,84 @@ async function withClient(fn) {
 async function req(request) {
   return withClient((c) => c.request(request));
 }
+var COMMANDS_WITH_OWN_REMOTE_USAGE = new Set([
+  "recommand",
+  "recommend",
+  "usage",
+  "use"
+]);
+async function healXaiRelogin(store) {
+  const candidate = findXaiReloginHealCandidate(store, resolveActiveAuthPaths2());
+  if (!candidate)
+    return false;
+  try {
+    const imported = await req({
+      protocol: 1,
+      action: "import-credential",
+      provider: "xai",
+      profile: candidate.profile,
+      credential: candidate.credential
+    });
+    if (!imported.ok) {
+      console.error(`warning: could not import fresh xAI login: ${imported.error}`);
+      return false;
+    }
+    const activated = await req({
+      protocol: 1,
+      action: "activate",
+      provider: "xai",
+      profile: candidate.profile
+    });
+    if (!activated.ok) {
+      console.error(`warning: could not activate fresh xAI login: ${activated.error}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error(`warning: could not auto-heal xAI re-login: ${error.message}`);
+      return false;
+    }
+    throw error;
+  }
+}
+async function refreshQuotaBeforeCommand(cmd, rest) {
+  if (cmd === "daemon" || cmd === "panel" && rest.includes("--no-remote"))
+    return;
+  const root = process.env.OAR_HOME ?? defaultOarRoot2();
+  let store = new OarStore({ rootDir: root });
+  if (await healXaiRelogin(store)) {
+    store = new OarStore({ rootDir: root });
+  }
+  const targets = store.listAccounts().filter((account) => isCodexProvider(account.provider) || isXaiProvider(account.provider)).map((account) => ({ provider: account.provider, profile: account.profile }));
+  for (const target of targets) {
+    const credential = store.getVaultCredential(target.provider, target.profile);
+    if (credential?.type !== "oauth" || Date.now() + 5 * 60 * 1000 < credential.expires) {
+      continue;
+    }
+    try {
+      await req({
+        protocol: 1,
+        action: "refresh",
+        provider: target.provider,
+        profile: target.profile,
+        activate: false
+      });
+    } catch (error) {
+      if (error instanceof Error)
+        continue;
+      throw error;
+    }
+  }
+  const commandFetchesUsage = cmd === undefined || COMMANDS_WITH_OWN_REMOTE_USAGE.has(cmd) || cmd === "panel" && rest.includes("--refresh");
+  if (commandFetchesUsage || targets.length === 0)
+    return;
+  await fetchRemoteUsageForAccounts(store, targets, {
+    root,
+    force: true,
+    maxAgeMs: 0
+  });
+}
 async function removeOne(provider, profile) {
   const res = await req({ protocol: 1, action: "remove", provider, profile });
   if (!res.ok)
@@ -3013,7 +3304,7 @@ async function daemonStop() {
     console.log("oar-daemon not running (no pid file)");
     return;
   }
-  const pid = Number(readFileSync9(pidPath, "utf8").trim());
+  const pid = Number(readFileSync10(pidPath, "utf8").trim());
   if (!Number.isFinite(pid))
     throw new Error("invalid pid file");
   try {
@@ -3050,6 +3341,7 @@ async function main(argv) {
     console.log(usage());
     return;
   }
+  await refreshQuotaBeforeCommand(cmd, rest);
   if (!cmd) {
     try {
       const res = await req({ protocol: 1, action: "status" });
@@ -3057,6 +3349,14 @@ async function main(argv) {
         throw new Error(res.error);
       const data = res.data;
       printStatus(data);
+      const root = process.env.OAR_HOME ?? defaultOarRoot2();
+      const store = new OarStore({ rootDir: root });
+      const targets = data.accounts.filter((account) => isCodexProvider(account.provider) || isXaiProvider(account.provider)).map((account) => ({ provider: account.provider, profile: account.profile }));
+      if (targets.length > 0) {
+        const rows = await fetchRemoteUsageForAccounts(store, targets, { root, force: true });
+        console.log("");
+        console.log(formatUsageTable(rows));
+      }
     } catch (error) {
       console.log(usage());
       console.error(`
@@ -3144,6 +3444,19 @@ async function main(argv) {
       }
       const root = process.env.OAR_HOME ?? defaultOarRoot2();
       const store = new OarStore({ rootDir: root });
+      const credential = store.getVaultCredential(provider, profile);
+      if ((isCodexProvider(provider) || isXaiProvider(provider)) && credential?.type === "oauth" && Date.now() + 5 * 60 * 1000 >= credential.expires) {
+        const refreshed = await req({
+          protocol: 1,
+          action: "refresh",
+          provider,
+          profile,
+          activate: false
+        });
+        if (!refreshed.ok) {
+          throw new Error(`REFUSED: could not refresh ${provider}/${profile} before checking quota: ${refreshed.error}`);
+        }
+      }
       try {
         const u = await fetchRemoteUsage(store, provider, profile, {
           root,
@@ -3152,8 +3465,8 @@ async function main(argv) {
         });
         if (u.ok) {
           const w = u.windows.find((x) => x.remainingPercent != null) ?? u.windows[0];
-          if (w?.remainingPercent != null && w.remainingPercent <= 0) {
-            console.error(`WARNING: ${provider}/${profile} remote remaining is 0% (${w.label ?? w.kind}).`);
+          if (w?.remainingPercent != null && (w.remainingPercent <= 0 || w.limitReached)) {
+            console.error(`WARNING: ${provider}/${profile} remote quota is exhausted (${w.remainingPercent}% remaining, ${w.label ?? w.kind}).`);
             if (w.resetsAt)
               console.error(`  resets ~ ${w.resetsAt}`);
             try {
@@ -3167,12 +3480,43 @@ async function main(argv) {
               });
             } catch {}
             if (!force) {
-              throw new Error(`REFUSED: not switching to ${provider}/${profile} at 0%. ` + `Auto failover will also skip it. Use another profile, or --force to override.`);
+              throw new Error(`REFUSED: not switching to ${provider}/${profile}; remote quota is exhausted ` + `(${w.remainingPercent}% remaining). ` + `Auto failover will also skip it. Use another profile, or --force to override.`);
             }
             console.error("  --force set: switching anyway.");
-          } else if (w?.remainingPercent != null && w.remainingPercent <= 5) {
-            console.log(`warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}).`);
+          } else if (w?.remainingPercent != null) {
+            try {
+              const reported = await req({
+                protocol: 1,
+                action: "report",
+                provider,
+                account: profile,
+                result: "QUOTA_AVAILABLE"
+              });
+              if (!reported.ok)
+                throw new Error(reported.error);
+            } catch (error) {
+              throw new Error(`REFUSED: could not sync current quota for ${provider}/${profile}: ${error instanceof Error ? error.message : error}`);
+            }
+            if (w.remainingPercent <= 5) {
+              console.log(`warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}).`);
+            }
           }
+        } else if (/\bHTTP 401\b/.test(u.error ?? "")) {
+          try {
+            const reported = await req({
+              protocol: 1,
+              action: "report",
+              provider,
+              account: profile,
+              result: "AUTH_EXPIRED",
+              detail: "remote_usage_http_401"
+            });
+            if (!reported.ok)
+              throw new Error(reported.error);
+          } catch (error) {
+            throw new Error(`REFUSED: usage authentication failed for ${provider}/${profile} (HTTP 401); state update failed: ${error instanceof Error ? error.message : error}`);
+          }
+          throw new Error(`REFUSED: usage authentication failed for ${provider}/${profile} (HTTP 401). Refresh or re-login, then try again.`);
         }
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("REFUSED:"))
@@ -3438,7 +3782,6 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
     case "usage": {
       rejectUnknownFlags(rest, new Set(["--refresh"]));
       await warnIfDaemonDown("usage");
-      const refresh = rest.includes("--refresh");
       const args = rest.filter((a) => !a.startsWith("--"));
       const root = process.env.OAR_HOME ?? defaultOarRoot2();
       const store = new OarStore({ rootDir: root });
@@ -3451,8 +3794,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       }
       const rows = await fetchRemoteUsageForAccounts(store, targets, {
         root,
-        force: refresh || true,
-        maxAgeMs: 0
+        force: true
       });
       rows.sort((a, b) => a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider));
       for (const u of rows) {

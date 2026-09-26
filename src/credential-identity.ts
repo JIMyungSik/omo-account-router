@@ -59,3 +59,10 @@ export function loginFromCredential(cred: StoredCredential | undefined): string 
   }
   return emailFromJwtPayload(decodeJwtPayload(cred.access));
 }
+
+/** Stable OAuth subject for same-account comparisons. Never returns or logs token bytes. */
+export function subjectFromCredential(cred: StoredCredential | undefined): string | undefined {
+  if (!cred || cred.type !== "oauth") return undefined;
+  const subject = decodeJwtPayload(cred.access)?.sub;
+  return typeof subject === "string" && subject.length > 0 ? subject : undefined;
+}

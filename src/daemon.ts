@@ -16,6 +16,7 @@ import { OarRouter } from "./router.ts";
 import type { OarStore } from "./store.ts";
 import type { StoredCredential } from "./types.ts";
 import { loginFromXaiUserinfo } from "./xai-login.ts";
+import { findXaiReloginHealCandidate } from "./xai-relogin-heal.ts";
 
 export type DaemonOptions = {
   store: OarStore;
@@ -152,6 +153,26 @@ export class OarDaemon {
         this.store.upsertAccount({ ...latest, login });
       }),
     );
+  }
+
+  private async healXaiRelogin(): Promise<boolean> {
+    const candidate = findXaiReloginHealCandidate(
+      this.store,
+      this.activator.getAuthPaths(),
+    );
+    if (!candidate) return false;
+
+    this.store.putVaultCredential("xai", candidate.profile, candidate.credential);
+    await this.activator.activate("xai", candidate.profile);
+    this.router.use("xai", candidate.profile);
+    this.events.append({
+      ts: new Date().toISOString(),
+      event: "xai_relogin_heal",
+      provider: "xai",
+      profile: candidate.profile,
+      reason: "same_subject_newer_login",
+    });
+    return true;
   }
 
   async dispatch(req: OarRequest): Promise<OarResponse> {
@@ -442,7 +463,7 @@ export class OarDaemon {
             }
             const result = await adapter.executeRefresh!(account, latest);
             this.store.putVaultCredential(req.provider, req.profile, result.credential);
-            if (this.activateOnUse) {
+            if (this.activateOnUse && req.activate !== false) {
               await this.activator.activate(req.provider, req.profile);
             }
             return { credential: result.credential, skipped: false as const };
@@ -512,6 +533,7 @@ export class OarDaemon {
         return { ok: true, data: { provider: req.provider, profile: req.profile, ...health, live } };
       }
       case "bootstrap-auto": {
+        await this.healXaiRelogin();
         const state = this.store.getState();
         const byProvider = new Map<string, typeof state.accounts>();
         for (const a of state.accounts) {

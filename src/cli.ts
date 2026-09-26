@@ -32,6 +32,7 @@ import { auditToJson, formatAuditText, formatSubscriptionsList } from "./subscri
 import { SubscriptionsStore } from "./subscriptions/store.ts";
 import { buildRecommendations, formatRecommendTable } from "./usage/recommend.ts";
 import type { AccountRecord } from "./types.ts";
+import { findXaiReloginHealCandidate } from "./xai-relogin-heal.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -54,7 +55,7 @@ copies the active profile into live auth.json slot(s), and tracks routing state.
 OAR routes and copies credentials; it does NOT automate OAuth login and does NOT
 revoke provider refresh tokens.
 
-Tip: run \`oar\` with no args for a quick status snapshot (not this help text).
+Tip: run \`oar\` with no args for status and freshly fetched remote usage.
 
 STATUS TABLE (oar / oar status)
   AUTH     Local/vault metadata from import or last check (valid|expired|revoked|unknown).
@@ -70,7 +71,7 @@ STATUS TABLE (oar / oar status)
 COMMANDS
 
   oar
-      Quick status snapshot when the daemon is up; same table as \`oar status\`.
+      Quick status snapshot and freshly fetched remote usage when the daemon is up.
       On daemon failure, prints this help plus a start hint.
 
   oar status [--json]
@@ -100,8 +101,9 @@ COMMANDS
       records stay.
 
   oar use <provider> <profile> [--force]
-      Switch live auth slot to this vault profile. Refreshes remote usage first;
-      refuses switch at 0% remaining unless --force. No OMO restart needed.
+      Refreshes expired Codex/xAI OAuth in the vault without activating it,
+      then checks remote usage and syncs quota state before switching.
+      Refuses switch at 0% remaining unless --force. No OMO restart needed.
       Prints each sink id/status/path/detail (no credentials).
 
   oar auto <provider> on|off
@@ -157,8 +159,8 @@ COMMANDS
       --no-remote    Skip remote usage fetches.
 
   oar usage [provider] [profile] [--refresh]
-      Remote quota table for openai-codex and xai (5H/WK/Grok %). OK = request ok.
-      Omit args to list all supported accounts. Updates daemon on 0% exhaustion.
+      Always fetch and show remote quota for openai-codex and xai (5H/WK/Grok %).
+      OK = request ok. Omit args to list all supported accounts.
 
   oar recommend [--refresh] [--json] [provider...]
       Rank profiles by eligibility + remote remaining %. Optional provider filter.
@@ -269,6 +271,99 @@ async function withClient<T>(fn: (c: OarClient) => Promise<T>): Promise<T> {
 
 async function req(request: OarRequest) {
   return withClient((c) => c.request(request));
+}
+
+const COMMANDS_WITH_OWN_REMOTE_USAGE = new Set<string>([
+  "recommand",
+  "recommend",
+  "usage",
+  "use",
+]);
+
+async function healXaiRelogin(store: OarStore): Promise<boolean> {
+  const candidate = findXaiReloginHealCandidate(store, resolveActiveAuthPaths());
+  if (!candidate) return false;
+  try {
+    const imported = await req({
+      protocol: 1,
+      action: "import-credential",
+      provider: "xai",
+      profile: candidate.profile,
+      credential: candidate.credential,
+    });
+    if (!imported.ok) {
+      console.error(`warning: could not import fresh xAI login: ${imported.error}`);
+      return false;
+    }
+    const activated = await req({
+      protocol: 1,
+      action: "activate",
+      provider: "xai",
+      profile: candidate.profile,
+    });
+    if (!activated.ok) {
+      console.error(`warning: could not activate fresh xAI login: ${activated.error}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error(`warning: could not auto-heal xAI re-login: ${error.message}`);
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function refreshQuotaBeforeCommand(
+  cmd: string | undefined,
+  rest: readonly string[],
+): Promise<void> {
+  if (cmd === "daemon" || (cmd === "panel" && rest.includes("--no-remote"))) return;
+
+  const root = process.env.OAR_HOME ?? defaultOarRoot();
+  let store = new OarStore({ rootDir: root });
+  if (await healXaiRelogin(store)) {
+    store = new OarStore({ rootDir: root });
+  }
+  const targets = store
+    .listAccounts()
+    .filter((account) => isCodexProvider(account.provider) || isXaiProvider(account.provider))
+    .map((account) => ({ provider: account.provider, profile: account.profile }));
+
+  for (const target of targets) {
+    const credential = store.getVaultCredential(target.provider, target.profile);
+    if (
+      credential?.type !== "oauth" ||
+      Date.now() + 5 * 60 * 1000 < credential.expires
+    ) {
+      continue;
+    }
+    try {
+      await req({
+        protocol: 1,
+        action: "refresh",
+        provider: target.provider,
+        profile: target.profile,
+        activate: false,
+      });
+    } catch (error) {
+      if (error instanceof Error) continue;
+      throw error;
+    }
+  }
+
+  const commandFetchesUsage =
+    cmd === undefined ||
+    COMMANDS_WITH_OWN_REMOTE_USAGE.has(cmd) ||
+    (cmd === "panel" && rest.includes("--refresh"));
+  if (commandFetchesUsage || targets.length === 0) return;
+
+  await fetchRemoteUsageForAccounts(store, targets, {
+    root,
+    force: true,
+    maxAgeMs: 0,
+  });
 }
 
 async function removeOne(provider: string, profile: string): Promise<void> {
@@ -415,6 +510,7 @@ async function main(argv: string[]) {
     console.log(usage());
     return;
   }
+  await refreshQuotaBeforeCommand(cmd, rest);
   // Bare \`oar\` → friendly snapshot (not a wall of help).
   if (!cmd) {
     try {
@@ -422,6 +518,16 @@ async function main(argv: string[]) {
       if (!res.ok) throw new Error(res.error);
       const data = res.data as Parameters<typeof printStatus>[0];
       printStatus(data);
+      const root = process.env.OAR_HOME ?? defaultOarRoot();
+      const store = new OarStore({ rootDir: root });
+      const targets = data.accounts
+        .filter((account) => isCodexProvider(account.provider) || isXaiProvider(account.provider))
+        .map((account) => ({ provider: account.provider, profile: account.profile }));
+      if (targets.length > 0) {
+        const rows = await fetchRemoteUsageForAccounts(store, targets, { root, force: true });
+        console.log("");
+        console.log(formatUsageTable(rows));
+      }
     } catch (error) {
       console.log(usage());
       console.error(`\n(daemon tip: ${error instanceof Error ? error.message : error})`);
@@ -502,6 +608,25 @@ async function main(argv: string[]) {
       // Refresh usage when possible; block 0% unless --force (even if auto is on).
       const root = process.env.OAR_HOME ?? defaultOarRoot();
       const store = new OarStore({ rootDir: root });
+      const credential = store.getVaultCredential(provider, profile);
+      if (
+        (isCodexProvider(provider) || isXaiProvider(provider)) &&
+        credential?.type === "oauth" &&
+        Date.now() + 5 * 60 * 1000 >= credential.expires
+      ) {
+        const refreshed = await req({
+          protocol: 1,
+          action: "refresh",
+          provider,
+          profile,
+          activate: false,
+        });
+        if (!refreshed.ok) {
+          throw new Error(
+            `REFUSED: could not refresh ${provider}/${profile} before checking quota: ${refreshed.error}`,
+          );
+        }
+      }
       try {
         const u = await fetchRemoteUsage(store, provider, profile, {
           root,
@@ -510,9 +635,9 @@ async function main(argv: string[]) {
         });
         if (u.ok) {
           const w = u.windows.find((x) => x.remainingPercent != null) ?? u.windows[0];
-          if (w?.remainingPercent != null && w.remainingPercent <= 0) {
+          if (w?.remainingPercent != null && (w.remainingPercent <= 0 || w.limitReached)) {
             console.error(
-              `WARNING: ${provider}/${profile} remote remaining is 0% (${w.label ?? w.kind}).`,
+              `WARNING: ${provider}/${profile} remote quota is exhausted (${w.remainingPercent}% remaining, ${w.label ?? w.kind}).`,
             );
             if (w.resetsAt) console.error(`  resets ~ ${w.resetsAt}`);
             // mark daemon exhausted
@@ -530,16 +655,52 @@ async function main(argv: string[]) {
             }
             if (!force) {
               throw new Error(
-                `REFUSED: not switching to ${provider}/${profile} at 0%. ` +
+                `REFUSED: not switching to ${provider}/${profile}; remote quota is exhausted ` +
+                  `(${w.remainingPercent}% remaining). ` +
                   `Auto failover will also skip it. Use another profile, or --force to override.`,
               );
             }
             console.error("  --force set: switching anyway.");
-          } else if (w?.remainingPercent != null && w.remainingPercent <= 5) {
-            console.log(
-              `warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}).`,
+          } else if (w?.remainingPercent != null) {
+            try {
+              const reported = await req({
+                protocol: 1,
+                action: "report",
+                provider,
+                account: profile,
+                result: "QUOTA_AVAILABLE",
+              });
+              if (!reported.ok) throw new Error(reported.error);
+            } catch (error) {
+              throw new Error(
+                `REFUSED: could not sync current quota for ${provider}/${profile}: ${error instanceof Error ? error.message : error}`,
+              );
+            }
+            if (w.remainingPercent <= 5) {
+              console.log(
+                `warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}).`,
+              );
+            }
+          }
+        } else if (/\bHTTP 401\b/.test(u.error ?? "")) {
+          try {
+            const reported = await req({
+              protocol: 1,
+              action: "report",
+              provider,
+              account: profile,
+              result: "AUTH_EXPIRED",
+              detail: "remote_usage_http_401",
+            });
+            if (!reported.ok) throw new Error(reported.error);
+          } catch (error) {
+            throw new Error(
+              `REFUSED: usage authentication failed for ${provider}/${profile} (HTTP 401); state update failed: ${error instanceof Error ? error.message : error}`,
             );
           }
+          throw new Error(
+            `REFUSED: usage authentication failed for ${provider}/${profile} (HTTP 401). Refresh or re-login, then try again.`,
+          );
         }
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("REFUSED:")) throw error;
@@ -807,7 +968,6 @@ async function main(argv: string[]) {
     case "usage": {
       rejectUnknownFlags(rest, new Set(["--refresh"]));
       await warnIfDaemonDown("usage");
-      const refresh = rest.includes("--refresh");
       const args = rest.filter((a) => !a.startsWith("--"));
       const root = process.env.OAR_HOME ?? defaultOarRoot();
       const store = new OarStore({ rootDir: root });
@@ -826,8 +986,7 @@ async function main(argv: string[]) {
       }
       const rows = await fetchRemoteUsageForAccounts(store, targets, {
         root,
-        force: refresh || true,
-        maxAgeMs: 0,
+        force: true,
       });
       // stable sort: provider then profile
       rows.sort((a, b) =>

@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import { createSenpiAuthStorage } from "./senpi-auth.ts";
+import { subjectFromCredential } from "./credential-identity.ts";
 import type { OarStore } from "./store.ts";
 import type { ProfileId, ProviderId, StoredCredential } from "./types.ts";
 import { resolveActiveAuthPaths } from "./paths.ts";
@@ -272,9 +273,15 @@ export function mergeProviderSlot(
     return next;
   }
   const prev = existing as Record<string, unknown>;
-  const same =
+  const sameSecrets =
     (prev.type === "oauth" || prev.type === "api_key") &&
     credentialsSameSecrets(prev as unknown as StoredCredential, credential);
+  const previousSubject =
+    prev.type === "oauth"
+      ? subjectFromCredential(prev as unknown as StoredCredential)
+      : undefined;
+  const nextSubject = subjectFromCredential(credential);
+  const same = sameSecrets || Boolean(previousSubject && previousSubject === nextSubject);
 
   for (const [key, value] of Object.entries(prev)) {
     if (key in next) continue;

@@ -30,6 +30,17 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 Verified against **OMO `5.0.0-0.beta.42` / Senpi `2026.9.4-3`**: header-only `after_provider_response` classification, and live `auth.json` writes merge instead of replacing native multi-account fields (`accounts`).
 
+## Platforms
+
+The CLI, daemon, and vault work on macOS, Linux, and Windows. Checked on 2026-09-24 with Bun 1.3.14:
+
+| OS | How | Result |
+|----|-----|--------|
+| Linux arm64 | Docker `oven/bun:1.3.14`, `bun test` | 51 pass, 3 skip, 0 fail |
+| Ubuntu | GitHub `ubuntu-latest`, `bun test` + style check | pass ([run 35945289044](https://github.com/JIMyungSik/omo-account-router/actions/runs/35945289044)) |
+| Windows | GitHub `windows-latest`, same commands | pass (same run) |
+
+`scripts/install.sh` and the LaunchAgent are macOS only. On Linux or Windows, build with Bun or Node 22 and run `oar daemon start` yourself. The default Argo secrets path is under `~/Library/Application Support`; on other systems set `OAR_ARGO_SECRETS_PATH` if that file exists.
 
 ---
 
@@ -88,10 +99,10 @@ bash scripts/install.sh --import-auth
 
 ```bash
 # snapshot
-oar                         # quick status (no args)
-oar status
+oar                         # status + freshly fetched remote remaining %
+oar status                  # refresh credentials + quota before rendering
 oar panel --refresh         # table: live slot + local signals + remote %
-oar usage --refresh         # Codex 5h/week + Grok subscription remaining
+oar usage                   # fetch Codex 5h/week + Grok subscription remaining
 oar recommend --refresh     # ranked “what to use next”
 
 # subscription cost audit (manual monthly $ + usage heuristics)
@@ -102,6 +113,7 @@ oar subscriptions audit --refresh
 oar import-auth --all
 
 # switch account (hot)
+# expired Codex/xAI OAuth is refreshed before the quota check
 oar use xai sub
 oar use openai-codex main
 
@@ -113,6 +125,13 @@ oar use xai main --force    # override (not recommended)
 oar auto xai on
 oar auto xai off
 ```
+
+Every account-facing command refreshes expired Codex/xAI OAuth credentials and
+fetches current remote remaining percentages before it runs. Commands that
+already own a remote-usage flow (`oar`, `oar usage`, `oar panel`,
+`oar recommend`, and `oar use`) reuse that flow rather than issuing an extra
+request. Help, version, and daemon lifecycle commands remain offline-safe.
+An explicit `oar panel --no-remote` also skips credential and quota network calls.
 
 ### Second account (same provider)
 
@@ -292,16 +311,36 @@ sink: argo-grok error …/bad.json: invalid_json
 
 Sink failures do not roll back the OMO slot. Missing files are skipped, not created. Apps that cache credentials need a restart or a new session after `oar use`. Fixture/smoke checks do **not** include live authenticated GUI or paid model requests.
 
+### xAI `invalid_grant` after re-login
+
+An xAI re-login can append a fresh `login-N` entry under `auth.json`'s
+`accounts[]` while leaving the revoked top-level `default` credential active.
+OAR account-facing commands (including `bootstrap-auto`) detect this only when
+the newest slot, top-level slot, and preferred vault profile share the same JWT
+subject. OAR then imports and activates the newer slot automatically while
+preserving `accounts[]`. A different subject is never promoted.
+
+Manual fallback:
+
+```bash
+oar import-auth xai main --account latest
+oar use xai main
+oar test xai main --live
+```
+
+`latest` selects the newest `login-N` slot. `oar use` then promotes the vault
+credential into every live auth path. Do not paste or manually copy tokens.
+
 ---
 
 ## Command reference
 
 | Command | Description |
 |---------|-------------|
-| `oar` | Quick status snapshot |
-| `oar status` | Profiles + active `*` |
-| `oar panel [--refresh] [--watch N] [--json] [--xbar]` | Full dashboard table |
-| `oar usage [provider] [profile] [--refresh]` | Remaining % table |
+| `oar` | Status snapshot + freshly fetched remote remaining % |
+| `oar status` | Profiles + active `*`, after refreshing remote usage |
+| `oar panel [--refresh] [--watch N] [--json] [--xbar] [--no-remote]` | Full dashboard; fresh remote usage unless `--no-remote` |
+| `oar usage [provider] [profile] [--refresh]` | Fetch and show remaining % table |
 | `oar recommend [--refresh] [--json] [provider...]` | Ranked accounts by remaining % |
 | `oar subscriptions list` | Configured monthly plan costs |
 | `oar subscriptions set <p> <profile> --monthly-usd <n>` | Record plan cost |
@@ -416,6 +455,9 @@ dist/          shipped Node build (for npm install without Bun)
 ```
 
 Publish notes: [docs/npm-publish.md](docs/npm-publish.md)
+
+Contributions use protected `main` + pull requests only. See
+[CONTRIBUTOR.md](CONTRIBUTOR.md).
 
 ---
 

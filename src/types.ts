@@ -32,6 +32,8 @@ export type FailureType =
   | "LOCAL_ERROR"
   | "UNKNOWN";
 
+export type ReportResult = FailureType | "SUCCESS" | "QUOTA_AVAILABLE";
+
 export type OAuthCredential = {
   type: "oauth";
   access: string;
@@ -100,7 +102,7 @@ export type ResolveResponse = {
 export type ReportRequest = {
   provider: ProviderId;
   account: ProfileId;
-  result: FailureType | "SUCCESS";
+  result: ReportResult;
   retryAfterSec?: number;
   detail?: string;
 };
