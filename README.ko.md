@@ -439,6 +439,9 @@ bun run build
 
 npm 배포 메모: [docs/npm-publish.md](docs/npm-publish.md)
 
+변경은 보호된 `main`에 직접 push하지 않고 PR로만 반영합니다.
+[CONTRIBUTOR.md](CONTRIBUTOR.md)를 참고하세요.
+
 ---
 
 ## 보안·약관

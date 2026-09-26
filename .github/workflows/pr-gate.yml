@@ -62,7 +62,12 @@ jobs:
           set -eu
           body="unit=${UNIT} integration=${INTEGRATION} style=${STYLE}"
           if [ "$UNIT" = "success" ] && [ "$INTEGRATION" = "success" ] && [ "$STYLE" = "success" ]; then
-            gh pr comment "$PR" --body "Checks passed. ${body}. Grok QA/QC merges same-repo PRs after review."
+            if [ "$SAME_REPO" != "true" ]; then
+              gh pr comment "$PR" --body "Checks passed. ${body}. A maintainer must merge fork PRs."
+              exit 0
+            fi
+            gh pr comment "$PR" --body "Checks passed. ${body}. Squash-merging this same-repo PR."
+            gh pr merge "$PR" --squash --delete-branch
           else
             gh pr review "$PR" --request-changes --body "Checks failed. Fix the failing job and push again. ${body}"
             exit 1

@@ -456,6 +456,9 @@ dist/          shipped Node build (for npm install without Bun)
 
 Publish notes: [docs/npm-publish.md](docs/npm-publish.md)
 
+Contributions use protected `main` + pull requests only. See
+[CONTRIBUTOR.md](CONTRIBUTOR.md).
+
 ---
 
 ## Security & compliance
