@@ -2,9 +2,9 @@
 // @bun
 
 // src/daemon.ts
-import { chmodSync as chmodSync3, existsSync as existsSync8, mkdirSync as mkdirSync4, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { chmodSync as chmodSync4, existsSync as existsSync9, mkdirSync as mkdirSync5, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 import { createServer } from "node:net";
-import { dirname as dirname5 } from "node:path";
+import { dirname as dirname6 } from "node:path";
 
 // src/provider-alias.ts
 var PROVIDER_ALIASES = {
@@ -1700,6 +1700,442 @@ class OarRouter {
   }
 }
 
+// src/usage/cache.ts
+import { existsSync as existsSync8, mkdirSync as mkdirSync4, readFileSync as readFileSync5, renameSync as renameSync3, writeFileSync as writeFileSync3, chmodSync as chmodSync3 } from "node:fs";
+import { dirname as dirname5, join as join5 } from "node:path";
+function usageCachePath(root = defaultOarRoot()) {
+  return join5(root, "usage-cache.json");
+}
+function cacheKey(provider, profile) {
+  return `${provider}/${profile}`;
+}
+function loadUsageCache(root = defaultOarRoot()) {
+  const path = usageCachePath(root);
+  if (!existsSync8(path))
+    return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
+  try {
+    const parsed = JSON.parse(readFileSync5(path, "utf8"));
+    if (parsed?.version !== 1 || !parsed.entries) {
+      return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
+    }
+    return parsed;
+  } catch {
+    return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
+  }
+}
+function saveUsageCache(cache, root = defaultOarRoot()) {
+  const path = usageCachePath(root);
+  mkdirSync4(dirname5(path), { recursive: true, mode: 448 });
+  const tmp = `${path}.${process.pid}.tmp`;
+  const body = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    entries: cache.entries
+  };
+  writeFileSync3(tmp, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 384 });
+  renameSync3(tmp, path);
+  try {
+    chmodSync3(path, 384);
+  } catch {}
+}
+function getCachedUsage(provider, profile, opts) {
+  const root = opts?.root ?? defaultOarRoot();
+  const maxAgeMs = opts?.maxAgeMs ?? 60000;
+  const cache = loadUsageCache(root);
+  const entry = cache.entries[cacheKey(provider, profile)];
+  if (!entry)
+    return;
+  const age = Date.now() - Date.parse(entry.fetchedAt);
+  if (!Number.isFinite(age) || age > maxAgeMs)
+    return;
+  return entry;
+}
+function putCachedUsage(entry, root = defaultOarRoot()) {
+  const cache = loadUsageCache(root);
+  cache.entries[cacheKey(entry.provider, entry.profile)] = entry;
+  saveUsageCache(cache, root);
+}
+
+// src/usage/codex.ts
+var WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+function remaining(used) {
+  if (used == null || !Number.isFinite(used))
+    return null;
+  return Math.max(0, Math.min(100, Math.round((100 - used) * 10) / 10));
+}
+function kindFromSeconds(seconds) {
+  if (seconds == null || !Number.isFinite(seconds))
+    return "other";
+  if (seconds <= 6 * 3600)
+    return "session";
+  if (seconds >= 6 * 24 * 3600)
+    return "weekly";
+  return "other";
+}
+function windowFromWham(raw, label) {
+  if (!raw || typeof raw !== "object")
+    return null;
+  const w = raw;
+  const usedRaw = w.used_percent ?? w.usedPercent;
+  const used = typeof usedRaw === "number" && Number.isFinite(usedRaw) ? usedRaw : null;
+  const secRaw = w.limit_window_seconds ?? w.windowDurationMins;
+  let windowSeconds = null;
+  if (typeof w.limit_window_seconds === "number")
+    windowSeconds = w.limit_window_seconds;
+  else if (typeof w.windowDurationMins === "number")
+    windowSeconds = w.windowDurationMins * 60;
+  const resetAtRaw = w.reset_at ?? w.resetsAt;
+  let resetsAt = null;
+  if (typeof resetAtRaw === "number" && Number.isFinite(resetAtRaw)) {
+    resetsAt = new Date(resetAtRaw * (resetAtRaw < 1000000000000 ? 1000 : 1)).toISOString();
+  } else if (typeof resetAtRaw === "string") {
+    resetsAt = resetAtRaw;
+  }
+  const kind = kindFromSeconds(windowSeconds);
+  return {
+    kind,
+    usedPercent: used,
+    remainingPercent: remaining(used),
+    resetsAt,
+    windowSeconds,
+    label: label ?? (kind === "session" ? "5h" : kind === "weekly" ? "week" : "window"),
+    limitReached: Boolean(w.limit_reached ?? w.limitReached)
+  };
+}
+async function fetchCodexUsage(provider, profile, credential, opts) {
+  const fetchedAt = new Date().toISOString();
+  if (credential.type !== "oauth") {
+    return {
+      provider,
+      profile,
+      source: "codex-wham",
+      fetchedAt,
+      ok: false,
+      error: "codex usage requires oauth credential",
+      windows: []
+    };
+  }
+  const headers = {
+    Authorization: `Bearer ${credential.access}`,
+    Accept: "application/json",
+    "User-Agent": "omo-account-router/0.1"
+  };
+  if (credential.accountId) {
+    headers["ChatGPT-Account-Id"] = credential.accountId;
+  }
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  try {
+    const response = await fetchImpl(WHAM_USAGE_URL, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(15000)
+    });
+    const text = await response.text();
+    let data = {};
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        data = parsed;
+      }
+    } catch {
+      return {
+        provider,
+        profile,
+        source: "codex-wham",
+        fetchedAt,
+        ok: false,
+        error: `invalid JSON (HTTP ${response.status})`,
+        windows: []
+      };
+    }
+    if (!response.ok) {
+      return {
+        provider,
+        profile,
+        source: "codex-wham",
+        fetchedAt,
+        ok: false,
+        error: `HTTP ${response.status}`,
+        windows: []
+      };
+    }
+    const windows = [];
+    const rateLimit = data.rate_limit;
+    if (rateLimit && typeof rateLimit === "object") {
+      const rl = rateLimit;
+      const primary = windowFromWham(rl.primary_window);
+      if (primary)
+        windows.push(primary);
+      const secondary = windowFromWham(rl.secondary_window);
+      if (secondary)
+        windows.push(secondary);
+    }
+    const additional = data.additional_rate_limits;
+    if (Array.isArray(additional)) {
+      for (const item of additional) {
+        if (!item || typeof item !== "object")
+          continue;
+        const row = item;
+        const name = typeof row.limit_name === "string" ? row.limit_name : "extra";
+        const nested = row.rate_limit;
+        if (nested && typeof nested === "object") {
+          const n = nested;
+          const w = windowFromWham(n.primary_window, name);
+          if (w)
+            windows.push(w);
+        }
+      }
+    }
+    return {
+      provider,
+      profile,
+      source: "codex-wham",
+      fetchedAt,
+      ok: true,
+      windows,
+      extras: {
+        limitReached: Boolean(rateLimit && typeof rateLimit === "object" && rateLimit.limit_reached)
+      }
+    };
+  } catch (error) {
+    return {
+      provider,
+      profile,
+      source: "codex-wham",
+      fetchedAt,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      windows: []
+    };
+  }
+}
+
+// src/usage/xai-grok.ts
+var GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+function remaining2(used) {
+  if (used == null || !Number.isFinite(used))
+    return null;
+  return Math.max(0, Math.min(100, Math.round((100 - used) * 10) / 10));
+}
+async function fetchXaiGrokSubscriptionUsage(provider, profile, credential, opts) {
+  const fetchedAt = new Date().toISOString();
+  if (credential.type !== "oauth") {
+    return {
+      provider,
+      profile,
+      source: "grok-billing",
+      fetchedAt,
+      ok: false,
+      error: "xai grok subscription usage requires oauth credential",
+      windows: []
+    };
+  }
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  try {
+    const response = await fetchImpl(GROK_BILLING_URL, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${credential.access}`,
+        "x-xai-token-auth": "xai-grok-cli",
+        Accept: "application/json",
+        "User-Agent": "GrokCLI/1.0.4"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+    const text = await response.text();
+    let data = {};
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        data = parsed;
+      }
+    } catch {
+      return {
+        provider,
+        profile,
+        source: "grok-billing",
+        fetchedAt,
+        ok: false,
+        error: `invalid JSON (HTTP ${response.status})`,
+        windows: []
+      };
+    }
+    if (!response.ok) {
+      return {
+        provider,
+        profile,
+        source: "grok-billing",
+        fetchedAt,
+        ok: false,
+        error: `HTTP ${response.status}`,
+        windows: []
+      };
+    }
+    const config = data.config && typeof data.config === "object" ? data.config : data;
+    const usedRaw = config.creditUsagePercent;
+    const used = typeof usedRaw === "number" && Number.isFinite(usedRaw) ? usedRaw : null;
+    const period = config.currentPeriod;
+    let resetsAt = null;
+    let windowSeconds = null;
+    let periodType;
+    if (period && typeof period === "object") {
+      const p = period;
+      periodType = typeof p.type === "string" ? p.type : undefined;
+      if (typeof p.end === "string")
+        resetsAt = p.end;
+      if (typeof p.start === "string" && typeof p.end === "string") {
+        const ms = Date.parse(p.end) - Date.parse(p.start);
+        if (Number.isFinite(ms) && ms > 0)
+          windowSeconds = Math.round(ms / 1000);
+      }
+    }
+    if (!resetsAt && typeof config.billingPeriodEnd === "string") {
+      resetsAt = config.billingPeriodEnd;
+    }
+    const kind = periodType?.includes("WEEKLY") || windowSeconds != null && windowSeconds >= 6 * 24 * 3600 ? "weekly" : "period";
+    const windows = [
+      {
+        kind,
+        usedPercent: used,
+        remainingPercent: remaining2(used),
+        resetsAt,
+        windowSeconds,
+        label: "grok",
+        limitReached: used != null && used >= 100
+      }
+    ];
+    const productUsage = config.productUsage;
+    if (Array.isArray(productUsage)) {
+      for (const row of productUsage) {
+        if (!row || typeof row !== "object")
+          continue;
+        const r = row;
+        const product = typeof r.product === "string" ? r.product : "product";
+        const pu = typeof r.usagePercent === "number" ? r.usagePercent : null;
+        if (product.toLowerCase() === "grokbuild" && pu === used)
+          continue;
+        windows.push({
+          kind: "other",
+          usedPercent: pu,
+          remainingPercent: remaining2(pu),
+          resetsAt,
+          label: product,
+          limitReached: pu != null && pu >= 100
+        });
+      }
+    }
+    return {
+      provider,
+      profile,
+      source: "grok-billing",
+      fetchedAt,
+      ok: true,
+      windows,
+      extras: {
+        periodType,
+        prepaidBalance: config.prepaidBalance?.val
+      }
+    };
+  } catch (error) {
+    return {
+      provider,
+      profile,
+      source: "grok-billing",
+      fetchedAt,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      windows: []
+    };
+  }
+}
+
+// src/usage/fetch.ts
+function applyUsageToAccountState(store, usage) {
+  const account = store.getAccount(usage.provider, usage.profile);
+  if (!account || !usage.ok)
+    return;
+  const primary = usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
+  if (!primary || primary.remainingPercent == null)
+    return;
+  if (primary.remainingPercent <= 0 || primary.limitReached) {
+    const next = {
+      ...account,
+      availability: "QUOTA_EXHAUSTED",
+      reason: `remote_usage_${primary.label ?? primary.kind}_0`,
+      lastChecked: usage.fetchedAt,
+      until: primary.resetsAt ?? null
+    };
+    store.upsertAccount(next);
+  } else if (account.availability === "QUOTA_EXHAUSTED" && primary.remainingPercent > 5) {
+    store.upsertAccount({
+      ...account,
+      availability: "AVAILABLE",
+      reason: undefined,
+      until: null,
+      lastChecked: usage.fetchedAt
+    });
+  }
+}
+async function fetchRemoteUsage(store, provider, profile, opts) {
+  const root = opts?.root ?? store.rootDir ?? defaultOarRoot();
+  const maxAgeMs = opts?.maxAgeMs ?? 60000;
+  if (!opts?.force) {
+    const cached2 = getCachedUsage(provider, profile, { maxAgeMs, root });
+    if (cached2)
+      return cached2;
+  }
+  const cred = store.getVaultCredential(provider, profile);
+  if (!cred) {
+    const miss = {
+      provider,
+      profile,
+      source: "none",
+      fetchedAt: new Date().toISOString(),
+      ok: false,
+      error: "missing vault credential",
+      windows: []
+    };
+    putCachedUsage(miss, root);
+    return miss;
+  }
+  let result;
+  if (resolveProvider(provider) === "chatgpt-subscription") {
+    result = await fetchCodexUsage(provider, profile, cred, { fetchImpl: opts?.fetchImpl });
+  } else if (resolveProvider(provider) === "xai") {
+    result = await fetchXaiGrokSubscriptionUsage(provider, profile, cred, {
+      fetchImpl: opts?.fetchImpl
+    });
+  } else {
+    result = {
+      provider,
+      profile,
+      source: "unsupported",
+      fetchedAt: new Date().toISOString(),
+      ok: false,
+      error: `no remote usage adapter for ${provider}`,
+      windows: []
+    };
+  }
+  putCachedUsage(result, root);
+  applyUsageToAccountState(store, result);
+  return result;
+}
+async function fetchRemoteUsageForAccounts(store, accounts, opts) {
+  const out = [];
+  const queue = [...accounts];
+  const workers = Math.min(3, queue.length || 1);
+  async function worker() {
+    while (queue.length) {
+      const next = queue.shift();
+      if (!next)
+        return;
+      out.push(await fetchRemoteUsage(store, next.provider, next.profile, opts));
+    }
+  }
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return out;
+}
+
 // src/xai-login.ts
 var XAI_USERINFO_URL = "https://auth.x.ai/oauth2/userinfo";
 async function loginFromXaiUserinfo(cred, opts) {
@@ -1728,7 +2164,7 @@ async function loginFromXaiUserinfo(cred, opts) {
 }
 
 // src/import-all.ts
-import { readFileSync as readFileSync5 } from "node:fs";
+import { readFileSync as readFileSync6 } from "node:fs";
 function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1753,7 +2189,7 @@ function isStoredCredential(value) {
 function parseAuthJsonFile(authPath) {
   let raw;
   try {
-    raw = readFileSync5(authPath, "utf8");
+    raw = readFileSync6(authPath, "utf8");
   } catch {
     throw new Error(`unable to read ${authPath}`);
   }
@@ -1970,8 +2406,8 @@ class OarDaemon {
     return this.leases;
   }
   async start() {
-    mkdirSync4(dirname5(this.socketPath), { recursive: true, mode: 448 });
-    if (existsSync8(this.socketPath)) {
+    mkdirSync5(dirname6(this.socketPath), { recursive: true, mode: 448 });
+    if (existsSync9(this.socketPath)) {
       try {
         unlinkSync(this.socketPath);
       } catch {}
@@ -1981,12 +2417,12 @@ class OarDaemon {
       this.server.once("error", reject);
       this.server.listen(this.socketPath, () => {
         try {
-          chmodSync3(this.socketPath, 384);
+          chmodSync4(this.socketPath, 384);
         } catch {}
         resolve();
       });
     });
-    writeFileSync3(`${this.socketPath}.pid`, String(process.pid), { mode: 384 });
+    writeFileSync4(`${this.socketPath}.pid`, String(process.pid), { mode: 384 });
     this.events.append({ ts: new Date().toISOString(), event: "daemon_start", pid: process.pid });
   }
   async stop() {
@@ -1996,13 +2432,13 @@ class OarDaemon {
       this.server.close(() => resolve());
     });
     this.server = null;
-    if (existsSync8(this.socketPath)) {
+    if (existsSync9(this.socketPath)) {
       try {
         unlinkSync(this.socketPath);
       } catch {}
     }
     const pidPath = `${this.socketPath}.pid`;
-    if (existsSync8(pidPath)) {
+    if (existsSync9(pidPath)) {
       try {
         unlinkSync(pidPath);
       } catch {}
@@ -2060,6 +2496,50 @@ class OarDaemon {
       reason: "same_subject_newer_login"
     });
     return true;
+  }
+  async fetchVerifiedPositiveProfiles(provider, currentProfile) {
+    const targets = this.store.listAccounts(provider).filter((account) => account.profile !== currentProfile).map((account) => ({ provider: account.provider, profile: account.profile }));
+    const rows = await fetchRemoteUsageForAccounts(this.store, targets, {
+      root: this.store.rootDir,
+      force: true,
+      maxAgeMs: 0
+    });
+    const positive = new Set;
+    for (const row of rows) {
+      if (!row.ok)
+        continue;
+      const primary = row.windows.find((window) => window.remainingPercent != null) ?? row.windows[0];
+      if (!primary || primary.remainingPercent == null)
+        continue;
+      if (primary.remainingPercent > 0 && !primary.limitReached) {
+        positive.add(row.profile);
+        this.router.reportResult({
+          provider: row.provider,
+          account: row.profile,
+          result: "QUOTA_AVAILABLE",
+          detail: `remote_usage_${primary.label ?? primary.kind}_${primary.remainingPercent}`
+        });
+      } else {
+        this.router.reportResult({
+          provider: row.provider,
+          account: row.profile,
+          result: "QUOTA_EXHAUSTED",
+          detail: `remote_usage_${primary.label ?? primary.kind}_0`
+        });
+      }
+    }
+    return positive;
+  }
+  selectVerifiedFailover(provider, currentProfile, verifiedPositiveProfiles) {
+    return this.store.listAccounts(provider).filter((account) => {
+      return account.profile !== currentProfile && verifiedPositiveProfiles.has(account.profile) && isEligible(account);
+    }).sort((a, b) => {
+      if (a.priority !== b.priority)
+        return a.priority - b.priority;
+      const aUsed = a.lastUsedAt ? Date.parse(a.lastUsedAt) : 0;
+      const bUsed = b.lastUsedAt ? Date.parse(b.lastUsedAt) : 0;
+      return aUsed - bUsed || a.profile.localeCompare(b.profile);
+    })[0]?.profile;
   }
   async dispatch(req) {
     if (!req || req.protocol !== 1) {
@@ -2123,6 +2603,36 @@ class OarDaemon {
           ok: true,
           data: { provider: req.provider, mode: req.enabled ? "auto" : "manual", autoFailover: req.enabled }
         };
+      case "order": {
+        const accounts = this.store.listAccounts(req.provider);
+        if (accounts.length === 0) {
+          return { ok: false, error: `no accounts for ${req.provider}` };
+        }
+        if (req.profiles) {
+          const unique2 = new Set(req.profiles);
+          const known = new Set(accounts.map((account) => account.profile));
+          if (unique2.size !== req.profiles.length || req.profiles.length !== accounts.length || req.profiles.some((profile) => !known.has(profile))) {
+            return {
+              ok: false,
+              error: `order must list every ${req.provider} profile exactly once ` + `(available: ${[...known].join(", ")})`
+            };
+          }
+          req.profiles.forEach((profile, index) => {
+            const account = this.store.getAccount(req.provider, profile);
+            if (!account)
+              return;
+            this.store.upsertAccount({ ...account, priority: (index + 1) * 100 });
+          });
+          this.events.append({
+            ts: new Date().toISOString(),
+            event: "order",
+            provider: req.provider,
+            reason: req.profiles.join(",")
+          });
+        }
+        const ordered = this.store.listAccounts(req.provider).sort((a, b) => a.priority - b.priority || a.profile.localeCompare(b.profile)).map((account) => ({ profile: account.profile, priority: account.priority }));
+        return { ok: true, data: { provider: req.provider, profiles: ordered } };
+      }
       case "mode":
         this.router.setMode(req.provider, req.mode);
         return { ok: true, data: { provider: req.provider, mode: req.mode } };
@@ -2172,18 +2682,24 @@ class OarDaemon {
         ]);
         const autoOn = policy.autoFailover && (policy.mode === "auto" || process.env.OAR_FORCE_AUTO === "1");
         let failover;
-        if (this.activateOnUse && autoOn && typeof req.result === "string" && failoverResults.has(req.result)) {
-          const next = this.router.resolve({ provider: req.provider });
-          if (next.status === "available" && next.profile && next.profile !== req.account) {
+        if (this.activateOnUse && autoOn && policy.preferred === req.account && typeof req.result === "string" && failoverResults.has(req.result)) {
+          let nextProfile;
+          if (req.result === "QUOTA_EXHAUSTED") {
+            nextProfile = this.selectVerifiedFailover(req.provider, req.account, req.verifiedPositiveProfiles ? new Set(req.verifiedPositiveProfiles) : await this.fetchVerifiedPositiveProfiles(req.provider, req.account));
+          } else {
+            const next = this.router.resolve({ provider: req.provider });
+            nextProfile = next.status === "available" ? next.profile : undefined;
+          }
+          if (nextProfile && nextProfile !== req.account) {
             try {
-              this.router.use(req.provider, next.profile);
-              await this.activator.activate(req.provider, next.profile);
-              failover = { from: req.account, to: next.profile };
+              this.router.use(req.provider, nextProfile);
+              await this.activator.activate(req.provider, nextProfile);
+              failover = { from: req.account, to: nextProfile };
               this.events.append({
                 ts: new Date().toISOString(),
                 event: "failover",
                 provider: req.provider,
-                profile: next.profile,
+                profile: nextProfile,
                 reason: `from ${req.account} (${String(req.result)})`
               });
             } catch {}
@@ -2454,16 +2970,16 @@ class OarDaemon {
 }
 
 // src/paths.ts
-import { existsSync as existsSync9 } from "node:fs";
+import { existsSync as existsSync10 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 function defaultOarRoot2(env = process.env) {
   if (env.OAR_HOME)
     return env.OAR_HOME;
-  return join5(homedir4(), ".oar");
+  return join6(homedir4(), ".oar");
 }
 function oarSocketPath(root = defaultOarRoot2()) {
-  return join5(root, "oar.sock");
+  return join6(root, "oar.sock");
 }
 function unique2(paths) {
   const out = [];
@@ -2483,33 +2999,33 @@ function resolveActiveAuthPaths2(env = process.env, home = homedir4()) {
     env.PI_CODING_AGENT_DIR
   ].filter((v) => typeof v === "string" && v.length > 0);
   const known = knownAuthJsonCandidates2(home);
-  const existing = known.filter((p) => existsSync9(p));
-  const selected = envDirs.length > 0 ? envDirs.map((dir) => join5(dir, "auth.json")) : [];
+  const existing = known.filter((p) => existsSync10(p));
+  const selected = envDirs.length > 0 ? envDirs.map((dir) => join6(dir, "auth.json")) : [];
   const targets = unique2([...selected, ...existing]);
   if (targets.length > 0)
     return targets;
-  return [join5(home, ".omo", "agent", "auth.json")];
+  return [join6(home, ".omo", "agent", "auth.json")];
 }
 function knownAuthJsonCandidates2(home) {
   return unique2([
-    join5(home, ".omo", "agent", "auth.json"),
-    join5(home, ".omo", "auth.json"),
-    join5(home, ".senpi", "agent", "auth.json"),
-    join5(home, ".senpi", "remote-agent", "auth.json")
+    join6(home, ".omo", "agent", "auth.json"),
+    join6(home, ".omo", "auth.json"),
+    join6(home, ".senpi", "agent", "auth.json"),
+    join6(home, ".senpi", "remote-agent", "auth.json")
   ]);
 }
 
 // src/store.ts
 import {
-  chmodSync as chmodSync4,
-  existsSync as existsSync10,
-  mkdirSync as mkdirSync5,
-  readFileSync as readFileSync6,
-  renameSync as renameSync3,
+  chmodSync as chmodSync5,
+  existsSync as existsSync11,
+  mkdirSync as mkdirSync6,
+  readFileSync as readFileSync7,
+  renameSync as renameSync4,
   unlinkSync as unlinkSync2,
-  writeFileSync as writeFileSync4
+  writeFileSync as writeFileSync5
 } from "node:fs";
-import { dirname as dirname6, join as join6 } from "node:path";
+import { dirname as dirname7, join as join7 } from "node:path";
 var DEFAULT_POLICY = {
   mode: "manual",
   autoFailover: false
@@ -2518,12 +3034,12 @@ function emptyState() {
   return { version: 1, providers: {}, accounts: [], updatedAt: new Date().toISOString() };
 }
 function atomicWriteJson2(path, data, mode = 384) {
-  mkdirSync5(dirname6(path), { recursive: true, mode: 448 });
+  mkdirSync6(dirname7(path), { recursive: true, mode: 448 });
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync4(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
-  renameSync3(tmp, path);
+  writeFileSync5(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
+  renameSync4(tmp, path);
   try {
-    chmodSync4(path, mode);
+    chmodSync5(path, mode);
   } catch {}
 }
 
@@ -2536,8 +3052,8 @@ class OarStore {
     this.rootDir = opts?.rootDir ?? defaultOarRoot();
     this.statePath = oarStatePath(this.rootDir);
     this.vaultDir = oarVaultDir(this.rootDir);
-    mkdirSync5(this.rootDir, { recursive: true, mode: 448 });
-    mkdirSync5(this.vaultDir, { recursive: true, mode: 448 });
+    mkdirSync6(this.rootDir, { recursive: true, mode: 448 });
+    mkdirSync6(this.vaultDir, { recursive: true, mode: 448 });
     this.state = this.load();
     if (this.migrateLegacyProviders())
       this.persist();
@@ -2565,16 +3081,16 @@ class OarStore {
     return true;
   }
   renameVaultFile(from, to, profile) {
-    const oldPath = join6(this.vaultDir, `${from}__${profile}.json`);
-    const nextPath = join6(this.vaultDir, `${to}__${profile}.json`);
-    if (existsSync10(oldPath) && !existsSync10(nextPath))
-      renameSync3(oldPath, nextPath);
+    const oldPath = join7(this.vaultDir, `${from}__${profile}.json`);
+    const nextPath = join7(this.vaultDir, `${to}__${profile}.json`);
+    if (existsSync11(oldPath) && !existsSync11(nextPath))
+      renameSync4(oldPath, nextPath);
   }
   load() {
-    if (!existsSync10(this.statePath))
+    if (!existsSync11(this.statePath))
       return emptyState();
     try {
-      const parsed = JSON.parse(readFileSync6(this.statePath, "utf8"));
+      const parsed = JSON.parse(readFileSync7(this.statePath, "utf8"));
       if (parsed?.version !== 1)
         return emptyState();
       return {
@@ -2618,11 +3134,11 @@ class OarStore {
   removeAccount(provider, profile) {
     const canonical = resolveProvider(provider);
     const vaultPath = this.vaultPath(canonical, profile);
-    const legacyPath = join6(this.vaultDir, `${provider}__${profile}.json`);
-    if (existsSync10(vaultPath)) {
+    const legacyPath = join7(this.vaultDir, `${provider}__${profile}.json`);
+    if (existsSync11(vaultPath)) {
       unlinkSync2(vaultPath);
     }
-    if (legacyPath !== vaultPath && existsSync10(legacyPath))
+    if (legacyPath !== vaultPath && existsSync11(legacyPath))
       unlinkSync2(legacyPath);
     this.state.accounts = this.state.accounts.filter((a) => !(resolveProvider(a.provider) === canonical && a.profile === profile));
     const policy = this.state.providers[canonical] ?? this.state.providers[provider];
@@ -2657,7 +3173,7 @@ class OarStore {
     this.persist();
   }
   vaultPath(provider, profile) {
-    return join6(this.vaultDir, `${resolveProvider(provider)}__${profile}.json`);
+    return join7(this.vaultDir, `${resolveProvider(provider)}__${profile}.json`);
   }
   putVaultCredential(provider, profile, credential) {
     atomicWriteJson2(this.vaultPath(provider, profile), credential, 384);
@@ -2694,10 +3210,10 @@ class OarStore {
   }
   getVaultCredential(provider, profile) {
     const path = this.vaultPath(provider, profile);
-    if (!existsSync10(path))
+    if (!existsSync11(path))
       return;
     try {
-      return JSON.parse(readFileSync6(path, "utf8"));
+      return JSON.parse(readFileSync7(path, "utf8"));
     } catch {
       return;
     }
