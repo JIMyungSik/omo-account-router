@@ -27,6 +27,7 @@ import { OarStore } from "./store.ts";
 import { describeLiveAuth, formatWho } from "./who.ts";
 import { fetchRemoteUsage, fetchRemoteUsageForAccounts } from "./usage/fetch.ts";
 import { formatUsageTable } from "./usage/format.ts";
+import type { AccountRemoteUsage } from "./usage/types.ts";
 import { buildSubscriptionAudit } from "./subscriptions/audit.ts";
 import { auditToJson, formatAuditText, formatSubscriptionsList } from "./subscriptions/format.ts";
 import { SubscriptionsStore } from "./subscriptions/store.ts";
@@ -108,6 +109,10 @@ COMMANDS
 
   oar auto <provider> on|off
       Enable/disable automatic failover to another eligible profile on failures.
+
+  oar order <provider> [profile...]
+      Show or replace the failover order. When setting, list every profile
+      exactly once. Earlier profiles are preferred among eligible accounts.
 
   oar bootstrap-auto
       One-shot: for every provider with 2+ vault profiles, set mode=auto +
@@ -274,6 +279,7 @@ async function req(request: OarRequest) {
 }
 
 const COMMANDS_WITH_OWN_REMOTE_USAGE = new Set<string>([
+  "order",
   "recommand",
   "recommend",
   "usage",
@@ -313,6 +319,78 @@ async function healXaiRelogin(store: OarStore): Promise<boolean> {
     }
     throw error;
   }
+}
+
+type QuotaObservation = {
+  readonly provider: string;
+  readonly profile: string;
+  readonly remainingPercent: number;
+  readonly exhausted: boolean;
+  readonly detail: string;
+};
+
+function quotaObservations(rows: readonly AccountRemoteUsage[]): QuotaObservation[] {
+  const observations: QuotaObservation[] = [];
+  for (const row of rows) {
+    if (!row.ok) continue;
+    const primary =
+      row.windows.find((window) => window.remainingPercent != null) ?? row.windows[0];
+    if (!primary || primary.remainingPercent == null) continue;
+    observations.push({
+      provider: row.provider,
+      profile: row.profile,
+      remainingPercent: primary.remainingPercent,
+      exhausted: primary.remainingPercent <= 0 || Boolean(primary.limitReached),
+      detail: `remote_usage_${primary.label ?? primary.kind}_${primary.remainingPercent}`,
+    });
+  }
+  return observations;
+}
+
+async function syncQuotaObservations(observations: readonly QuotaObservation[]): Promise<void> {
+  const positiveByProvider = new Map<string, string[]>();
+  for (const observation of observations) {
+    if (observation.exhausted) continue;
+    const profiles = positiveByProvider.get(observation.provider) ?? [];
+    profiles.push(observation.profile);
+    positiveByProvider.set(observation.provider, profiles);
+  }
+  const ordered = [
+    ...observations.filter((observation) => !observation.exhausted),
+    ...observations.filter((observation) => observation.exhausted),
+  ];
+  for (const observation of ordered) {
+    try {
+      const reported = await req({
+        protocol: 1,
+        action: "report",
+        provider: observation.provider,
+        account: observation.profile,
+        result: observation.exhausted ? "QUOTA_EXHAUSTED" : "QUOTA_AVAILABLE",
+        detail: observation.detail,
+        ...(observation.exhausted
+          ? { verifiedPositiveProfiles: positiveByProvider.get(observation.provider) ?? [] }
+          : {}),
+      });
+      if (!reported.ok) {
+        console.error(
+          `warning: could not sync quota for ${observation.provider}/${observation.profile}: ${reported.error}`,
+        );
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(
+          `warning: could not sync quota for ${observation.provider}/${observation.profile}: ${error.message}`,
+        );
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+async function syncRemoteUsageToDaemon(rows: readonly AccountRemoteUsage[]): Promise<void> {
+  await syncQuotaObservations(quotaObservations(rows));
 }
 
 async function refreshQuotaBeforeCommand(
@@ -359,11 +437,12 @@ async function refreshQuotaBeforeCommand(
     (cmd === "panel" && rest.includes("--refresh"));
   if (commandFetchesUsage || targets.length === 0) return;
 
-  await fetchRemoteUsageForAccounts(store, targets, {
+  const rows = await fetchRemoteUsageForAccounts(store, targets, {
     root,
     force: true,
     maxAgeMs: 0,
   });
+  await syncRemoteUsageToDaemon(rows);
 }
 
 async function removeOne(provider: string, profile: string): Promise<void> {
@@ -525,6 +604,7 @@ async function main(argv: string[]) {
         .map((account) => ({ provider: account.provider, profile: account.profile }));
       if (targets.length > 0) {
         const rows = await fetchRemoteUsageForAccounts(store, targets, { root, force: true });
+        await syncRemoteUsageToDaemon(rows);
         console.log("");
         console.log(formatUsageTable(rows));
       }
@@ -740,6 +820,25 @@ async function main(argv: string[]) {
       console.log(JSON.stringify(res.data));
       return;
     }
+    case "order": {
+      const [provider, ...profiles] = rest;
+      if (!provider) throw new Error("usage: oar order <provider> [profile...]");
+      const res = await req({
+        protocol: 1,
+        action: "order",
+        provider,
+        profiles: profiles.length > 0 ? profiles : undefined,
+      });
+      if (!res.ok) throw new Error(res.error);
+      const data = res.data as {
+        provider: string;
+        profiles: Array<{ profile: string; priority: number }>;
+      };
+      console.log(
+        `${data.provider} failover order: ${data.profiles.map((entry) => entry.profile).join(" -> ")}`,
+      );
+      return;
+    }
     case "import-auth": {
       if (rest.includes("--all")) {
         rejectUnknownFlags(
@@ -942,6 +1041,7 @@ async function main(argv: string[]) {
             force: refresh,
             maxAgeMs: refresh ? 0 : 60_000,
           });
+          await syncRemoteUsageToDaemon(remoteUsage);
         }
         const snap = buildPanelSnapshot(status, {
           windowHours: hours,
@@ -992,26 +1092,7 @@ async function main(argv: string[]) {
       rows.sort((a, b) =>
         a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider),
       );
-      // Push remote exhaustion into the *daemon* state (CLI store alone is not enough).
-      for (const u of rows) {
-        if (!u.ok) continue;
-        const primary = u.windows.find((w) => w.remainingPercent != null) ?? u.windows[0];
-        if (!primary || primary.remainingPercent == null) continue;
-        if (primary.remainingPercent <= 0 || primary.limitReached) {
-          try {
-            await req({
-              protocol: 1,
-              action: "report",
-              provider: u.provider,
-              account: u.profile,
-              result: "QUOTA_EXHAUSTED",
-              detail: `remote_usage_${primary.label ?? primary.kind}_0`,
-            });
-          } catch {
-            // daemon may be down; local cache still updated
-          }
-        }
-      }
+      await syncRemoteUsageToDaemon(rows);
       console.log(formatUsageTable(rows));
       return;
     }
@@ -1039,23 +1120,19 @@ async function main(argv: string[]) {
         force: refresh,
         providers: providers.length ? providers : undefined,
       });
-      // push 0% into daemon
-      for (const r of rows) {
-        if (r.remainingPercent != null && r.remainingPercent <= 0) {
-          try {
-            await req({
-              protocol: 1,
-              action: "report",
-              provider: r.provider,
-              account: r.profile,
-              result: "QUOTA_EXHAUSTED",
-              detail: "recommend_remote_0",
-            });
-          } catch {
-            /* ignore */
-          }
-        }
-      }
+      await syncQuotaObservations(
+        rows.flatMap((row) =>
+          row.remainingPercent == null
+            ? []
+            : [{
+                provider: row.provider,
+                profile: row.profile,
+                remainingPercent: row.remainingPercent,
+                exhausted: row.remainingPercent <= 0,
+                detail: `recommend_remote_${row.remainingPercent}`,
+              }],
+        ),
+      );
       if (json) {
         const top = rows.find((r) => r.score > 0 && r.eligibility === "ok");
         console.log(

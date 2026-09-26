@@ -12,9 +12,10 @@ import type { OarRequest, OarResponse } from "./protocol.ts";
 import { AccountRefreshLock } from "./refresh-lock.ts";
 import { resolveProvider } from "./provider-alias.ts";
 import { parseReportResult } from "./report-results.ts";
-import { OarRouter } from "./router.ts";
+import { isEligible, OarRouter } from "./router.ts";
 import type { OarStore } from "./store.ts";
 import type { StoredCredential } from "./types.ts";
+import { fetchRemoteUsageForAccounts } from "./usage/fetch.ts";
 import { loginFromXaiUserinfo } from "./xai-login.ts";
 import { findXaiReloginHealCandidate } from "./xai-relogin-heal.ts";
 
@@ -175,6 +176,67 @@ export class OarDaemon {
     return true;
   }
 
+  private async fetchVerifiedPositiveProfiles(
+    provider: string,
+    currentProfile: string,
+  ): Promise<Set<string>> {
+    const targets = this.store
+      .listAccounts(provider)
+      .filter((account) => account.profile !== currentProfile)
+      .map((account) => ({ provider: account.provider, profile: account.profile }));
+    const rows = await fetchRemoteUsageForAccounts(this.store, targets, {
+      root: this.store.rootDir,
+      force: true,
+      maxAgeMs: 0,
+    });
+    const positive = new Set<string>();
+    for (const row of rows) {
+      if (!row.ok) continue;
+      const primary =
+        row.windows.find((window) => window.remainingPercent != null) ?? row.windows[0];
+      if (!primary || primary.remainingPercent == null) continue;
+      if (primary.remainingPercent > 0 && !primary.limitReached) {
+        positive.add(row.profile);
+        this.router.reportResult({
+          provider: row.provider,
+          account: row.profile,
+          result: "QUOTA_AVAILABLE",
+          detail: `remote_usage_${primary.label ?? primary.kind}_${primary.remainingPercent}`,
+        });
+      } else {
+        this.router.reportResult({
+          provider: row.provider,
+          account: row.profile,
+          result: "QUOTA_EXHAUSTED",
+          detail: `remote_usage_${primary.label ?? primary.kind}_0`,
+        });
+      }
+    }
+    return positive;
+  }
+
+  private selectVerifiedFailover(
+    provider: string,
+    currentProfile: string,
+    verifiedPositiveProfiles: ReadonlySet<string>,
+  ): string | undefined {
+    return this.store
+      .listAccounts(provider)
+      .filter((account) => {
+        return (
+          account.profile !== currentProfile &&
+          verifiedPositiveProfiles.has(account.profile) &&
+          isEligible(account)
+        );
+      })
+      .sort((a, b) => {
+        if (a.priority !== b.priority) return a.priority - b.priority;
+        const aUsed = a.lastUsedAt ? Date.parse(a.lastUsedAt) : 0;
+        const bUsed = b.lastUsedAt ? Date.parse(b.lastUsedAt) : 0;
+        return aUsed - bUsed || a.profile.localeCompare(b.profile);
+      })[0]?.profile;
+  }
+
   async dispatch(req: OarRequest): Promise<OarResponse> {
     if (!req || req.protocol !== 1) {
       return { ok: false, error: "unsupported protocol" };
@@ -242,6 +304,44 @@ export class OarDaemon {
           ok: true,
           data: { provider: req.provider, mode: req.enabled ? "auto" : "manual", autoFailover: req.enabled },
         };
+      case "order": {
+        const accounts = this.store.listAccounts(req.provider);
+        if (accounts.length === 0) {
+          return { ok: false, error: `no accounts for ${req.provider}` };
+        }
+        if (req.profiles) {
+          const unique = new Set(req.profiles);
+          const known = new Set(accounts.map((account) => account.profile));
+          if (
+            unique.size !== req.profiles.length ||
+            req.profiles.length !== accounts.length ||
+            req.profiles.some((profile) => !known.has(profile))
+          ) {
+            return {
+              ok: false,
+              error:
+                `order must list every ${req.provider} profile exactly once ` +
+                `(available: ${[...known].join(", ")})`,
+            };
+          }
+          req.profiles.forEach((profile, index) => {
+            const account = this.store.getAccount(req.provider, profile);
+            if (!account) return;
+            this.store.upsertAccount({ ...account, priority: (index + 1) * 100 });
+          });
+          this.events.append({
+            ts: new Date().toISOString(),
+            event: "order",
+            provider: req.provider,
+            reason: req.profiles.join(","),
+          });
+        }
+        const ordered = this.store
+          .listAccounts(req.provider)
+          .sort((a, b) => a.priority - b.priority || a.profile.localeCompare(b.profile))
+          .map((account) => ({ profile: account.profile, priority: account.priority }));
+        return { ok: true, data: { provider: req.provider, profiles: ordered } };
+      }
       case "mode":
         this.router.setMode(req.provider, req.mode);
         return { ok: true, data: { provider: req.provider, mode: req.mode } };
@@ -296,20 +396,33 @@ export class OarDaemon {
         if (
           this.activateOnUse &&
           autoOn &&
+          policy.preferred === req.account &&
           typeof req.result === "string" &&
           failoverResults.has(req.result)
         ) {
-          const next = this.router.resolve({ provider: req.provider });
-          if (next.status === "available" && next.profile && next.profile !== req.account) {
+          let nextProfile: string | undefined;
+          if (req.result === "QUOTA_EXHAUSTED") {
+            nextProfile = this.selectVerifiedFailover(
+              req.provider,
+              req.account,
+              req.verifiedPositiveProfiles
+                ? new Set(req.verifiedPositiveProfiles)
+                : await this.fetchVerifiedPositiveProfiles(req.provider, req.account),
+            );
+          } else {
+            const next = this.router.resolve({ provider: req.provider });
+            nextProfile = next.status === "available" ? next.profile : undefined;
+          }
+          if (nextProfile && nextProfile !== req.account) {
             try {
-              this.router.use(req.provider, next.profile);
-              await this.activator.activate(req.provider, next.profile);
-              failover = { from: req.account, to: next.profile };
+              this.router.use(req.provider, nextProfile);
+              await this.activator.activate(req.provider, nextProfile);
+              failover = { from: req.account, to: nextProfile };
               this.events.append({
                 ts: new Date().toISOString(),
                 event: "failover",
                 provider: req.provider,
-                profile: next.profile,
+                profile: nextProfile,
                 reason: `from ${req.account} (${String(req.result)})`,
               });
             } catch {

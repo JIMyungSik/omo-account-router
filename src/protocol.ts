@@ -14,6 +14,7 @@ export type OarRequest =
   | { protocol: 1; action: "resolve"; provider: ProviderId; model?: string; member?: string }
   | { protocol: 1; action: "use"; provider: ProviderId; profile: ProfileId; force?: boolean }
   | { protocol: 1; action: "auto"; provider: ProviderId; enabled: boolean }
+  | { protocol: 1; action: "order"; provider: ProviderId; profiles?: ProfileId[] }
   | { protocol: 1; action: "mode"; provider: ProviderId; mode: ProviderMode }
   | {
       protocol: 1;
@@ -23,6 +24,8 @@ export type OarRequest =
       result: ReportResult;
       retryAfterSec?: number;
       detail?: string;
+      /** Profiles verified above 0% by the same remote-usage batch. */
+      verifiedPositiveProfiles?: ProfileId[];
     }
   | { protocol: 1; action: "status" }
   | { protocol: 1; action: "accounts"; provider?: ProviderId }

@@ -122,7 +122,8 @@ oar use xai main            # REFUSED if remote remaining is 0%
 oar use xai main --force    # override (not recommended)
 
 # auto failover within a provider (off by default — read compliance)
-oar auto xai on
+oar auto xai on             # verified 0% preferred → positive-quota sibling
+oar order xai main sub apple # user-defined failover order
 oar auto xai off
 ```
 
@@ -354,6 +355,7 @@ credential into every live auth path. Do not paste or manually copy tokens.
 | `oar remove <p> <profile>` | Delete that vault profile. Also drops a matching live auth slot |
 | `oar remove *` | Delete every vault account |
 | `oar auto <p> on\|off` | Auto mode + failover flag |
+| `oar order <p> [profile...]` | Show or replace failover order; list every profile when setting |
 | `oar login` / `oar logout` | Login guide / remove vault |
 | `oar test <p> <profile> [--live]` | Health check |
 | `oar doctor` | Paths, engine, daemon tips |
@@ -399,7 +401,15 @@ Parallel OMO windows share **one live slot per provider**.
 
 ### 0% / exhausted protection
 - Remote usage 0% (Grok credits, etc.) → **warn + refuse** `oar use`
-- Auto failover **skips** `QUOTA_EXHAUSTED` accounts
+- With `oar auto <provider> on`, a verified 0% **preferred** account switches
+  to a same-provider sibling whose remote usage fetch succeeded above 0%
+- Positive observations are synchronized before exhausted observations, so a
+  previously stale 0% sibling can recover and become the failover target
+- Unknown/error usage is never treated as positive; a non-preferred 0% report
+  does not trigger a switch
+- When multiple positive siblings exist, `oar order <provider> ...` decides
+  which one is selected first
+- Auto failover **skips** every remaining `QUOTA_EXHAUSTED` account
 - Grok **403 out of credits** is classified as quota exhausted (not success)
 - Live `auth.json` is **re-aligned** on resolve if it drifted to another profile
 

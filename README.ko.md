@@ -121,7 +121,8 @@ oar use xai main            # 0%면 REFUSED
 oar use xai main --force    # 강제 (비권장)
 
 # provider 안 자동 failover (기본 off — compliance 읽을 것)
-oar auto xai on
+oar auto xai on             # preferred 0% 확인 → 잔여 있는 sibling
+oar order xai main sub apple # 사용자가 지정한 전환 순서
 oar auto xai off
 ```
 
@@ -352,6 +353,7 @@ credential을 모든 live auth 경로에 반영합니다. 토큰을 직접 복�
 | `oar remove <p> <profile>` | 그 프로필 삭제. 같은 계정의 live 슬롯도 삭제 |
 | `oar remove *` | vault 계정 전부 삭제 |
 | `oar auto <p> on\|off` | auto failover |
+| `oar order <p> [profile...]` | 전환 순서 조회·설정. 설정할 때 모든 profile을 한 번씩 입력 |
 | `oar doctor` | 경로·엔진·daemon |
 | `oar daemon start\|stop\|status` | 데몬 |
 | `oar guide second-account` | 2계정 가이드 |
@@ -394,7 +396,15 @@ oar use xai sub
 
 ### 0% / 소진 보호
 - 원격 usage 0% → **경고 + `oar use` 거절**
-- auto failover 는 `QUOTA_EXHAUSTED` **스킵**
+- `oar auto <provider> on`이면 **preferred** 계정이 실제 0%로 확인될 때,
+  원격 조회가 성공했고 잔여량이 0%보다 큰 같은 provider 계정으로 전환
+- 양수 잔여량을 먼저 daemon에 반영하므로, 과거 0%였던 sibling도 회복
+  사실이 확인되면 전환 후보가 됨
+- 조회 오류·미확인 값은 양수로 간주하지 않으며, preferred가 아닌 계정의
+  0% 보고는 전환을 일으키지 않음
+- 양수 잔여 계정이 여러 개면 `oar order <provider> ...`에 지정한 순서를
+  우선 사용
+- 나머지 `QUOTA_EXHAUSTED` 계정은 auto failover에서 **스킵**
 - Grok **403 credits** → quota 소진으로 분류
 - live `auth.json` 이 어긋나면 resolve 시 **preferred 로 재정렬**
 

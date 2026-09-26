@@ -2991,6 +2991,10 @@ COMMANDS
   oar auto <provider> on|off
       Enable/disable automatic failover to another eligible profile on failures.
 
+  oar order <provider> [profile...]
+      Show or replace the failover order. When setting, list every profile
+      exactly once. Earlier profiles are preferred among eligible accounts.
+
   oar bootstrap-auto
       One-shot: for every provider with 2+ vault profiles, set mode=auto +
       autoFailover, and ensureActivated the preferred profile. OMO extension
@@ -3152,6 +3156,7 @@ async function req(request) {
   return withClient((c) => c.request(request));
 }
 var COMMANDS_WITH_OWN_REMOTE_USAGE = new Set([
+  "order",
   "recommand",
   "recommend",
   "usage",
@@ -3192,6 +3197,63 @@ async function healXaiRelogin(store) {
     throw error;
   }
 }
+function quotaObservations(rows) {
+  const observations = [];
+  for (const row of rows) {
+    if (!row.ok)
+      continue;
+    const primary = row.windows.find((window) => window.remainingPercent != null) ?? row.windows[0];
+    if (!primary || primary.remainingPercent == null)
+      continue;
+    observations.push({
+      provider: row.provider,
+      profile: row.profile,
+      remainingPercent: primary.remainingPercent,
+      exhausted: primary.remainingPercent <= 0 || Boolean(primary.limitReached),
+      detail: `remote_usage_${primary.label ?? primary.kind}_${primary.remainingPercent}`
+    });
+  }
+  return observations;
+}
+async function syncQuotaObservations(observations) {
+  const positiveByProvider = new Map;
+  for (const observation of observations) {
+    if (observation.exhausted)
+      continue;
+    const profiles = positiveByProvider.get(observation.provider) ?? [];
+    profiles.push(observation.profile);
+    positiveByProvider.set(observation.provider, profiles);
+  }
+  const ordered = [
+    ...observations.filter((observation) => !observation.exhausted),
+    ...observations.filter((observation) => observation.exhausted)
+  ];
+  for (const observation of ordered) {
+    try {
+      const reported = await req({
+        protocol: 1,
+        action: "report",
+        provider: observation.provider,
+        account: observation.profile,
+        result: observation.exhausted ? "QUOTA_EXHAUSTED" : "QUOTA_AVAILABLE",
+        detail: observation.detail,
+        ...observation.exhausted ? { verifiedPositiveProfiles: positiveByProvider.get(observation.provider) ?? [] } : {}
+      });
+      if (!reported.ok) {
+        console.error(`warning: could not sync quota for ${observation.provider}/${observation.profile}: ${reported.error}`);
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(`warning: could not sync quota for ${observation.provider}/${observation.profile}: ${error.message}`);
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+async function syncRemoteUsageToDaemon(rows) {
+  await syncQuotaObservations(quotaObservations(rows));
+}
 async function refreshQuotaBeforeCommand(cmd, rest) {
   if (cmd === "daemon" || cmd === "panel" && rest.includes("--no-remote"))
     return;
@@ -3223,11 +3285,12 @@ async function refreshQuotaBeforeCommand(cmd, rest) {
   const commandFetchesUsage = cmd === undefined || COMMANDS_WITH_OWN_REMOTE_USAGE.has(cmd) || cmd === "panel" && rest.includes("--refresh");
   if (commandFetchesUsage || targets.length === 0)
     return;
-  await fetchRemoteUsageForAccounts(store, targets, {
+  const rows = await fetchRemoteUsageForAccounts(store, targets, {
     root,
     force: true,
     maxAgeMs: 0
   });
+  await syncRemoteUsageToDaemon(rows);
 }
 async function removeOne(provider, profile) {
   const res = await req({ protocol: 1, action: "remove", provider, profile });
@@ -3354,6 +3417,7 @@ async function main(argv) {
       const targets = data.accounts.filter((account) => isCodexProvider(account.provider) || isXaiProvider(account.provider)).map((account) => ({ provider: account.provider, profile: account.profile }));
       if (targets.length > 0) {
         const rows = await fetchRemoteUsageForAccounts(store, targets, { root, force: true });
+        await syncRemoteUsageToDaemon(rows);
         console.log("");
         console.log(formatUsageTable(rows));
       }
@@ -3550,6 +3614,22 @@ ${suggestAccounts(provider)}`);
       if (!res.ok)
         throw new Error(res.error);
       console.log(JSON.stringify(res.data));
+      return;
+    }
+    case "order": {
+      const [provider, ...profiles] = rest;
+      if (!provider)
+        throw new Error("usage: oar order <provider> [profile...]");
+      const res = await req({
+        protocol: 1,
+        action: "order",
+        provider,
+        profiles: profiles.length > 0 ? profiles : undefined
+      });
+      if (!res.ok)
+        throw new Error(res.error);
+      const data = res.data;
+      console.log(`${data.provider} failover order: ${data.profiles.map((entry) => entry.profile).join(" -> ")}`);
       return;
     }
     case "import-auth": {
@@ -3753,6 +3833,7 @@ ${suggestAccounts(provider)}`);
             force: refresh,
             maxAgeMs: refresh ? 0 : 60000
           });
+          await syncRemoteUsageToDaemon(remoteUsage);
         }
         const snap = buildPanelSnapshot(status, {
           windowHours: hours,
@@ -3797,25 +3878,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
         force: true
       });
       rows.sort((a, b) => a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider));
-      for (const u of rows) {
-        if (!u.ok)
-          continue;
-        const primary = u.windows.find((w) => w.remainingPercent != null) ?? u.windows[0];
-        if (!primary || primary.remainingPercent == null)
-          continue;
-        if (primary.remainingPercent <= 0 || primary.limitReached) {
-          try {
-            await req({
-              protocol: 1,
-              action: "report",
-              provider: u.provider,
-              account: u.profile,
-              result: "QUOTA_EXHAUSTED",
-              detail: `remote_usage_${primary.label ?? primary.kind}_0`
-            });
-          } catch {}
-        }
-      }
+      await syncRemoteUsageToDaemon(rows);
       console.log(formatUsageTable(rows));
       return;
     }
@@ -3837,20 +3900,13 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
         force: refresh,
         providers: providers.length ? providers : undefined
       });
-      for (const r of rows) {
-        if (r.remainingPercent != null && r.remainingPercent <= 0) {
-          try {
-            await req({
-              protocol: 1,
-              action: "report",
-              provider: r.provider,
-              account: r.profile,
-              result: "QUOTA_EXHAUSTED",
-              detail: "recommend_remote_0"
-            });
-          } catch {}
-        }
-      }
+      await syncQuotaObservations(rows.flatMap((row) => row.remainingPercent == null ? [] : [{
+        provider: row.provider,
+        profile: row.profile,
+        remainingPercent: row.remainingPercent,
+        exhausted: row.remainingPercent <= 0,
+        detail: `recommend_remote_${row.remainingPercent}`
+      }]));
       if (json) {
         const top = rows.find((r) => r.score > 0 && r.eligibility === "ok");
         console.log(JSON.stringify({
