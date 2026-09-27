@@ -28,6 +28,9 @@ export function isEligible(a: AccountRecord, now = Date.now()): boolean {
   if (a.availability === "QUOTA_EXHAUSTED") {
     return false;
   }
+  if (a.availability === "QUOTA_UNKNOWN") {
+    return false;
+  }
   if ((a.availability === "COOLDOWN" || a.availability === "RATE_LIMITED") && a.until) {
     if (Date.parse(a.until) > now) return false;
   } else if (
@@ -43,6 +46,9 @@ export function isEligible(a: AccountRecord, now = Date.now()): boolean {
 export function refuseReason(account: AccountRecord): string {
   if (account.availability === "QUOTA_EXHAUSTED") {
     return `quota exhausted (0% / limit)${account.until ? `; resets ~ ${account.until}` : ""}`;
+  }
+  if (account.availability === "QUOTA_UNKNOWN") {
+    return "remote quota unknown — verification required";
   }
   if (account.availability === "RATE_LIMITED") {
     return `rate limited${account.until ? `; until ${account.until}` : ""}`;

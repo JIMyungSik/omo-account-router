@@ -122,8 +122,9 @@ oar use xai main            # REFUSED if remote remaining is 0%
 oar use xai main --force    # override (not recommended)
 
 # auto failover within a provider (off by default — read compliance)
-oar auto xai on             # verified 0% preferred → positive-quota sibling
+oar auto xai on             # daemon polls preferred; 0% → positive sibling
 oar order xai main sub apple # user-defined failover order
+oar poll-quota              # run the daemon check immediately
 oar auto xai off
 ```
 
@@ -356,6 +357,7 @@ credential into every live auth path. Do not paste or manually copy tokens.
 | `oar remove *` | Delete every vault account |
 | `oar auto <p> on\|off` | Auto mode + failover flag |
 | `oar order <p> [profile...]` | Show or replace failover order; list every profile when setting |
+| `oar poll-quota` | Run the proactive daemon quota check immediately |
 | `oar login` / `oar logout` | Login guide / remove vault |
 | `oar test <p> <profile> [--live]` | Health check |
 | `oar doctor` | Paths, engine, daemon tips |
@@ -363,7 +365,7 @@ credential into every live auth path. Do not paste or manually copy tokens.
 | `oar install` | Runs `scripts/install.sh` |
 | `oar guide second-account` | Second-account howto |
 
-Environment: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`, `OAR_SINKS`, `OAR_ARGO_SINK`, `OAR_CODEX_SINK`, `OAR_ARGO_SECRETS_PATH`, `OAR_CODEX_HOME`, `OAR_CODEX_AUTH_PATH`
+Environment: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`, `OAR_QUOTA_POLL_SEC`, `OAR_SINKS`, `OAR_ARGO_SINK`, `OAR_CODEX_SINK`, `OAR_ARGO_SECRETS_PATH`, `OAR_CODEX_HOME`, `OAR_CODEX_AUTH_PATH`
 
 ---
 
@@ -400,6 +402,11 @@ Parallel OMO windows share **one live slot per provider**.
 `oar use` applies on the **next** request (no restart).
 
 ### 0% / exhausted protection
+- The production daemon checks each auto-enabled provider's preferred account
+  every 60 seconds; set `OAR_QUOTA_POLL_SEC` to another non-negative interval
+  (`0` disables background polling)
+- The normal check probes only the preferred account; sibling accounts are
+  fetched only after the preferred account is verified at 0%
 - Remote usage 0% (Grok credits, etc.) → **warn + refuse** `oar use`
 - With `oar auto <provider> on`, a verified 0% **preferred** account switches
   to a same-provider sibling whose remote usage fetch succeeded above 0%

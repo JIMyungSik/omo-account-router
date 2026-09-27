@@ -6,11 +6,16 @@ import { OarStore } from "./store.ts";
 const root = process.env.OAR_HOME ?? defaultOarRoot();
 const socketPath = process.env.OAR_SOCK ?? oarSocketPath(root);
 const store = new OarStore({ rootDir: root });
+const quotaPollSeconds = Number(process.env.OAR_QUOTA_POLL_SEC ?? "60");
+if (!Number.isFinite(quotaPollSeconds) || quotaPollSeconds < 0) {
+  throw new Error("OAR_QUOTA_POLL_SEC must be a non-negative number");
+}
 const daemon = new OarDaemon({
   store,
   socketPath,
   authPaths: resolveActiveAuthPaths(),
   activateOnUse: true,
+  quotaPollIntervalMs: quotaPollSeconds * 1000,
 });
 
 async function main() {
