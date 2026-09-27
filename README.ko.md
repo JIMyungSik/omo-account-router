@@ -399,6 +399,10 @@ oar use xai sub
 ### 0% / 소진 보호
 - production daemon은 auto가 켜진 provider의 preferred 계정을 기본 60초마다
   확인. `OAR_QUOTA_POLL_SEC`로 0 이상의 주기를 설정 (`0`은 background poll 끔)
+- `oar auto`와 `oar order`는 재시작 없이 즉시 반영됩니다.
+  `OAR_QUOTA_POLL_SEC`는 daemon 시작 시 읽으므로 변경 후 관리 서비스를
+  재시작해야 합니다. installer가 설치한 macOS LaunchAgent는
+  `daemon stop/start` 대신 `bash scripts/install.sh --skip-build`를 다시 실행합니다.
 - 평소에는 preferred만 조회하고, preferred가 실제 0%일 때만 sibling을 조회
 - 원격 usage 0% → **경고 + `oar use` 거절**
 - `oar auto <provider> on`이면 **preferred** 계정이 실제 0%로 확인될 때,
