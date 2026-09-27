@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.0 — 2026-09-27
+
+### Added
+- **Account-first/model-second failover:** a verified-positive same-provider
+  xAI profile retries the same Grok model before Senpi advances the native
+  fallback chain.
+- **`grok-astra` named preset:** `/model-preset list|use|status|off` compiles
+  `xai/grok-4.5 → GPT-6 Astra → DeepSeek V4.1 Flash` into
+  `retry.fallbackChains`.
+- **Proactive quota polling:** the daemon refreshes remote quota every 60
+  seconds and activates the first positive account in the user's configured
+  order.
+- **Runtime preset diagnostics:** status reports model availability,
+  configured authentication, and fallback eligibility for every target.
+
+### Fixed
+- Treat xAI's “run out of credits / need a Grok subscription” 403 wording as
+  billing so eligible exhaustion can reach native model fallback.
+- Stop model fallback for auth, prompt, tool, local, invalid-argument,
+  model-not-found, refusal, and unknown failures.
+- Ship the Senpi extension as one ESM bundle so helper files are not discovered
+  as standalone extensions and symlink-relative imports cannot break.
+
+### Compatibility
+- Requires a Senpi build containing
+  [`before_retry_fallback`](https://github.com/code-yeongyu/senpi/pull/2185)
+  for account-first ordering.
+- OAR CLI/daemon/vault remain tested on macOS, Ubuntu, and Windows; the macOS
+  LaunchAgent installer remains macOS-only.
+
 ## 0.2.0 — 2026-09-19
 
 ### Added

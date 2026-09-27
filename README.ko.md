@@ -19,7 +19,7 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 | | |
 |--|--|
 | 패키지명 | **`oar-cli`** (실행 명령은 **`oar`**) |
-| 버전 | `0.2.0` |
+| 버전 | `0.3.0` |
 | 라이선스 | [MIT](LICENSE) |
 | 런타임 | Node.js **22+** (개발 시 Bun 선택) |
 | 테스트 | `bun test` |
@@ -28,7 +28,11 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 > npm 이름 `oar` 는 무관한 옛 패키지가 선점 중입니다. **`oar-cli`** 로 설치하고, 명령은 **`oar`** 를 쓰세요.
 
-**OMO `5.0.0-0.beta.42` / Senpi `2026.9.4-3`** 기준: `after_provider_response`는 status+headers만 오므로 헤더에서 `invalid_grant`를 읽고, live `auth.json` 기록은 native `accounts` 필드를 덮어쓰지 않습니다.
+**OMO `5.0.0` / Senpi `2026.9.27`** 기준으로 검증했습니다. 계정 우선 모델
+fallback에는
+[`before_retry_fallback`](https://github.com/code-yeongyu/senpi/pull/2185)이
+포함된 Senpi 빌드가 필요합니다. OAR은 별도 재시도 엔진을 만들지 않고 이
+네이티브 확장 이벤트를 사용합니다.
 
 ## 플랫폼
 
@@ -46,10 +50,10 @@ CLI, 데몬, vault는 macOS, Linux, Windows에서 동작합니다. 2026-09-24, B
 
 ## 설치 (clone 불필요)
 
-### 권장 — GitHub 아카이브
+### 권장 — npm
 
 ```bash
-npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz
+npm install -g oar-cli
 ```
 
 **Node.js 22+** 필요.
@@ -61,10 +65,10 @@ oar panel --refresh
 oar recommend --refresh
 ```
 
-### npm 레지스트리 배포 후
+### GitHub 아카이브
 
 ```bash
-npm install -g oar-cli
+npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz
 ```
 
 ### macOS 상시 daemon + Senpi 확장 (선택)
@@ -131,6 +135,43 @@ oar auto xai off
 /model-preset status grok-astra
 ```
 
+## 계정 먼저, 모델은 그다음
+
+![OAR v0.3.0 터미널 흐름](docs/social/oar-v0.3.0-terminal-demo.svg)
+
+`grok-astra` 프리셋은 Senpi 네이티브 `retry.fallbackChains`에 다음 체인을
+그대로 설정합니다.
+
+```text
+xai/grok-4.5
+  → chatgpt-subscription/gpt-6-astra:high
+  → deepinfra/deepseek-ai/DeepSeek-V4.1-Flash:high
+```
+
+동작 순서는 다음과 같습니다.
+
+1. OAR이 quota를 갱신하고 잔여량이 확인된 xAI 프로필을 선택합니다.
+2. 활성 프로필이 소진됐지만 잔여량이 있는 형제 프로필이 있으면, 그
+   프로필을 활성화한 뒤 **같은 Grok 모델**을 한 번 제한적으로 재시도합니다.
+3. 사용할 수 있는 xAI 프로필이 모두 소진된 뒤에만 Senpi가 Astra, 이어서
+   DeepSeek로 전환합니다.
+4. quota, rate-limit, server 오류만 모델 전환을 허용합니다. auth, prompt,
+   tool, local, invalid-argument, model-not-found, refusal, unknown 오류는
+   fallback을 중단합니다.
+
+명령:
+
+```text
+/model-preset list
+/model-preset use grok-astra
+/model-preset status grok-astra
+/model-preset off grok-astra
+```
+
+`oar auto`의 기본값은 꺼짐입니다. 본인이 정당하게 소유한 계정만 사용하고
+[약관 메모](docs/compliance.md)를 읽으세요. 자동 quota 통합 사용은 provider
+약관과 충돌할 수 있습니다.
+
 계정 정보를 다루는 모든 명령은 실행 전에 만료된 Codex/xAI OAuth를 갱신하고
 원격 잔여 퍼센트를 새로 조회합니다. 이미 자체 원격 조회 흐름이 있는 `oar`,
 `oar usage`, `oar panel`, `oar recommend`, `oar use`는 중복 요청 없이 해당
@@ -138,6 +179,18 @@ oar auto xai off
 동작하도록 자동 조회에서 제외합니다.
 명시적으로 `oar panel --no-remote`를 사용하면 인증·quota 네트워크 요청도
 건너뜁니다.
+
+## 커뮤니티와 지원
+
+- 질문, 호환성 결과, 사용 후기:
+  [GitHub Discussions](https://github.com/JIMyungSik/omo-account-router/discussions)
+- 재현 가능한 버그:
+  [GitHub Issues](https://github.com/JIMyungSik/omo-account-router/issues)
+- 보안 제보: [SECURITY.md](SECURITY.md)
+
+OMO/Senpi 버전, OS, 실행 명령, 기대 결과, 민감 정보를 제거한 출력을
+남겨 주세요. access token, refresh token, cookie, `auth.json`은 게시하지
+마세요.
 
 ### 같은 provider에 2번째 계정
 
