@@ -18,7 +18,7 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 | | |
 |--|--|
-| Package | **`oar-cli`** on npm path (command is still **`oar`**) |
+| Package | **`@carjms/oar-cli`** on npm (command is still **`oar`**) |
 | Version | `0.3.0` |
 | License | [MIT](LICENSE) |
 | Runtime | Node.js **22+** (Bun optional for dev) |
@@ -26,9 +26,10 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 | Compliance | [docs/compliance.md](docs/compliance.md) (**not legal advice**) |
 | Repo | https://github.com/JIMyungSik/omo-account-router |
 
-> npm name bare `oar` is taken by an unrelated 2013 package. Install **`oar-cli`**; the binary is **`oar`**.
+> npm rejected unscoped `oar-cli` as too similar to an existing package. Install
+> **`@carjms/oar-cli`**; the binary remains **`oar`**.
 
-Verified against **OMO `5.0.0` / Senpi `2026.9.27`**. Account-first model
+Verified against **OMO `5.0.1` / Senpi `2026.9.27`**. Account-first model
 fallback requires a Senpi build containing
 [`before_retry_fallback`](https://github.com/code-yeongyu/senpi/pull/2185);
 OAR detects and uses that native extension event rather than implementing a
@@ -53,7 +54,7 @@ The CLI, daemon, and vault work on macOS, Linux, and Windows. Checked on 2026-09
 ### Recommended — npm
 
 ```bash
-npm install -g oar-cli
+npm install -g @carjms/oar-cli
 ```
 
 Requires **Node.js 22+**.
@@ -75,7 +76,7 @@ npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/hea
 
 ```bash
 # folder name depends on install source:
-bash "$(npm root -g)/oar-cli/scripts/install.sh" --skip-build
+bash "$(npm root -g)/@carjms/oar-cli/scripts/install.sh" --skip-build
 # or:
 bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
 ```
@@ -83,7 +84,7 @@ bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
 ### Uninstall
 
 ```bash
-npm uninstall -g oar-cli
+npm uninstall -g @carjms/oar-cli
 # or
 npm uninstall -g omo-account-router
 ```
@@ -535,7 +536,7 @@ model-not-found, refusal, and unknown failures do not advance this preset.
 
 ```bash
 mkdir -p "$HOME/Library/Application Support/SwiftBar"
-ln -sf "$(npm root -g)/oar-cli/scripts/oar-xbar.sh" \
+ln -sf "$(npm root -g)/@carjms/oar-cli/scripts/oar-xbar.sh" \
   "$HOME/Library/Application Support/SwiftBar/oar.5s.sh"
 ```
 

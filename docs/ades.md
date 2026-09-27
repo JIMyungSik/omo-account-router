@@ -56,12 +56,12 @@ OAR’s **deepest** integration is the **Senpi/OMO auth.json hot-reload** path. 
 
 ```bash
 npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz
-# or: npm install -g oar-cli
+# or: npm install -g @carjms/oar-cli
 
 oar doctor
 oar daemon start
 oar import-auth --all
-bash "$(npm root -g)/oar-cli/scripts/install.sh" --skip-build   # optional LaunchAgent + extension
+bash "$(npm root -g)/@carjms/oar-cli/scripts/install.sh" --skip-build   # optional LaunchAgent + extension
 ```
 
 ### Daily

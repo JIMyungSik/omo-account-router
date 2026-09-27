@@ -3,6 +3,9 @@
 ## 0.3.0 — 2026-09-27
 
 ### Added
+- **Scoped npm package:** install from `@carjms/oar-cli`; the executable remains
+  `oar`. npm rejected the unscoped `oar-cli` as too similar to an existing
+  package.
 - **Account-first/model-second failover:** a verified-positive same-provider
   xAI profile retries the same Grok model before Senpi advances the native
   fallback chain.

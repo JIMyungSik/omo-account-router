@@ -102,7 +102,7 @@ describe("Phase 1 — real Senpi AuthStorage hot-switch (no process restart)", (
   });
 
   test.skipIf(!install)("installed engine is omo-ai 5.x + senpi 2026.9.x", () => {
-    expect(install?.omoAiVersion).toContain("5.0.0");
+    expect(install?.omoAiVersion).toMatch(/^5\./);
     expect(install?.senpiVersion).toMatch(/^2026\.9\.\d+/);
   });
 
