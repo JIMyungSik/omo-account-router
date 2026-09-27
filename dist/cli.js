@@ -1872,7 +1872,9 @@ async function fetchRemoteUsage(store, provider, profile, opts) {
       error: "missing vault credential",
       windows: []
     };
-    putCachedUsage(miss, root);
+    if (opts?.persistCache !== false) {
+      putCachedUsage(miss, root);
+    }
     return miss;
   }
   let result;
@@ -1893,8 +1895,12 @@ async function fetchRemoteUsage(store, provider, profile, opts) {
       windows: []
     };
   }
-  putCachedUsage(result, root);
-  applyUsageToAccountState(store, result);
+  if (opts?.persistCache !== false) {
+    putCachedUsage(result, root);
+  }
+  if (opts?.applyState !== false) {
+    applyUsageToAccountState(store, result);
+  }
   return result;
 }
 async function fetchRemoteUsageForAccounts(store, accounts, opts) {
@@ -1903,6 +1909,8 @@ async function fetchRemoteUsageForAccounts(store, accounts, opts) {
   const workers = Math.min(3, queue.length || 1);
   async function worker() {
     while (queue.length) {
+      if (opts?.shouldContinue && !opts.shouldContinue())
+        return;
       const next = queue.shift();
       if (!next)
         return;
@@ -2004,6 +2012,9 @@ function isEligible(a, now = Date.now()) {
   if (a.availability === "QUOTA_EXHAUSTED") {
     return false;
   }
+  if (a.availability === "QUOTA_UNKNOWN") {
+    return false;
+  }
   if ((a.availability === "COOLDOWN" || a.availability === "RATE_LIMITED") && a.until) {
     if (Date.parse(a.until) > now)
       return false;
@@ -2059,7 +2070,9 @@ async function fetchRemoteUsage2(store, provider, profile, opts) {
       error: "missing vault credential",
       windows: []
     };
-    putCachedUsage(miss, root);
+    if (opts?.persistCache !== false) {
+      putCachedUsage(miss, root);
+    }
     return miss;
   }
   let result;
@@ -2080,8 +2093,12 @@ async function fetchRemoteUsage2(store, provider, profile, opts) {
       windows: []
     };
   }
-  putCachedUsage(result, root);
-  applyUsageToAccountState2(store, result);
+  if (opts?.persistCache !== false) {
+    putCachedUsage(result, root);
+  }
+  if (opts?.applyState !== false) {
+    applyUsageToAccountState2(store, result);
+  }
   return result;
 }
 async function fetchRemoteUsageForAccounts2(store, accounts, opts) {
@@ -2090,6 +2107,8 @@ async function fetchRemoteUsageForAccounts2(store, accounts, opts) {
   const workers = Math.min(3, queue.length || 1);
   async function worker() {
     while (queue.length) {
+      if (opts?.shouldContinue && !opts.shouldContinue())
+        return;
       const next = queue.shift();
       if (!next)
         return;
@@ -2999,6 +3018,10 @@ COMMANDS
       One-shot: for every provider with 2+ vault profiles, set mode=auto +
       autoFailover, and ensureActivated the preferred profile. OMO extension
       also runs this on session_start so daily use needs no manual oar.
+
+  oar poll-quota
+      Run the daemon's proactive quota check immediately. Normally the daemon
+      runs it every OAR_QUOTA_POLL_SEC seconds (default 60; 0 disables).
 
   oar import-auth <provider> <profile> [--from <auth.json>] [--account <n|name>]
       Copy one provider credential from Senpi auth.json (default ~/.omo/agent/auth.json)
@@ -3921,6 +3944,13 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
     }
     case "bootstrap-auto": {
       const res = await req({ protocol: 1, action: "bootstrap-auto" });
+      if (!res.ok)
+        throw new Error(res.error);
+      console.log(JSON.stringify(res.data, null, 2));
+      return;
+    }
+    case "poll-quota": {
+      const res = await req({ protocol: 1, action: "poll-quota" });
       if (!res.ok)
         throw new Error(res.error);
       console.log(JSON.stringify(res.data, null, 2));

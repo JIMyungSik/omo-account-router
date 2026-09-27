@@ -41,6 +41,12 @@ export type FetchUsageOptions = {
   maxAgeMs?: number;
   /** Force network refresh */
   force?: boolean;
+  /** Persist usage-derived availability. Default true. */
+  applyState?: boolean;
+  /** Persist the fetched usage snapshot. Default true. */
+  persistCache?: boolean;
+  /** Stop a batch before dequeuing another account. */
+  shouldContinue?: () => boolean;
   fetchImpl?: typeof fetch;
 };
 
@@ -68,7 +74,9 @@ export async function fetchRemoteUsage(
       error: "missing vault credential",
       windows: [],
     };
-    putCachedUsage(miss, root);
+    if (opts?.persistCache !== false) {
+      putCachedUsage(miss, root);
+    }
     return miss;
   }
 
@@ -91,8 +99,12 @@ export async function fetchRemoteUsage(
     };
   }
 
-  putCachedUsage(result, root);
-  applyUsageToAccountState(store, result);
+  if (opts?.persistCache !== false) {
+    putCachedUsage(result, root);
+  }
+  if (opts?.applyState !== false) {
+    applyUsageToAccountState(store, result);
+  }
   return result;
 }
 
@@ -107,6 +119,7 @@ export async function fetchRemoteUsageForAccounts(
   const workers = Math.min(3, queue.length || 1);
   async function worker() {
     while (queue.length) {
+      if (opts?.shouldContinue && !opts.shouldContinue()) return;
       const next = queue.shift();
       if (!next) return;
       out.push(await fetchRemoteUsage(store, next.provider, next.profile, opts));

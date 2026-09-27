@@ -119,6 +119,10 @@ COMMANDS
       autoFailover, and ensureActivated the preferred profile. OMO extension
       also runs this on session_start so daily use needs no manual oar.
 
+  oar poll-quota
+      Run the daemon's proactive quota check immediately. Normally the daemon
+      runs it every OAR_QUOTA_POLL_SEC seconds (default 60; 0 disables).
+
   oar import-auth <provider> <profile> [--from <auth.json>] [--account <n|name>]
       Copy one provider credential from Senpi auth.json (default ~/.omo/agent/auth.json)
       into the OAR vault. openai, codex, chatgpt, and openai-codex all mean
@@ -1153,6 +1157,12 @@ async function main(argv: string[]) {
     }
     case "bootstrap-auto": {
       const res = await req({ protocol: 1, action: "bootstrap-auto" });
+      if (!res.ok) throw new Error(res.error);
+      console.log(JSON.stringify(res.data, null, 2));
+      return;
+    }
+    case "poll-quota": {
+      const res = await req({ protocol: 1, action: "poll-quota" });
       if (!res.ok) throw new Error(res.error);
       console.log(JSON.stringify(res.data, null, 2));
       return;

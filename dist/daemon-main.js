@@ -1501,6 +1501,9 @@ function isEligible(a, now = Date.now()) {
   if (a.availability === "QUOTA_EXHAUSTED") {
     return false;
   }
+  if (a.availability === "QUOTA_UNKNOWN") {
+    return false;
+  }
   if ((a.availability === "COOLDOWN" || a.availability === "RATE_LIMITED") && a.until) {
     if (Date.parse(a.until) > now)
       return false;
@@ -1512,6 +1515,9 @@ function isEligible(a, now = Date.now()) {
 function refuseReason(account) {
   if (account.availability === "QUOTA_EXHAUSTED") {
     return `quota exhausted (0% / limit)${account.until ? `; resets ~ ${account.until}` : ""}`;
+  }
+  if (account.availability === "QUOTA_UNKNOWN") {
+    return "remote quota unknown — verification required";
   }
   if (account.availability === "RATE_LIMITED") {
     return `rate limited${account.until ? `; until ${account.until}` : ""}`;
@@ -2095,7 +2101,9 @@ async function fetchRemoteUsage(store, provider, profile, opts) {
       error: "missing vault credential",
       windows: []
     };
-    putCachedUsage(miss, root);
+    if (opts?.persistCache !== false) {
+      putCachedUsage(miss, root);
+    }
     return miss;
   }
   let result;
@@ -2116,8 +2124,12 @@ async function fetchRemoteUsage(store, provider, profile, opts) {
       windows: []
     };
   }
-  putCachedUsage(result, root);
-  applyUsageToAccountState(store, result);
+  if (opts?.persistCache !== false) {
+    putCachedUsage(result, root);
+  }
+  if (opts?.applyState !== false) {
+    applyUsageToAccountState(store, result);
+  }
   return result;
 }
 async function fetchRemoteUsageForAccounts(store, accounts, opts) {
@@ -2126,6 +2138,8 @@ async function fetchRemoteUsageForAccounts(store, accounts, opts) {
   const workers = Math.min(3, queue.length || 1);
   async function worker() {
     while (queue.length) {
+      if (opts?.shouldContinue && !opts.shouldContinue())
+        return;
       const next = queue.shift();
       if (!next)
         return;
@@ -2385,7 +2399,12 @@ class OarDaemon {
   refreshLock = new AccountRefreshLock;
   leases = new LeaseManager;
   events;
+  quotaPollIntervalMs;
   server = null;
+  quotaPollTimer = null;
+  quotaPollInFlight = false;
+  running = false;
+  lifecycleEpoch = 0;
   constructor(opts) {
     this.store = opts.store;
     this.router = new OarRouter(opts.store);
@@ -2398,6 +2417,7 @@ class OarDaemon {
     this.socketPath = opts.socketPath;
     this.activateOnUse = opts.activateOnUse ?? true;
     this.events = EventLog.forRoot(opts.store.rootDir);
+    this.quotaPollIntervalMs = opts.quotaPollIntervalMs ?? 0;
   }
   get refresh() {
     return this.refreshLock;
@@ -2423,9 +2443,24 @@ class OarDaemon {
       });
     });
     writeFileSync4(`${this.socketPath}.pid`, String(process.pid), { mode: 384 });
+    this.running = true;
+    this.lifecycleEpoch += 1;
     this.events.append({ ts: new Date().toISOString(), event: "daemon_start", pid: process.pid });
+    if (this.quotaPollIntervalMs > 0) {
+      this.runScheduledQuotaPoll();
+      this.quotaPollTimer = setInterval(() => {
+        this.runScheduledQuotaPoll();
+      }, this.quotaPollIntervalMs);
+      this.quotaPollTimer.unref();
+    }
   }
   async stop() {
+    this.running = false;
+    this.lifecycleEpoch += 1;
+    if (this.quotaPollTimer) {
+      clearInterval(this.quotaPollTimer);
+      this.quotaPollTimer = null;
+    }
     await new Promise((resolve) => {
       if (!this.server)
         return resolve();
@@ -2497,20 +2532,58 @@ class OarDaemon {
     });
     return true;
   }
-  async fetchVerifiedPositiveProfiles(provider, currentProfile) {
+  async fetchVerifiedPositiveProfiles(provider, currentProfile, guard = () => true) {
     const targets = this.store.listAccounts(provider).filter((account) => account.profile !== currentProfile).map((account) => ({ provider: account.provider, profile: account.profile }));
+    if (!guard())
+      return new Set;
+    for (const target of targets) {
+      const account = this.store.getAccount(target.provider, target.profile);
+      if (!account)
+        continue;
+      this.store.upsertAccount({
+        ...account,
+        availability: "QUOTA_UNKNOWN",
+        reason: "remote_usage_unverified",
+        lastChecked: new Date().toISOString()
+      });
+    }
     const rows = await fetchRemoteUsageForAccounts(this.store, targets, {
       root: this.store.rootDir,
       force: true,
-      maxAgeMs: 0
+      maxAgeMs: 0,
+      applyState: false,
+      persistCache: false,
+      shouldContinue: guard
     });
     const positive = new Set;
+    if (!guard())
+      return positive;
     for (const row of rows) {
-      if (!row.ok)
+      if (!row.ok) {
+        const account = this.store.getAccount(row.provider, row.profile);
+        if (account) {
+          this.store.upsertAccount({
+            ...account,
+            availability: "QUOTA_UNKNOWN",
+            reason: "remote_usage_unknown",
+            lastChecked: new Date().toISOString()
+          });
+        }
         continue;
+      }
       const primary = row.windows.find((window) => window.remainingPercent != null) ?? row.windows[0];
-      if (!primary || primary.remainingPercent == null)
+      if (!primary || primary.remainingPercent == null) {
+        const account = this.store.getAccount(row.provider, row.profile);
+        if (account) {
+          this.store.upsertAccount({
+            ...account,
+            availability: "QUOTA_UNKNOWN",
+            reason: "remote_usage_unknown",
+            lastChecked: new Date().toISOString()
+          });
+        }
         continue;
+      }
       if (primary.remainingPercent > 0 && !primary.limitReached) {
         positive.add(row.profile);
         this.router.reportResult({
@@ -2540,6 +2613,112 @@ class OarDaemon {
       const bUsed = b.lastUsedAt ? Date.parse(b.lastUsedAt) : 0;
       return aUsed - bUsed || a.profile.localeCompare(b.profile);
     })[0]?.profile;
+  }
+  pollLifecycleCurrent(epoch) {
+    return this.running && this.lifecycleEpoch === epoch;
+  }
+  pollPolicyCurrent(provider, profile) {
+    const policy = this.store.getProviderPolicy(provider);
+    return policy.preferred === profile && policy.autoFailover && (policy.mode === "auto" || process.env.OAR_FORCE_AUTO === "1");
+  }
+  async pollQuota(epoch) {
+    const state = this.store.getState();
+    const checked = [];
+    const failovers = [];
+    for (const [provider, policy] of Object.entries(state.providers)) {
+      if (!this.pollLifecycleCurrent(epoch))
+        return { checked, failovers };
+      const autoOn = policy.autoFailover && (policy.mode === "auto" || process.env.OAR_FORCE_AUTO === "1");
+      if (!autoOn || !policy.preferred)
+        continue;
+      const current = this.store.getAccount(provider, policy.preferred);
+      if (!current)
+        continue;
+      const [usage] = await fetchRemoteUsageForAccounts(this.store, [{ provider: current.provider, profile: current.profile }], {
+        root: this.store.rootDir,
+        force: true,
+        maxAgeMs: 0,
+        applyState: false,
+        persistCache: false
+      });
+      if (!this.pollLifecycleCurrent(epoch))
+        return { checked, failovers };
+      if (!this.pollPolicyCurrent(provider, current.profile))
+        continue;
+      if (!usage?.ok) {
+        checked.push({ provider, profile: current.profile, ok: false });
+        continue;
+      }
+      const primary = usage.windows.find((window) => window.remainingPercent != null) ?? usage.windows[0];
+      if (!primary || primary.remainingPercent == null) {
+        checked.push({ provider, profile: current.profile, ok: false });
+        continue;
+      }
+      const remainingPercent = primary.remainingPercent;
+      checked.push({ provider, profile: current.profile, remainingPercent, ok: true });
+      if (remainingPercent !== 0) {
+        this.router.reportResult({
+          provider,
+          account: current.profile,
+          result: "QUOTA_AVAILABLE",
+          detail: `quota_poll_${remainingPercent}`
+        });
+        continue;
+      }
+      this.router.reportResult({
+        provider,
+        account: current.profile,
+        result: "QUOTA_EXHAUSTED",
+        detail: "quota_poll_0"
+      });
+      const guard = () => this.pollLifecycleCurrent(epoch) && this.pollPolicyCurrent(provider, current.profile);
+      const positive = await this.fetchVerifiedPositiveProfiles(provider, current.profile, guard);
+      if (!this.pollLifecycleCurrent(epoch))
+        return { checked, failovers };
+      if (!this.pollPolicyCurrent(provider, current.profile))
+        continue;
+      const nextProfile = this.selectVerifiedFailover(provider, current.profile, positive);
+      if (!nextProfile || !this.activateOnUse)
+        continue;
+      this.router.use(provider, nextProfile);
+      await this.activator.activate(provider, nextProfile);
+      failovers.push({ provider, from: current.profile, to: nextProfile });
+      this.events.append({
+        ts: new Date().toISOString(),
+        event: "failover",
+        provider,
+        profile: nextProfile,
+        reason: `from ${current.profile} (quota_poll_0)`
+      });
+    }
+    this.events.append({
+      ts: new Date().toISOString(),
+      event: "quota_poll",
+      reason: `checked=${checked.length} failovers=${failovers.length}`
+    });
+    return { checked, failovers };
+  }
+  async runQuotaPollOnce() {
+    if (this.quotaPollInFlight)
+      return;
+    this.quotaPollInFlight = true;
+    const epoch = this.lifecycleEpoch;
+    try {
+      return await this.pollQuota(epoch);
+    } finally {
+      this.quotaPollInFlight = false;
+    }
+  }
+  async runScheduledQuotaPoll() {
+    try {
+      await this.runQuotaPollOnce();
+    } catch (error) {
+      this.events.append({
+        ts: new Date().toISOString(),
+        event: "quota_poll_error",
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
   async dispatch(req) {
     if (!req || req.protocol !== 1) {
@@ -2951,6 +3130,11 @@ class OarDaemon {
         }
         return { ok: true, data: { enabled, forceAuto: process.env.OAR_FORCE_AUTO === "1" } };
       }
+      case "poll-quota":
+        return {
+          ok: true,
+          data: await this.runQuotaPollOnce() ?? { checked: [], failovers: [], skipped: "in_flight" }
+        };
       case "doctor":
         return {
           ok: true,
@@ -2960,6 +3144,7 @@ class OarDaemon {
             authPaths: this.activator.getAuthPaths(),
             accountCount: this.store.listAccounts().length,
             leaseCount: this.leases.list().length,
+            quotaPollIntervalMs: this.quotaPollIntervalMs,
             pid: process.pid
           }
         };
@@ -3224,11 +3409,16 @@ class OarStore {
 var root = process.env.OAR_HOME ?? defaultOarRoot2();
 var socketPath = process.env.OAR_SOCK ?? oarSocketPath(root);
 var store = new OarStore({ rootDir: root });
+var quotaPollSeconds = Number(process.env.OAR_QUOTA_POLL_SEC ?? "60");
+if (!Number.isFinite(quotaPollSeconds) || quotaPollSeconds < 0) {
+  throw new Error("OAR_QUOTA_POLL_SEC must be a non-negative number");
+}
 var daemon = new OarDaemon({
   store,
   socketPath,
   authPaths: resolveActiveAuthPaths2(),
-  activateOnUse: true
+  activateOnUse: true,
+  quotaPollIntervalMs: quotaPollSeconds * 1000
 });
 async function main() {
   await daemon.start();

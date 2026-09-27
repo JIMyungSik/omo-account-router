@@ -121,8 +121,9 @@ oar use xai main            # 0%면 REFUSED
 oar use xai main --force    # 강제 (비권장)
 
 # provider 안 자동 failover (기본 off — compliance 읽을 것)
-oar auto xai on             # preferred 0% 확인 → 잔여 있는 sibling
+oar auto xai on             # daemon 주기 확인: 0% → 잔여 있는 sibling
 oar order xai main sub apple # 사용자가 지정한 전환 순서
+oar poll-quota              # daemon quota 확인 즉시 실행
 oar auto xai off
 ```
 
@@ -354,11 +355,12 @@ credential을 모든 live auth 경로에 반영합니다. 토큰을 직접 복�
 | `oar remove *` | vault 계정 전부 삭제 |
 | `oar auto <p> on\|off` | auto failover |
 | `oar order <p> [profile...]` | 전환 순서 조회·설정. 설정할 때 모든 profile을 한 번씩 입력 |
+| `oar poll-quota` | daemon의 선제 quota 확인을 즉시 실행 |
 | `oar doctor` | 경로·엔진·daemon |
 | `oar daemon start\|stop\|status` | 데몬 |
 | `oar guide second-account` | 2계정 가이드 |
 
-환경 변수: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`, `OAR_SINKS`, `OAR_ARGO_SINK`, `OAR_CODEX_SINK`, `OAR_ARGO_SECRETS_PATH`, `OAR_CODEX_HOME`, `OAR_CODEX_AUTH_PATH`
+환경 변수: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`, `OAR_QUOTA_POLL_SEC`, `OAR_SINKS`, `OAR_ARGO_SINK`, `OAR_CODEX_SINK`, `OAR_ARGO_SECRETS_PATH`, `OAR_CODEX_HOME`, `OAR_CODEX_AUTH_PATH`
 
 ---
 
@@ -395,6 +397,9 @@ oar use xai sub
 `oar use` 는 **다음 요청**부터 적용 (재시작 없음).
 
 ### 0% / 소진 보호
+- production daemon은 auto가 켜진 provider의 preferred 계정을 기본 60초마다
+  확인. `OAR_QUOTA_POLL_SEC`로 0 이상의 주기를 설정 (`0`은 background poll 끔)
+- 평소에는 preferred만 조회하고, preferred가 실제 0%일 때만 sibling을 조회
 - 원격 usage 0% → **경고 + `oar use` 거절**
 - `oar auto <provider> on`이면 **preferred** 계정이 실제 0%로 확인될 때,
   원격 조회가 성공했고 잔여량이 0%보다 큰 같은 provider 계정으로 전환

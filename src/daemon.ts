@@ -26,6 +26,13 @@ export type DaemonOptions = {
   activateOnUse?: boolean;
   preferSenpiLock?: boolean;
   sinks?: readonly AccountSink[];
+  /** Zero disables background polling. Production daemon-main supplies 60 seconds. */
+  quotaPollIntervalMs?: number;
+};
+
+type QuotaPollResult = {
+  checked: Array<{ provider: string; profile: string; remainingPercent?: number; ok: boolean }>;
+  failovers: Array<{ provider: string; from: string; to: string }>;
 };
 
 function readFrame(buf: Buffer): { msg?: string; rest: Buffer } {
@@ -43,7 +50,12 @@ export class OarDaemon {
   private readonly refreshLock = new AccountRefreshLock();
   private readonly leases = new LeaseManager();
   private readonly events: EventLog;
+  private readonly quotaPollIntervalMs: number;
   private server: Server | null = null;
+  private quotaPollTimer: ReturnType<typeof setInterval> | null = null;
+  private quotaPollInFlight = false;
+  private running = false;
+  private lifecycleEpoch = 0;
 
   constructor(opts: DaemonOptions) {
     this.store = opts.store;
@@ -57,6 +69,7 @@ export class OarDaemon {
     this.socketPath = opts.socketPath;
     this.activateOnUse = opts.activateOnUse ?? true;
     this.events = EventLog.forRoot(opts.store.rootDir);
+    this.quotaPollIntervalMs = opts.quotaPollIntervalMs ?? 0;
   }
 
   get refresh(): AccountRefreshLock {
@@ -91,10 +104,25 @@ export class OarDaemon {
     });
 
     writeFileSync(`${this.socketPath}.pid`, String(process.pid), { mode: 0o600 });
+    this.running = true;
+    this.lifecycleEpoch += 1;
     this.events.append({ ts: new Date().toISOString(), event: "daemon_start", pid: process.pid });
+    if (this.quotaPollIntervalMs > 0) {
+      void this.runScheduledQuotaPoll();
+      this.quotaPollTimer = setInterval(() => {
+        void this.runScheduledQuotaPoll();
+      }, this.quotaPollIntervalMs);
+      this.quotaPollTimer.unref();
+    }
   }
 
   async stop(): Promise<void> {
+    this.running = false;
+    this.lifecycleEpoch += 1;
+    if (this.quotaPollTimer) {
+      clearInterval(this.quotaPollTimer);
+      this.quotaPollTimer = null;
+    }
     await new Promise<void>((resolve) => {
       if (!this.server) return resolve();
       this.server.close(() => resolve());
@@ -179,22 +207,62 @@ export class OarDaemon {
   private async fetchVerifiedPositiveProfiles(
     provider: string,
     currentProfile: string,
+    guard: () => boolean = () => true,
   ): Promise<Set<string>> {
     const targets = this.store
       .listAccounts(provider)
       .filter((account) => account.profile !== currentProfile)
       .map((account) => ({ provider: account.provider, profile: account.profile }));
+    if (!guard()) return new Set<string>();
+    // Remove stale eligibility before the network check. Only a successful
+    // positive response below may promote a sibling back to AVAILABLE.
+    for (const target of targets) {
+      const account = this.store.getAccount(target.provider, target.profile);
+      if (!account) continue;
+      this.store.upsertAccount({
+        ...account,
+        availability: "QUOTA_UNKNOWN",
+        reason: "remote_usage_unverified",
+        lastChecked: new Date().toISOString(),
+      });
+    }
     const rows = await fetchRemoteUsageForAccounts(this.store, targets, {
       root: this.store.rootDir,
       force: true,
       maxAgeMs: 0,
+      applyState: false,
+      persistCache: false,
+      shouldContinue: guard,
     });
     const positive = new Set<string>();
+    if (!guard()) return positive;
     for (const row of rows) {
-      if (!row.ok) continue;
+      if (!row.ok) {
+        const account = this.store.getAccount(row.provider, row.profile);
+        if (account) {
+          this.store.upsertAccount({
+            ...account,
+            availability: "QUOTA_UNKNOWN",
+            reason: "remote_usage_unknown",
+            lastChecked: new Date().toISOString(),
+          });
+        }
+        continue;
+      }
       const primary =
         row.windows.find((window) => window.remainingPercent != null) ?? row.windows[0];
-      if (!primary || primary.remainingPercent == null) continue;
+      if (!primary || primary.remainingPercent == null) {
+        const account = this.store.getAccount(row.provider, row.profile);
+        if (account) {
+          this.store.upsertAccount({
+            ...account,
+            availability: "QUOTA_UNKNOWN",
+            reason: "remote_usage_unknown",
+            lastChecked: new Date().toISOString(),
+          });
+        }
+        continue;
+      }
       if (primary.remainingPercent > 0 && !primary.limitReached) {
         positive.add(row.profile);
         this.router.reportResult({
@@ -235,6 +303,134 @@ export class OarDaemon {
         const bUsed = b.lastUsedAt ? Date.parse(b.lastUsedAt) : 0;
         return aUsed - bUsed || a.profile.localeCompare(b.profile);
       })[0]?.profile;
+  }
+
+  private pollLifecycleCurrent(epoch: number): boolean {
+    return this.running && this.lifecycleEpoch === epoch;
+  }
+
+  private pollPolicyCurrent(provider: string, profile: string): boolean {
+    const policy = this.store.getProviderPolicy(provider);
+    return (
+      policy.preferred === profile &&
+      policy.autoFailover &&
+      (policy.mode === "auto" || process.env.OAR_FORCE_AUTO === "1")
+    );
+  }
+
+  private async pollQuota(epoch: number): Promise<QuotaPollResult> {
+    const state = this.store.getState();
+    const checked: Array<{
+      provider: string;
+      profile: string;
+      remainingPercent?: number;
+      ok: boolean;
+    }> = [];
+    const failovers: Array<{ provider: string; from: string; to: string }> = [];
+
+    for (const [provider, policy] of Object.entries(state.providers)) {
+      if (!this.pollLifecycleCurrent(epoch)) return { checked, failovers };
+      const autoOn =
+        policy.autoFailover &&
+        (policy.mode === "auto" || process.env.OAR_FORCE_AUTO === "1");
+      if (!autoOn || !policy.preferred) continue;
+      const current = this.store.getAccount(provider, policy.preferred);
+      if (!current) continue;
+
+      const [usage] = await fetchRemoteUsageForAccounts(
+        this.store,
+        [{ provider: current.provider, profile: current.profile }],
+        {
+          root: this.store.rootDir,
+          force: true,
+          maxAgeMs: 0,
+          applyState: false,
+          persistCache: false,
+        },
+      );
+      if (!this.pollLifecycleCurrent(epoch)) return { checked, failovers };
+      if (!this.pollPolicyCurrent(provider, current.profile)) continue;
+      if (!usage?.ok) {
+        checked.push({ provider, profile: current.profile, ok: false });
+        continue;
+      }
+      const primary =
+        usage.windows.find((window) => window.remainingPercent != null) ?? usage.windows[0];
+      if (!primary || primary.remainingPercent == null) {
+        checked.push({ provider, profile: current.profile, ok: false });
+        continue;
+      }
+      const remainingPercent = primary.remainingPercent;
+      checked.push({ provider, profile: current.profile, remainingPercent, ok: true });
+      if (remainingPercent !== 0) {
+        this.router.reportResult({
+          provider,
+          account: current.profile,
+          result: "QUOTA_AVAILABLE",
+          detail: `quota_poll_${remainingPercent}`,
+        });
+        continue;
+      }
+
+      this.router.reportResult({
+        provider,
+        account: current.profile,
+        result: "QUOTA_EXHAUSTED",
+        detail: "quota_poll_0",
+      });
+      const guard = () =>
+        this.pollLifecycleCurrent(epoch) &&
+        this.pollPolicyCurrent(provider, current.profile);
+      const positive = await this.fetchVerifiedPositiveProfiles(
+        provider,
+        current.profile,
+        guard,
+      );
+      if (!this.pollLifecycleCurrent(epoch)) return { checked, failovers };
+      if (!this.pollPolicyCurrent(provider, current.profile)) continue;
+      const nextProfile = this.selectVerifiedFailover(provider, current.profile, positive);
+      if (!nextProfile || !this.activateOnUse) continue;
+
+      this.router.use(provider, nextProfile);
+      await this.activator.activate(provider, nextProfile);
+      failovers.push({ provider, from: current.profile, to: nextProfile });
+      this.events.append({
+        ts: new Date().toISOString(),
+        event: "failover",
+        provider,
+        profile: nextProfile,
+        reason: `from ${current.profile} (quota_poll_0)`,
+      });
+    }
+    this.events.append({
+      ts: new Date().toISOString(),
+      event: "quota_poll",
+      reason: `checked=${checked.length} failovers=${failovers.length}`,
+    });
+    return { checked, failovers };
+  }
+
+  private async runQuotaPollOnce(): Promise<QuotaPollResult | undefined> {
+    if (this.quotaPollInFlight) return undefined;
+    this.quotaPollInFlight = true;
+    const epoch = this.lifecycleEpoch;
+    try {
+      return await this.pollQuota(epoch);
+    } finally {
+      this.quotaPollInFlight = false;
+    }
+  }
+
+  private async runScheduledQuotaPoll(): Promise<void> {
+    try {
+      await this.runQuotaPollOnce();
+    } catch (error) {
+      this.events.append({
+        ts: new Date().toISOString(),
+        event: "quota_poll_error",
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async dispatch(req: OarRequest): Promise<OarResponse> {
@@ -680,6 +876,13 @@ export class OarDaemon {
         }
         return { ok: true, data: { enabled, forceAuto: process.env.OAR_FORCE_AUTO === "1" } };
       }
+      case "poll-quota":
+        return {
+          ok: true,
+          data:
+            (await this.runQuotaPollOnce()) ??
+            { checked: [], failovers: [], skipped: "in_flight" },
+        };
       case "doctor":
         return {
           ok: true,
@@ -689,6 +892,7 @@ export class OarDaemon {
             authPaths: this.activator.getAuthPaths(),
             accountCount: this.store.listAccounts().length,
             leaseCount: this.leases.list().length,
+            quotaPollIntervalMs: this.quotaPollIntervalMs,
             pid: process.pid,
           },
         };

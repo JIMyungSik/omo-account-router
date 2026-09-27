@@ -62,6 +62,7 @@ export type OarRequest =
       activate?: boolean;
     }
   | { protocol: 1; action: "test"; provider: ProviderId; profile: ProfileId; live?: boolean }
+  | { protocol: 1; action: "poll-quota" }
   | { protocol: 1; action: "doctor" }
   /** Enable auto+failover for every provider that has 2+ vault profiles. */
   | { protocol: 1; action: "bootstrap-auto" };

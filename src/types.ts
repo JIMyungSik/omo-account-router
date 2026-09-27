@@ -7,6 +7,7 @@ export type AccountAvailability =
   | "COOLDOWN"
   | "RATE_LIMITED"
   | "QUOTA_EXHAUSTED"
+  | "QUOTA_UNKNOWN"
   | "AUTH_EXPIRED"
   | "AUTH_REVOKED"
   | "REQUIRES_LOGIN"
