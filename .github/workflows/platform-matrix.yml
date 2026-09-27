@@ -1,8 +1,7 @@
 name: platform-matrix
 
 on:
-  push:
-    branches: [test/platform-matrix]
+  workflow_dispatch:
 
 jobs:
   test:

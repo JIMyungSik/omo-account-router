@@ -4,13 +4,13 @@ OAR (`oar-cli`) is a local multi-account router. It copies credentials into live
 
 ## Workflow
 
-`main` does not accept a direct push, including from administrators. Open a pull request. The `pr-gate` workflow runs unit tests, integration tests, and the style check. If all three pass, the workflow comments with the result, squash-merges a same-repo PR, and deletes its branch. If any fail, it requests changes and does not merge.
+`main` does not accept a direct push, including from administrators. Open a pull request. The `pr-gate` workflow runs unit tests, integration tests, the style check, and the full suite on Ubuntu and Windows. If every job passes, the workflow comments with the result, squash-merges a same-repo PR, and deletes its branch. If any fail, it requests changes and does not merge.
 
 1. Branch from up-to-date `main`, or open a PR from a fork.
 2. Keep the change small and limited to the behavior you are fixing.
 3. Run `bun test` and `node scripts/check-style.mjs` locally. Do not delete or skip a failing test to get green.
 4. Open a pull request against `main`. Say what changed and how you verified it.
-5. Wait for `unit`, `integration`, and `style`. A failure is a change request. Push a fix to the same branch.
+5. Wait for `unit`, `integration`, `style`, `test (ubuntu-latest)`, and `test (windows-latest)`. A failure is a change request. Push a fix to the same branch.
 6. Resolve every review conversation. Do not force-push or delete `main`.
 
 Fork PRs are tested the same way, but they are not auto-merged. A maintainer merges them after the checks pass.
