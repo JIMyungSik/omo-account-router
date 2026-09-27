@@ -104,7 +104,7 @@ oar import-auth --all
 oar recommend --refresh
 ```
 
-패키지 이름은 **`oar-cli`** 입니다.  
+패키지 이름은 **`@carjms/oar-cli`** 입니다.
 (npm 이름 `oar` 는 무관한 옛 패키지가 선점)  
 설치 후 명령은 **`oar`**.
 
@@ -173,7 +173,7 @@ Not a model router. Not a hosted proxy.
 3/  
 Install (Node 22+):  
 `npm i -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz`  
-Binary name: `oar` (package: `oar-cli`)  
+Binary name: `oar` (package: `@carjms/oar-cli`)
 https://github.com/JIMyungSik/omo-account-router
 
 ---

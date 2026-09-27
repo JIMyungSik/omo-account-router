@@ -56,12 +56,12 @@ OAR이 **가장 깊게** 붙는 곳은 **Senpi/OMO `auth.json` 핫 리로드** �
 
 ```bash
 npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz
-# 또는: npm install -g oar-cli
+# 또는: npm install -g @carjms/oar-cli
 
 oar doctor
 oar daemon start
 oar import-auth --all
-bash "$(npm root -g)/oar-cli/scripts/install.sh" --skip-build   # 선택
+bash "$(npm root -g)/@carjms/oar-cli/scripts/install.sh" --skip-build   # 선택
 ```
 
 ### 일상

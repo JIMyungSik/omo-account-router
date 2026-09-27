@@ -18,7 +18,7 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 | | |
 |--|--|
-| 패키지명 | **`oar-cli`** (실행 명령은 **`oar`**) |
+| 패키지명 | **`@carjms/oar-cli`** (실행 명령은 **`oar`**) |
 | 버전 | `0.3.0` |
 | 라이선스 | [MIT](LICENSE) |
 | 런타임 | Node.js **22+** (개발 시 Bun 선택) |
@@ -26,9 +26,10 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 | 약관 메모 | [docs/compliance.md](docs/compliance.md) (**법률 자문 아님**) |
 | 저장소 | https://github.com/JIMyungSik/omo-account-router |
 
-> npm 이름 `oar` 는 무관한 옛 패키지가 선점 중입니다. **`oar-cli`** 로 설치하고, 명령은 **`oar`** 를 쓰세요.
+> npm은 비범위 이름 `oar-cli`가 기존 패키지와 너무 유사하다고 거절합니다.
+> **`@carjms/oar-cli`** 로 설치하고, 명령은 그대로 **`oar`** 를 쓰세요.
 
-**OMO `5.0.0` / Senpi `2026.9.27`** 기준으로 검증했습니다. 계정 우선 모델
+**OMO `5.0.1` / Senpi `2026.9.27`** 기준으로 검증했습니다. 계정 우선 모델
 fallback에는
 [`before_retry_fallback`](https://github.com/code-yeongyu/senpi/pull/2185)이
 포함된 Senpi 빌드가 필요합니다. OAR은 별도 재시도 엔진을 만들지 않고 이
@@ -53,7 +54,7 @@ CLI, 데몬, vault는 macOS, Linux, Windows에서 동작합니다. 2026-09-24, B
 ### 권장 — npm
 
 ```bash
-npm install -g oar-cli
+npm install -g @carjms/oar-cli
 ```
 
 **Node.js 22+** 필요.
@@ -74,7 +75,7 @@ npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/hea
 ### macOS 상시 daemon + Senpi 확장 (선택)
 
 ```bash
-bash "$(npm root -g)/oar-cli/scripts/install.sh" --skip-build
+bash "$(npm root -g)/@carjms/oar-cli/scripts/install.sh" --skip-build
 # 또는 설치 소스가 tarball이면:
 bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
 ```
@@ -82,7 +83,7 @@ bash "$(npm root -g)/omo-account-router/scripts/install.sh" --skip-build
 ### 제거
 
 ```bash
-npm uninstall -g oar-cli
+npm uninstall -g @carjms/oar-cli
 # 또는
 npm uninstall -g omo-account-router
 ```
@@ -526,7 +527,7 @@ refusal, unknown 오류는 이 preset에서 모델 전환을 일으키지 않습
 
 ```bash
 mkdir -p "$HOME/Library/Application Support/SwiftBar"
-ln -sf "$(npm root -g)/oar-cli/scripts/oar-xbar.sh" \
+ln -sf "$(npm root -g)/@carjms/oar-cli/scripts/oar-xbar.sh" \
   "$HOME/Library/Application Support/SwiftBar/oar.5s.sh"
 ```
 

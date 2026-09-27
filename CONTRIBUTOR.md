@@ -1,6 +1,6 @@
 # Contributing to OAR
 
-OAR (`oar-cli`) is a local multi-account router. It copies credentials into live auth slots. Treat every credential as secret.
+OAR (`@carjms/oar-cli`) is a local multi-account router. It copies credentials into live auth slots. Treat every credential as secret.
 
 ## Workflow
 

@@ -1,7 +1,9 @@
-# Publishing `oar-cli` to npm
+# Publishing `@carjms/oar-cli` to npm
 
 The shell command is **`oar`**.  
-The npm package name is **`oar-cli`** because the bare name [`oar`](https://www.npmjs.com/package/oar) is already taken (unrelated 2013 package).
+The npm package name is **`@carjms/oar-cli`**. The bare name
+[`oar`](https://www.npmjs.com/package/oar) is already taken, and npm rejected
+the unscoped `oar-cli` as too similar to another package.
 
 ## One-time login
 
@@ -21,7 +23,7 @@ npm publish --access public
 ## Users install
 
 ```bash
-npm install -g oar-cli
+npm install -g @carjms/oar-cli
 oar doctor
 ```
 
