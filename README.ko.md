@@ -125,6 +125,10 @@ oar auto xai on             # daemon 주기 확인: 0% → 잔여 있는 sibling
 oar order xai main sub apple # 사용자가 지정한 전환 순서
 oar poll-quota              # daemon quota 확인 즉시 실행
 oar auto xai off
+
+# OMO 세션 안에서
+/model-preset use grok-astra
+/model-preset status grok-astra
 ```
 
 계정 정보를 다루는 모든 명령은 실행 전에 만료된 Codex/xAI OAuth를 갱신하고
@@ -426,6 +430,35 @@ switch:   oar use openai-codex main
 ```
 
 **세션 모델은 바꾸지 않습니다.** OAR이 활성화할 **계정** 추천만 합니다.
+
+### Grok → Astra 모델 preset
+
+모델 preset은 Senpi native fallback chain을 사용하며, OAR은 계속 계정 선택만
+담당합니다. OMO 안에서 내장 preset을 켭니다.
+
+```text
+/model-preset use grok-astra
+```
+
+정확한 시작 selector는 `xai/grok-4.5`이고, 이후
+`chatgpt-subscription/gpt-6-astra:high`, DeepInfra DeepSeek V4.1 Flash
+순서로 전환합니다. 세션도 정확한 source model로 시작해야 합니다.
+
+```bash
+omo --model xai/grok-4.5:high
+```
+
+순서는 계정 우선, 모델 전환은 그다음입니다. OAR이 잔여량이 확인된 다른
+xAI 계정으로 전환하면 동일 Grok 모델을 한 번 재시도합니다. 더 이상 계정
+전환 후보가 없을 때만 quota, rate-limit, server 오류가 native model chain을
+진행시킵니다. auth, prompt, tool, local, invalid-argument, model-not-found,
+refusal, unknown 오류는 이 preset에서 모델 전환을 일으키지 않습니다.
+
+```text
+/model-preset list
+/model-preset status grok-astra
+/model-preset off grok-astra
+```
 
 ### 범위
 | 함 | 안 함 |

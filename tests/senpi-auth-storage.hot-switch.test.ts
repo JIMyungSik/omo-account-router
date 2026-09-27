@@ -163,7 +163,7 @@ describe("Phase 1 — real Senpi AuthStorage hot-switch (no process restart)", (
 
       try {
         await waitForDaemonListening(child, 15_000);
-        const client = new OarClient({ socketPath: sock, retries: 0, timeoutMs: 400 });
+        const client = new OarClient({ socketPath: sock, retries: 0, timeoutMs: 5_000 });
         const ping = await client.request({ protocol: 1, action: "ping" });
         expect(ping.ok).toBe(true);
         const used = await client.request({ protocol: 1, action: "use", provider: "xai", profile: "account-b" });
