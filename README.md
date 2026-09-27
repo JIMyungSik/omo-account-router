@@ -405,6 +405,10 @@ Parallel OMO windows share **one live slot per provider**.
 - The production daemon checks each auto-enabled provider's preferred account
   every 60 seconds; set `OAR_QUOTA_POLL_SEC` to another non-negative interval
   (`0` disables background polling)
+- `oar auto` and `oar order` take effect immediately without a restart.
+  `OAR_QUOTA_POLL_SEC` is read when the daemon starts, so restart the managed
+  service after changing it. On the installer-managed macOS LaunchAgent, rerun
+  `bash scripts/install.sh --skip-build` instead of racing `daemon stop/start`.
 - The normal check probes only the preferred account; sibling accounts are
   fetched only after the preferred account is verified at 0%
 - Remote usage 0% (Grok credits, etc.) → **warn + refuse** `oar use`
