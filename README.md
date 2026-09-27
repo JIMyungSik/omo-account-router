@@ -19,7 +19,7 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 | | |
 |--|--|
 | Package | **`oar-cli`** on npm path (command is still **`oar`**) |
-| Version | `0.2.0` |
+| Version | `0.3.0` |
 | License | [MIT](LICENSE) |
 | Runtime | Node.js **22+** (Bun optional for dev) |
 | Tests | `bun test` |
@@ -28,7 +28,11 @@ oar CLI  ──UDS──  oar-daemon  ──  ~/.oar/vault + state
 
 > npm name bare `oar` is taken by an unrelated 2013 package. Install **`oar-cli`**; the binary is **`oar`**.
 
-Verified against **OMO `5.0.0-0.beta.42` / Senpi `2026.9.4-3`**: header-only `after_provider_response` classification, and live `auth.json` writes merge instead of replacing native multi-account fields (`accounts`).
+Verified against **OMO `5.0.0` / Senpi `2026.9.27`**. Account-first model
+fallback requires a Senpi build containing
+[`before_retry_fallback`](https://github.com/code-yeongyu/senpi/pull/2185);
+OAR detects and uses that native extension event rather than implementing a
+second retry engine.
 
 ## Platforms
 
@@ -46,10 +50,10 @@ The CLI, daemon, and vault work on macOS, Linux, and Windows. Checked on 2026-09
 
 ## Install (no git clone)
 
-### Recommended — GitHub archive
+### Recommended — npm
 
 ```bash
-npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz
+npm install -g oar-cli
 ```
 
 Requires **Node.js 22+**.
@@ -61,10 +65,10 @@ oar panel --refresh
 oar recommend --refresh
 ```
 
-### After npm registry publish
+### GitHub archive
 
 ```bash
-npm install -g oar-cli
+npm install -g https://github.com/JIMyungSik/omo-account-router/archive/refs/heads/main.tar.gz
 ```
 
 ### Optional macOS always-on daemon + Senpi extension
@@ -132,12 +136,60 @@ oar auto xai off
 /model-preset status grok-astra
 ```
 
+## Account first, model second
+
+![OAR v0.3.0 terminal flow](docs/social/oar-v0.3.0-terminal-demo.svg)
+
+The `grok-astra` preset compiles directly to Senpi's native
+`retry.fallbackChains`:
+
+```text
+xai/grok-4.5
+  → chatgpt-subscription/gpt-6-astra:high
+  → deepinfra/deepseek-ai/DeepSeek-V4.1-Flash:high
+```
+
+The order is deliberate:
+
+1. OAR refreshes quota and selects a verified-positive xAI profile.
+2. If the active profile is exhausted and a positive sibling exists, OAR
+   activates it and requests one bounded retry of the **same Grok model**.
+3. Only after eligible xAI profiles are exhausted does Senpi advance to Astra,
+   then DeepSeek.
+4. Quota, rate-limit, and server failures may advance. Auth, prompt, tool,
+   local, invalid-argument, model-not-found, refusal, and unknown failures stop
+   model fallback.
+
+Commands:
+
+```text
+/model-preset list
+/model-preset use grok-astra
+/model-preset status grok-astra
+/model-preset off grok-astra
+```
+
+`oar auto` remains off by default. Use only accounts you legitimately control
+and read [the compliance note](docs/compliance.md); automated quota pooling may
+conflict with provider terms.
+
 Every account-facing command refreshes expired Codex/xAI OAuth credentials and
 fetches current remote remaining percentages before it runs. Commands that
 already own a remote-usage flow (`oar`, `oar usage`, `oar panel`,
 `oar recommend`, and `oar use`) reuse that flow rather than issuing an extra
 request. Help, version, and daemon lifecycle commands remain offline-safe.
 An explicit `oar panel --no-remote` also skips credential and quota network calls.
+
+## Community and support
+
+- Questions, compatibility reports, and adoption notes:
+  [GitHub Discussions](https://github.com/JIMyungSik/omo-account-router/discussions)
+- Reproducible bugs:
+  [GitHub Issues](https://github.com/JIMyungSik/omo-account-router/issues)
+- Security reports: [SECURITY.md](SECURITY.md)
+
+Please report the OMO/Senpi version, OS, command, expected result, and redacted
+output. Never post access tokens, refresh tokens, cookies, or `auth.json`.
 
 ### Second account (same provider)
 
