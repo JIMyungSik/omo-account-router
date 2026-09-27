@@ -16,6 +16,8 @@ bash "$ROOT/scripts/install.sh" --skip-build 2>/dev/null || bash "$ROOT/scripts/
 
 echo "==> Link OMO extensions"
 ln -sfn "$ROOT/extensions/oar-senpi.js" "$EXT_DIR/oar.js"
+ln -sfn "$ROOT/extensions/oar-senpi-client.js" "$EXT_DIR/oar-senpi-client.js"
+ln -sfn "$ROOT/extensions/oar-model-presets.js" "$EXT_DIR/oar-model-presets.js"
 ln -sfn "$ROOT/extensions/cursor-omo.js" "$EXT_DIR/cursor-omo.js"
 echo "    $EXT_DIR/oar.js -> oar-senpi.js"
 echo "    $EXT_DIR/cursor-omo.js"

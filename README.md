@@ -126,6 +126,10 @@ oar auto xai on             # daemon polls preferred; 0% → positive sibling
 oar order xai main sub apple # user-defined failover order
 oar poll-quota              # run the daemon check immediately
 oar auto xai off
+
+# Inside an OMO session
+/model-preset use grok-astra
+/model-preset status grok-astra
 ```
 
 Every account-facing command refreshes expired Codex/xAI OAuth credentials and
@@ -434,6 +438,35 @@ switch:   oar use openai-codex main
 ```
 
 Does **not** change the session model — only which **account** OAR would activate.
+
+### Grok → Astra model preset
+
+Model presets use Senpi's native fallback chain; OAR still owns only account
+selection. Enable the built-in preset inside OMO:
+
+```text
+/model-preset use grok-astra
+```
+
+The preset starts from the exact selector `xai/grok-4.5`, then falls back to
+`chatgpt-subscription/gpt-6-astra:high`, then DeepInfra DeepSeek V4.1 Flash.
+Start the session with the exact source model:
+
+```bash
+omo --model xai/grok-4.5:high
+```
+
+Ordering is account-first and model-second. When OAR switches to another
+verified-positive xAI profile, the session retries the same Grok model once.
+Only after no account failover remains may quota, rate-limit, or server failures
+advance the native model chain. Auth, prompt, tool, local, invalid-argument,
+model-not-found, refusal, and unknown failures do not advance this preset.
+
+```text
+/model-preset list
+/model-preset status grok-astra
+/model-preset off grok-astra
+```
 
 ### Scope
 | In scope | Out of scope |
