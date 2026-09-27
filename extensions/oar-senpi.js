@@ -177,12 +177,19 @@ function registerOarExtension(pi, { requestFn, bootstrapFn }) {
     }
   });
 
-  pi.on("before_retry_fallback", (event, ctx) =>
-    modelPreset.beforeRetryFallback(
+  pi.on("before_retry_fallback", (event, ctx) => {
+    const decision = modelPreset.beforeRetryFallback(
       event,
       ctx.sessionSettings.getRetryFallbackSettings(),
-    ),
-  );
+    );
+    if (process.env.OAR_DEBUG) {
+      ctx.ui.notify(
+        `OAR preset ${event.provider}/${event.model} ${event.reason}: ${decision?.action || "continue"}`,
+        "info",
+      );
+    }
+    return decision;
+  });
 
   pi.registerCommand("account", {
     description: "OAR account router (status|use|auto|doctor|bootstrap)",

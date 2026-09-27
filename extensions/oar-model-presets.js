@@ -49,6 +49,19 @@ export function getModelPresetStatus(name, settings) {
   };
 }
 
+function runtimeStatus(preset, registry) {
+  return [preset.source, ...preset.fallbacks].map((selector) => {
+    const parsed = splitSelector(selector.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, ""));
+    const model = registry?.find?.(parsed.provider, parsed.model);
+    return {
+      selector,
+      modelFound: Boolean(model),
+      configuredAuth: model ? registry?.hasConfiguredAuth?.(model) !== false : false,
+      fallbackEligible: model ? registry?.isFallbackEligible?.(model) !== false : false,
+    };
+  });
+}
+
 export async function applyModelPreset(name, sessionSettings) {
   const preset = presetByName(name);
   await sessionSettings.setFallbackChain(preset.source, preset.fallbacks);
@@ -125,7 +138,10 @@ export function registerModelPresetCommand(pi) {
       }
       if (sub === "use") {
         await applyModelPreset(name, ctx.sessionSettings);
-        ctx.ui.notify(JSON.stringify(getModelPresetStatus(name, ctx.sessionSettings.getRetryFallbackSettings())), "info");
+        ctx.ui.notify(JSON.stringify({
+          ...getModelPresetStatus(name, ctx.sessionSettings.getRetryFallbackSettings()),
+          targets: runtimeStatus(presetByName(name), ctx.modelRegistry),
+        }), "info");
         return;
       }
       if (sub === "off") {
@@ -134,7 +150,10 @@ export function registerModelPresetCommand(pi) {
         return;
       }
       if (sub === "status") {
-        ctx.ui.notify(JSON.stringify(getModelPresetStatus(name, ctx.sessionSettings.getRetryFallbackSettings())), "info");
+        ctx.ui.notify(JSON.stringify({
+          ...getModelPresetStatus(name, ctx.sessionSettings.getRetryFallbackSettings()),
+          targets: runtimeStatus(presetByName(name), ctx.modelRegistry),
+        }), "info");
         return;
       }
       ctx.ui.notify("usage: /model-preset list|use|status|off [name]", "warning");
