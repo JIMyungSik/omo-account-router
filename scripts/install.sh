@@ -82,10 +82,10 @@ EXT_DIR="$HOME_DIR/.omo/agent/extensions"
 if [ -d "$HOME_DIR/.omo/agent" ]; then
   mkdir -p "$EXT_DIR"
   rm -f "$EXT_DIR/oar-senpi-client.js" "$EXT_DIR/oar-model-presets.js"
-  ln -sf "$ROOT/extensions/oar-senpi.js" "$EXT_DIR/oar.js"
+  ln -sf "$ROOT/dist/oar-extension.js" "$EXT_DIR/oar.js"
   ln -sf "$ROOT/extensions/cursor-omo.js" "$EXT_DIR/cursor-omo.js"
   ln -sf "$ROOT/extensions/oar-usage-status.js" "$EXT_DIR/oar-usage-status.js"
-  echo "    linked $EXT_DIR/oar.js -> $ROOT/extensions/oar-senpi.js"
+  echo "    linked $EXT_DIR/oar.js -> $ROOT/dist/oar-extension.js"
   echo "    linked $EXT_DIR/cursor-omo.js (Cursor provider via local bridge)"
   echo "    linked $EXT_DIR/oar-usage-status.js (Grok/Codex remaining % footer)"
 else
