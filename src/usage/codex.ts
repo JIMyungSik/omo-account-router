@@ -1,3 +1,4 @@
+import { accountIdFromIdToken } from "../import-all.ts";
 import type { StoredCredential } from "../types.ts";
 import type { AccountRemoteUsage, UsageWindow } from "./types.ts";
 
@@ -76,8 +77,11 @@ export async function fetchCodexUsage(
     Accept: "application/json",
     "User-Agent": "omo-account-router/0.1",
   };
-  if (credential.accountId) {
-    headers["ChatGPT-Account-Id"] = credential.accountId;
+  const accountId =
+    credential.accountId ??
+    (credential.idToken ? accountIdFromIdToken(credential.idToken) : undefined);
+  if (accountId) {
+    headers["ChatGPT-Account-Id"] = accountId;
   }
 
   const fetchImpl = opts?.fetchImpl ?? fetch;
@@ -88,6 +92,21 @@ export async function fetchCodexUsage(
       signal: AbortSignal.timeout(15_000),
     });
     const text = await response.text();
+    if (!response.ok) {
+      return {
+        provider,
+        profile,
+        source: "codex-wham",
+        fetchedAt,
+        ok: false,
+        error: `HTTP ${response.status}`,
+        windows: [],
+        extras: {
+          httpStatus: response.status,
+          ...(response.status === 401 ? { diagnostic: "chatgpt-wham-unauthorized" } : {}),
+        },
+      };
+    }
     let data: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(text);
@@ -103,17 +122,7 @@ export async function fetchCodexUsage(
         ok: false,
         error: `invalid JSON (HTTP ${response.status})`,
         windows: [],
-      };
-    }
-    if (!response.ok) {
-      return {
-        provider,
-        profile,
-        source: "codex-wham",
-        fetchedAt,
-        ok: false,
-        error: `HTTP ${response.status}`,
-        windows: [],
+        extras: { httpStatus: response.status },
       };
     }
 

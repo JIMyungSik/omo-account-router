@@ -1,7 +1,7 @@
 # xAI / Codex remaining-usage design (OAR)
 
-Status: research complete · implementation not started  
-Date: 2026-08-16  
+Status: implemented · provider responses remain partly unreported
+Date: 2026-09-29 (original research: 2026-08-16)
 Scope: what OAR can honestly show as “usage / remaining %” for **xAI** and **openai-codex**.
 
 ## Executive answer
@@ -12,6 +12,12 @@ Scope: what OAR can honestly show as “usage / remaining %” for **xAI** and *
 | **openai-codex (ChatGPT OAuth → `chatgpt.com/backend-api`)** | **No** public stable API for residual %; official UI is Codex Usage page / CLI `/status` | **Passive**: classify usage-limit errors; surface cooldown. **Do not** reverse-engineer private backend usage routes |
 
 **True remaining % in `oar panel` is not available today for either path under documented, ToS-safe APIs.**
+
+OAR now queries the live provider endpoints without scraping. xAI unified/Apple
+billing responses that omit a percentage are shown as `unreported` rather than
+as 0%, while an xAI 402/403 response explicitly saying that credits or a Grok
+subscription are required is recorded as exhausted. ChatGPT WHAM 401 results
+are reported as `chatgpt-wham-unauthorized`; refresh or re-login that profile.
 
 ---
 
@@ -210,7 +216,7 @@ Until Phase 1–2 land:
 | Scrape private Codex usage API | **No** | Unstable + policy / ToS risk |
 | Capture xAI `cost_in_usd_ticks` | **Yes (Phase 1)** | Documented, exact, per request |
 | User-defined budgets as % | **Yes (Phase 2)** | Honest operational metric |
-| supportsUsageQuery() | Keep `false` until a documented remaining signal exists; add `supportsUsageLedger(): true` instead | Avoid lying to callers |
+| supportsUsageQuery() | Usage is queried by the remote-usage layer; adapters remain capability-neutral | Avoid coupling router adapters to provider-private billing response shapes |
 
 ---
 

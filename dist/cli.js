@@ -99,7 +99,7 @@ class OarClient {
         socket.write(payload);
       });
       socket.on("data", (chunk) => {
-        buf = Buffer.concat([buf, chunk]);
+        buf = Buffer.concat([buf, typeof chunk === "string" ? Buffer.from(chunk) : chunk]);
         const idx = buf.indexOf(0);
         if (idx === -1)
           return;
@@ -549,6 +549,7 @@ function writeImportAccountSetting(account, root = defaultOarRoot()) {
 var REPORT_RESULTS = [
   "SUCCESS",
   "QUOTA_AVAILABLE",
+  "QUOTA_UNKNOWN",
   "AUTH_EXPIRED",
   "AUTH_REVOKED",
   "RATE_LIMITED",
@@ -1533,6 +1534,179 @@ function putCachedUsage(entry, root = defaultOarRoot()) {
   saveUsageCache(cache, root);
 }
 
+// src/import-all.ts
+import { readFileSync as readFileSync8 } from "node:fs";
+function isRecord4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isStoredCredential2(value) {
+  if (!isRecord4(value))
+    return false;
+  if (value.type === "oauth") {
+    if (typeof value.access !== "string" || typeof value.refresh !== "string" || typeof value.expires !== "number") {
+      return false;
+    }
+    if (value.accountId !== undefined && typeof value.accountId !== "string")
+      return false;
+    if (value.idToken !== undefined && typeof value.idToken !== "string")
+      return false;
+    return true;
+  }
+  if (value.type === "api_key") {
+    return typeof value.key === "string";
+  }
+  return false;
+}
+function parseAuthJsonFile2(authPath) {
+  let raw;
+  try {
+    raw = readFileSync8(authPath, "utf8");
+  } catch {
+    throw new Error(`unable to read ${authPath}`);
+  }
+  try {
+    const data = JSON.parse(raw);
+    if (!isRecord4(data))
+      throw new Error("invalid auth.json");
+    return data;
+  } catch {
+    throw new Error(`invalid auth.json: ${authPath}`);
+  }
+}
+function expiresFromAccessJwt2(access) {
+  const payload = decodeJwtPayload(access);
+  const exp = payload?.exp;
+  if (typeof exp === "number" && Number.isFinite(exp) && exp > 0) {
+    return exp * 1000;
+  }
+  return;
+}
+function accountIdFromIdToken2(idToken) {
+  const payload = decodeJwtPayload(idToken);
+  if (!payload)
+    return;
+  const auth = payload["https://api.openai.com/auth"];
+  if (isRecord4(auth)) {
+    const id = auth.chatgpt_account_id;
+    if (typeof id === "string" && id.length > 0)
+      return id;
+  }
+  if (typeof payload.chatgpt_account_id === "string" && payload.chatgpt_account_id.length > 0) {
+    return payload.chatgpt_account_id;
+  }
+  return;
+}
+function credentialFromNativeCodexAuth2(data) {
+  if (!isRecord4(data))
+    return;
+  const tokens = data.tokens;
+  if (!isRecord4(tokens))
+    return;
+  const access = tokens.access_token;
+  const refresh = tokens.refresh_token;
+  if (typeof access !== "string" || access.length === 0)
+    return;
+  if (typeof refresh !== "string" || refresh.length === 0)
+    return;
+  const idToken = typeof tokens.id_token === "string" && tokens.id_token.length > 0 ? tokens.id_token : undefined;
+  let accountId = typeof tokens.account_id === "string" && tokens.account_id.length > 0 ? tokens.account_id : undefined;
+  if (!accountId && idToken)
+    accountId = accountIdFromIdToken2(idToken);
+  const expires = expiresFromAccessJwt2(access) ?? 0;
+  return {
+    type: "oauth",
+    access,
+    refresh,
+    expires,
+    ...accountId ? { accountId } : {},
+    ...idToken ? { idToken } : {}
+  };
+}
+function readCredentialFromAuthJson2(authPath, provider, opts) {
+  const data = parseAuthJsonFile2(authPath);
+  for (const key of authJsonKeysForProvider(provider)) {
+    const slot = data[key];
+    if (!isStoredCredential2(slot))
+      continue;
+    return selectImportAccount2(slot, provider, authPath, opts?.account ?? "latest").credential;
+  }
+  if (provider === "openai-codex" || provider === "chatgpt-subscription") {
+    const native = credentialFromNativeCodexAuth2(data);
+    if (native)
+      return native;
+  }
+  return missingProvider2(data, provider, authPath);
+}
+function missingProvider2(data, provider, authPath) {
+  const available = Object.keys(data).filter((key) => isStoredCredential2(data[key]));
+  const looked = authJsonKeysForProvider(provider).join(", ");
+  throw new Error(`provider ${provider} not found in ${authPath} (looked for ${looked}; available: ${available.join(", ") || "none"})`);
+}
+function latestLoginSlotName2(linked) {
+  let best = 0;
+  let name;
+  for (const item of linked) {
+    if (!isRecord4(item) || typeof item.name !== "string")
+      continue;
+    const match = /^login-(\d+)$/.exec(item.name);
+    if (!match)
+      continue;
+    const n = Number(match[1]);
+    if (n > best) {
+      best = n;
+      name = item.name;
+    }
+  }
+  return name;
+}
+function credentialFromSlotEntry2(parent, entry) {
+  if (isStoredCredential2(entry))
+    return entry;
+  if (!isRecord4(entry) || parent.type !== "oauth" || typeof entry.access !== "string") {
+    throw new Error("selected accounts[] entry is not a credential");
+  }
+  const refresh = typeof entry.refresh === "string" ? entry.refresh : parent.refresh;
+  const expires = typeof entry.expires === "number" ? entry.expires : parent.expires;
+  return {
+    type: "oauth",
+    access: entry.access,
+    refresh,
+    expires,
+    ...parent.accountId ? { accountId: parent.accountId } : {},
+    ...typeof entry.idToken === "string" ? { idToken: entry.idToken } : parent.idToken ? { idToken: parent.idToken } : {}
+  };
+}
+function selectImportAccount2(slot, provider, authPath, account = "latest") {
+  if (account === "primary")
+    return { used: "primary", credential: slot };
+  const linked = slot.accounts;
+  if (account === "latest") {
+    const name = Array.isArray(linked) ? latestLoginSlotName2(linked) : undefined;
+    if (!name)
+      return { used: "primary", credential: slot };
+    return { used: name, credential: selectLinkedAccount2(slot, provider, authPath, name) };
+  }
+  return { used: account, credential: selectLinkedAccount2(slot, provider, authPath, account) };
+}
+function selectLinkedAccount2(slot, provider, authPath, account) {
+  const linked = slot.accounts;
+  if (!Array.isArray(linked) || linked.length === 0) {
+    throw new Error(`${provider} in ${authPath} has no accounts[] array; --account cannot be applied`);
+  }
+  const selected = account === "latest" ? latestLoginSlotName2(linked) : account;
+  if (!selected) {
+    throw new Error(`${provider} in ${authPath} has no login-N slot to use as latest`);
+  }
+  const idx = /^\d+$/.test(selected) ? Number(selected) - 1 : linked.findIndex((a) => {
+    return isRecord4(a) && a["name"] === selected;
+  });
+  if (idx < 0 || idx >= linked.length) {
+    const names = linked.map((a, i) => isRecord4(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`).join(", ");
+    throw new Error(`--account ${account} not found in ${provider} accounts[] (available: ${names})`);
+  }
+  return credentialFromSlotEntry2(slot, linked[idx]);
+}
+
 // src/usage/codex.ts
 var WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 function remaining(used) {
@@ -1597,8 +1771,9 @@ async function fetchCodexUsage(provider, profile, credential, opts) {
     Accept: "application/json",
     "User-Agent": "omo-account-router/0.1"
   };
-  if (credential.accountId) {
-    headers["ChatGPT-Account-Id"] = credential.accountId;
+  const accountId = credential.accountId ?? (credential.idToken ? accountIdFromIdToken2(credential.idToken) : undefined);
+  if (accountId) {
+    headers["ChatGPT-Account-Id"] = accountId;
   }
   const fetchImpl = opts?.fetchImpl ?? fetch;
   try {
@@ -1608,6 +1783,21 @@ async function fetchCodexUsage(provider, profile, credential, opts) {
       signal: AbortSignal.timeout(15000)
     });
     const text = await response.text();
+    if (!response.ok) {
+      return {
+        provider,
+        profile,
+        source: "codex-wham",
+        fetchedAt,
+        ok: false,
+        error: `HTTP ${response.status}`,
+        windows: [],
+        extras: {
+          httpStatus: response.status,
+          ...response.status === 401 ? { diagnostic: "chatgpt-wham-unauthorized" } : {}
+        }
+      };
+    }
     let data = {};
     try {
       const parsed = JSON.parse(text);
@@ -1622,18 +1812,8 @@ async function fetchCodexUsage(provider, profile, credential, opts) {
         fetchedAt,
         ok: false,
         error: `invalid JSON (HTTP ${response.status})`,
-        windows: []
-      };
-    }
-    if (!response.ok) {
-      return {
-        provider,
-        profile,
-        source: "codex-wham",
-        fetchedAt,
-        ok: false,
-        error: `HTTP ${response.status}`,
-        windows: []
+        windows: [],
+        extras: { httpStatus: response.status }
       };
     }
     const windows = [];
@@ -1689,10 +1869,29 @@ async function fetchCodexUsage(provider, profile, credential, opts) {
 
 // src/usage/xai-grok.ts
 var GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+function isGrokCreditsExhaustedHttp(status, body) {
+  if (status !== 402 && status !== 403)
+    return false;
+  const text = body.toLowerCase();
+  return text.includes("run out of credits") || text.includes("need a grok subscription") || text.includes("add credits");
+}
 function remaining2(used) {
   if (used == null || !Number.isFinite(used))
     return null;
   return Math.max(0, Math.min(100, Math.round((100 - used) * 10) / 10));
+}
+function moneyVal(raw) {
+  if (typeof raw === "number" && Number.isFinite(raw))
+    return raw;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const val = raw.val;
+    if (typeof val === "number" && Number.isFinite(val))
+      return val;
+  }
+  return null;
+}
+function roundPercent(n) {
+  return Math.max(0, Math.min(100, Math.round(n * 10) / 10));
 }
 async function fetchXaiGrokSubscriptionUsage(provider, profile, credential, opts) {
   const fetchedAt = new Date().toISOString();
@@ -1720,6 +1919,42 @@ async function fetchXaiGrokSubscriptionUsage(provider, profile, credential, opts
       signal: AbortSignal.timeout(15000)
     });
     const text = await response.text();
+    if (!response.ok) {
+      if (isGrokCreditsExhaustedHttp(response.status, text)) {
+        return {
+          provider,
+          profile,
+          source: "grok-billing",
+          fetchedAt,
+          ok: true,
+          windows: [
+            {
+              kind: "period",
+              usedPercent: 100,
+              remainingPercent: 0,
+              label: "grok",
+              limitReached: true
+            }
+          ],
+          extras: {
+            httpStatus: response.status,
+            diagnostic: "grok-credits-exhausted",
+            unreported: false,
+            entitlementExhausted: true
+          }
+        };
+      }
+      return {
+        provider,
+        profile,
+        source: "grok-billing",
+        fetchedAt,
+        ok: false,
+        error: `HTTP ${response.status}`,
+        windows: [],
+        extras: { httpStatus: response.status }
+      };
+    }
     let data = {};
     try {
       const parsed = JSON.parse(text);
@@ -1734,23 +1969,40 @@ async function fetchXaiGrokSubscriptionUsage(provider, profile, credential, opts
         fetchedAt,
         ok: false,
         error: `invalid JSON (HTTP ${response.status})`,
-        windows: []
-      };
-    }
-    if (!response.ok) {
-      return {
-        provider,
-        profile,
-        source: "grok-billing",
-        fetchedAt,
-        ok: false,
-        error: `HTTP ${response.status}`,
-        windows: []
+        windows: [],
+        extras: { httpStatus: response.status }
       };
     }
     const config = data.config && typeof data.config === "object" ? data.config : data;
-    const usedRaw = config.creditUsagePercent;
-    const used = typeof usedRaw === "number" && Number.isFinite(usedRaw) ? usedRaw : null;
+    const isUnifiedBillingUser = config.isUnifiedBillingUser === true;
+    const creditUsed = typeof config.creditUsagePercent === "number" && Number.isFinite(config.creditUsagePercent) ? config.creditUsagePercent : null;
+    const onDemandCap = moneyVal(config.onDemandCap);
+    const onDemandUsed = moneyVal(config.onDemandUsed);
+    const prepaidBalance = moneyVal(config.prepaidBalance);
+    let used = creditUsed;
+    let limitReached = false;
+    let unreported = false;
+    let entitlementExhausted = false;
+    if (used == null) {
+      if (onDemandCap === 0) {
+        if (isUnifiedBillingUser) {
+          unreported = true;
+        } else {
+          used = 100;
+          limitReached = true;
+          entitlementExhausted = true;
+        }
+      } else if (onDemandCap != null && onDemandCap > 0 && onDemandUsed != null) {
+        used = roundPercent(onDemandUsed / onDemandCap * 100);
+        limitReached = onDemandUsed >= onDemandCap;
+        entitlementExhausted = limitReached;
+      } else {
+        unreported = true;
+      }
+    } else {
+      limitReached = used >= 100;
+      entitlementExhausted = limitReached;
+    }
     const period = config.currentPeriod;
     let resetsAt = null;
     let windowSeconds = null;
@@ -1778,7 +2030,7 @@ async function fetchXaiGrokSubscriptionUsage(provider, profile, credential, opts
         resetsAt,
         windowSeconds,
         label: "grok",
-        limitReached: used != null && used >= 100
+        limitReached: used != null && (used >= 100 || limitReached)
       }
     ];
     const productUsage = config.productUsage;
@@ -1810,7 +2062,12 @@ async function fetchXaiGrokSubscriptionUsage(provider, profile, credential, opts
       windows,
       extras: {
         periodType,
-        prepaidBalance: config.prepaidBalance?.val
+        prepaidBalance,
+        isUnifiedBillingUser,
+        onDemandCap,
+        onDemandUsed,
+        unreported,
+        entitlementExhausted
       }
     };
   } catch (error) {
@@ -1827,13 +2084,29 @@ async function fetchXaiGrokSubscriptionUsage(provider, profile, credential, opts
 }
 
 // src/usage/fetch.ts
+function isUnreportedUsage(usage) {
+  if (usage.extras?.unreported === true)
+    return true;
+  const primary = usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
+  return !primary || primary.remainingPercent == null;
+}
 function applyUsageToAccountState(store, usage) {
   const account = store.getAccount(usage.provider, usage.profile);
   if (!account || !usage.ok)
     return;
   const primary = usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
-  if (!primary || primary.remainingPercent == null)
+  if (isUnreportedUsage(usage) || !primary || primary.remainingPercent == null) {
+    if (account.availability === "QUOTA_EXHAUSTED" || account.availability === "AVAILABLE" || account.availability === "ACTIVE" || account.availability === "UNKNOWN") {
+      store.upsertAccount({
+        ...account,
+        availability: "QUOTA_UNKNOWN",
+        reason: "remote_usage_unreported",
+        until: null,
+        lastChecked: usage.fetchedAt
+      });
+    }
     return;
+  }
   if (primary.remainingPercent <= 0 || primary.limitReached) {
     const next = {
       ...account,
@@ -1851,7 +2124,30 @@ function applyUsageToAccountState(store, usage) {
       until: null,
       lastChecked: usage.fetchedAt
     });
+  } else if (account.availability === "QUOTA_UNKNOWN" && primary.remainingPercent > 0 && !primary.limitReached) {
+    store.upsertAccount({
+      ...account,
+      availability: "AVAILABLE",
+      reason: undefined,
+      until: null,
+      lastChecked: usage.fetchedAt
+    });
   }
+}
+function attachUsageHttpDiagnostics(usage) {
+  if (usage.ok || !usage.error)
+    return usage;
+  const match = /\bHTTP (\d+)\b/.exec(usage.error);
+  if (!match)
+    return usage;
+  const httpStatus = Number(match[1]);
+  if (!Number.isFinite(httpStatus))
+    return usage;
+  const extras = { ...usage.extras, httpStatus };
+  if (httpStatus === 401 && usage.source === "codex-wham") {
+    extras.diagnostic = "chatgpt-wham-unauthorized";
+  }
+  return { ...usage, extras };
 }
 async function fetchRemoteUsage(store, provider, profile, opts) {
   const root = opts?.root ?? store.rootDir ?? defaultOarRoot();
@@ -1880,10 +2176,12 @@ async function fetchRemoteUsage(store, provider, profile, opts) {
   let result;
   if (resolveProvider2(provider) === "chatgpt-subscription") {
     result = await fetchCodexUsage(provider, profile, cred, { fetchImpl: opts?.fetchImpl });
+    result = attachUsageHttpDiagnostics(result);
   } else if (resolveProvider2(provider) === "xai") {
     result = await fetchXaiGrokSubscriptionUsage(provider, profile, cred, {
       fetchImpl: opts?.fetchImpl
     });
+    result = attachUsageHttpDiagnostics(result);
   } else {
     result = {
       provider,
@@ -1976,6 +2274,7 @@ function formatUsageTable(rows) {
     const weekly = pick(u.windows, (w) => w.kind === "weekly");
     const grok = pick(u.windows, (w) => w.label === "grok" || isXaiProvider2(u.provider) && (w.kind === "weekly" || w.kind === "period"));
     const primary = isXaiProvider2(u.provider) ? grok : weekly ?? session ?? u.windows[0];
+    const unreported = u.extras?.unreported === true || isXaiProvider2(u.provider) && (primary?.remainingPercent == null || primary == null);
     return {
       provider: u.provider,
       profile: u.profile,
@@ -1986,7 +2285,7 @@ function formatUsageTable(rows) {
       used: fmtPct(primary?.usedPercent),
       reset: shortReset(primary?.resetsAt),
       source: u.source,
-      note: primary?.limitReached ? "LIMIT" : ""
+      note: primary?.limitReached ? "LIMIT" : unreported ? "unreported" : ""
     };
   }));
   return [
@@ -2025,13 +2324,29 @@ function isEligible(a, now = Date.now()) {
 }
 
 // src/usage/fetch.ts
+function isUnreportedUsage2(usage) {
+  if (usage.extras?.unreported === true)
+    return true;
+  const primary = usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
+  return !primary || primary.remainingPercent == null;
+}
 function applyUsageToAccountState2(store, usage) {
   const account = store.getAccount(usage.provider, usage.profile);
   if (!account || !usage.ok)
     return;
   const primary = usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
-  if (!primary || primary.remainingPercent == null)
+  if (isUnreportedUsage2(usage) || !primary || primary.remainingPercent == null) {
+    if (account.availability === "QUOTA_EXHAUSTED" || account.availability === "AVAILABLE" || account.availability === "ACTIVE" || account.availability === "UNKNOWN") {
+      store.upsertAccount({
+        ...account,
+        availability: "QUOTA_UNKNOWN",
+        reason: "remote_usage_unreported",
+        until: null,
+        lastChecked: usage.fetchedAt
+      });
+    }
     return;
+  }
   if (primary.remainingPercent <= 0 || primary.limitReached) {
     const next = {
       ...account,
@@ -2049,7 +2364,30 @@ function applyUsageToAccountState2(store, usage) {
       until: null,
       lastChecked: usage.fetchedAt
     });
+  } else if (account.availability === "QUOTA_UNKNOWN" && primary.remainingPercent > 0 && !primary.limitReached) {
+    store.upsertAccount({
+      ...account,
+      availability: "AVAILABLE",
+      reason: undefined,
+      until: null,
+      lastChecked: usage.fetchedAt
+    });
   }
+}
+function attachUsageHttpDiagnostics2(usage) {
+  if (usage.ok || !usage.error)
+    return usage;
+  const match = /\bHTTP (\d+)\b/.exec(usage.error);
+  if (!match)
+    return usage;
+  const httpStatus = Number(match[1]);
+  if (!Number.isFinite(httpStatus))
+    return usage;
+  const extras = { ...usage.extras, httpStatus };
+  if (httpStatus === 401 && usage.source === "codex-wham") {
+    extras.diagnostic = "chatgpt-wham-unauthorized";
+  }
+  return { ...usage, extras };
 }
 async function fetchRemoteUsage2(store, provider, profile, opts) {
   const root = opts?.root ?? store.rootDir ?? defaultOarRoot();
@@ -2078,10 +2416,12 @@ async function fetchRemoteUsage2(store, provider, profile, opts) {
   let result;
   if (resolveProvider2(provider) === "chatgpt-subscription") {
     result = await fetchCodexUsage(provider, profile, cred, { fetchImpl: opts?.fetchImpl });
+    result = attachUsageHttpDiagnostics2(result);
   } else if (resolveProvider2(provider) === "xai") {
     result = await fetchXaiGrokSubscriptionUsage(provider, profile, cred, {
       fetchImpl: opts?.fetchImpl
     });
+    result = attachUsageHttpDiagnostics2(result);
   } else {
     result = {
       provider,
@@ -2471,7 +2811,7 @@ import {
   chmodSync as chmodSync3,
   existsSync as existsSync8,
   mkdirSync as mkdirSync4,
-  readFileSync as readFileSync8,
+  readFileSync as readFileSync9,
   renameSync as renameSync3,
   writeFileSync as writeFileSync4
 } from "node:fs";
@@ -2503,7 +2843,7 @@ class SubscriptionsStore {
     if (!existsSync8(this.path))
       return emptyFile();
     try {
-      const parsed = JSON.parse(readFileSync8(this.path, "utf8"));
+      const parsed = JSON.parse(readFileSync9(this.path, "utf8"));
       if (parsed?.version !== 1 || !Array.isArray(parsed.plans))
         return emptyFile();
       return {
@@ -2728,179 +3068,6 @@ function formatRecommendTable(rows) {
   lines.push("This does not change the session model — only which account OAR would activate.");
   return lines.join(`
 `);
-}
-
-// src/import-all.ts
-import { readFileSync as readFileSync9 } from "node:fs";
-function isRecord4(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function isStoredCredential2(value) {
-  if (!isRecord4(value))
-    return false;
-  if (value.type === "oauth") {
-    if (typeof value.access !== "string" || typeof value.refresh !== "string" || typeof value.expires !== "number") {
-      return false;
-    }
-    if (value.accountId !== undefined && typeof value.accountId !== "string")
-      return false;
-    if (value.idToken !== undefined && typeof value.idToken !== "string")
-      return false;
-    return true;
-  }
-  if (value.type === "api_key") {
-    return typeof value.key === "string";
-  }
-  return false;
-}
-function parseAuthJsonFile2(authPath) {
-  let raw;
-  try {
-    raw = readFileSync9(authPath, "utf8");
-  } catch {
-    throw new Error(`unable to read ${authPath}`);
-  }
-  try {
-    const data = JSON.parse(raw);
-    if (!isRecord4(data))
-      throw new Error("invalid auth.json");
-    return data;
-  } catch {
-    throw new Error(`invalid auth.json: ${authPath}`);
-  }
-}
-function expiresFromAccessJwt2(access) {
-  const payload = decodeJwtPayload(access);
-  const exp = payload?.exp;
-  if (typeof exp === "number" && Number.isFinite(exp) && exp > 0) {
-    return exp * 1000;
-  }
-  return;
-}
-function accountIdFromIdToken2(idToken) {
-  const payload = decodeJwtPayload(idToken);
-  if (!payload)
-    return;
-  const auth = payload["https://api.openai.com/auth"];
-  if (isRecord4(auth)) {
-    const id = auth.chatgpt_account_id;
-    if (typeof id === "string" && id.length > 0)
-      return id;
-  }
-  if (typeof payload.chatgpt_account_id === "string" && payload.chatgpt_account_id.length > 0) {
-    return payload.chatgpt_account_id;
-  }
-  return;
-}
-function credentialFromNativeCodexAuth2(data) {
-  if (!isRecord4(data))
-    return;
-  const tokens = data.tokens;
-  if (!isRecord4(tokens))
-    return;
-  const access = tokens.access_token;
-  const refresh = tokens.refresh_token;
-  if (typeof access !== "string" || access.length === 0)
-    return;
-  if (typeof refresh !== "string" || refresh.length === 0)
-    return;
-  const idToken = typeof tokens.id_token === "string" && tokens.id_token.length > 0 ? tokens.id_token : undefined;
-  let accountId = typeof tokens.account_id === "string" && tokens.account_id.length > 0 ? tokens.account_id : undefined;
-  if (!accountId && idToken)
-    accountId = accountIdFromIdToken2(idToken);
-  const expires = expiresFromAccessJwt2(access) ?? 0;
-  return {
-    type: "oauth",
-    access,
-    refresh,
-    expires,
-    ...accountId ? { accountId } : {},
-    ...idToken ? { idToken } : {}
-  };
-}
-function readCredentialFromAuthJson2(authPath, provider, opts) {
-  const data = parseAuthJsonFile2(authPath);
-  for (const key of authJsonKeysForProvider(provider)) {
-    const slot = data[key];
-    if (!isStoredCredential2(slot))
-      continue;
-    return selectImportAccount2(slot, provider, authPath, opts?.account ?? "latest").credential;
-  }
-  if (provider === "openai-codex" || provider === "chatgpt-subscription") {
-    const native = credentialFromNativeCodexAuth2(data);
-    if (native)
-      return native;
-  }
-  return missingProvider2(data, provider, authPath);
-}
-function missingProvider2(data, provider, authPath) {
-  const available = Object.keys(data).filter((key) => isStoredCredential2(data[key]));
-  const looked = authJsonKeysForProvider(provider).join(", ");
-  throw new Error(`provider ${provider} not found in ${authPath} (looked for ${looked}; available: ${available.join(", ") || "none"})`);
-}
-function latestLoginSlotName2(linked) {
-  let best = 0;
-  let name;
-  for (const item of linked) {
-    if (!isRecord4(item) || typeof item.name !== "string")
-      continue;
-    const match = /^login-(\d+)$/.exec(item.name);
-    if (!match)
-      continue;
-    const n = Number(match[1]);
-    if (n > best) {
-      best = n;
-      name = item.name;
-    }
-  }
-  return name;
-}
-function credentialFromSlotEntry2(parent, entry) {
-  if (isStoredCredential2(entry))
-    return entry;
-  if (!isRecord4(entry) || parent.type !== "oauth" || typeof entry.access !== "string") {
-    throw new Error("selected accounts[] entry is not a credential");
-  }
-  const refresh = typeof entry.refresh === "string" ? entry.refresh : parent.refresh;
-  const expires = typeof entry.expires === "number" ? entry.expires : parent.expires;
-  return {
-    type: "oauth",
-    access: entry.access,
-    refresh,
-    expires,
-    ...parent.accountId ? { accountId: parent.accountId } : {},
-    ...typeof entry.idToken === "string" ? { idToken: entry.idToken } : parent.idToken ? { idToken: parent.idToken } : {}
-  };
-}
-function selectImportAccount2(slot, provider, authPath, account = "latest") {
-  if (account === "primary")
-    return { used: "primary", credential: slot };
-  const linked = slot.accounts;
-  if (account === "latest") {
-    const name = Array.isArray(linked) ? latestLoginSlotName2(linked) : undefined;
-    if (!name)
-      return { used: "primary", credential: slot };
-    return { used: name, credential: selectLinkedAccount2(slot, provider, authPath, name) };
-  }
-  return { used: account, credential: selectLinkedAccount2(slot, provider, authPath, account) };
-}
-function selectLinkedAccount2(slot, provider, authPath, account) {
-  const linked = slot.accounts;
-  if (!Array.isArray(linked) || linked.length === 0) {
-    throw new Error(`${provider} in ${authPath} has no accounts[] array; --account cannot be applied`);
-  }
-  const selected = account === "latest" ? latestLoginSlotName2(linked) : account;
-  if (!selected) {
-    throw new Error(`${provider} in ${authPath} has no login-N slot to use as latest`);
-  }
-  const idx = /^\d+$/.test(selected) ? Number(selected) - 1 : linked.findIndex((a) => {
-    return isRecord4(a) && a["name"] === selected;
-  });
-  if (idx < 0 || idx >= linked.length) {
-    const names = linked.map((a, i) => isRecord4(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`).join(", ");
-    throw new Error(`--account ${account} not found in ${provider} accounts[] (available: ${names})`);
-  }
-  return credentialFromSlotEntry2(slot, linked[idx]);
 }
 
 // src/xai-relogin-heal.ts
@@ -3226,13 +3393,22 @@ function quotaObservations(rows) {
     if (!row.ok)
       continue;
     const primary = row.windows.find((window) => window.remainingPercent != null) ?? row.windows[0];
-    if (!primary || primary.remainingPercent == null)
+    if (!primary || primary.remainingPercent == null || row.extras?.unreported === true) {
+      observations.push({
+        provider: row.provider,
+        profile: row.profile,
+        remainingPercent: primary?.remainingPercent ?? null,
+        result: "QUOTA_UNKNOWN",
+        detail: "remote_usage_unreported"
+      });
       continue;
+    }
+    const exhausted = primary.remainingPercent <= 0 || Boolean(primary.limitReached);
     observations.push({
       provider: row.provider,
       profile: row.profile,
       remainingPercent: primary.remainingPercent,
-      exhausted: primary.remainingPercent <= 0 || Boolean(primary.limitReached),
+      result: exhausted ? "QUOTA_EXHAUSTED" : "QUOTA_AVAILABLE",
       detail: `remote_usage_${primary.label ?? primary.kind}_${primary.remainingPercent}`
     });
   }
@@ -3241,16 +3417,14 @@ function quotaObservations(rows) {
 async function syncQuotaObservations(observations) {
   const positiveByProvider = new Map;
   for (const observation of observations) {
-    if (observation.exhausted)
+    if (observation.result !== "QUOTA_AVAILABLE")
       continue;
     const profiles = positiveByProvider.get(observation.provider) ?? [];
     profiles.push(observation.profile);
     positiveByProvider.set(observation.provider, profiles);
   }
-  const ordered = [
-    ...observations.filter((observation) => !observation.exhausted),
-    ...observations.filter((observation) => observation.exhausted)
-  ];
+  const rank = (result) => result === "QUOTA_AVAILABLE" ? 0 : result === "QUOTA_UNKNOWN" ? 1 : 2;
+  const ordered = [...observations].sort((a, b) => rank(a.result) - rank(b.result));
   for (const observation of ordered) {
     try {
       const reported = await req({
@@ -3258,9 +3432,9 @@ async function syncQuotaObservations(observations) {
         action: "report",
         provider: observation.provider,
         account: observation.profile,
-        result: observation.exhausted ? "QUOTA_EXHAUSTED" : "QUOTA_AVAILABLE",
+        result: observation.result,
         detail: observation.detail,
-        ...observation.exhausted ? { verifiedPositiveProfiles: positiveByProvider.get(observation.provider) ?? [] } : {}
+        ...observation.result === "QUOTA_EXHAUSTED" ? { verifiedPositiveProfiles: positiveByProvider.get(observation.provider) ?? [] } : {}
       });
       if (!reported.ok) {
         console.error(`warning: could not sync quota for ${observation.provider}/${observation.profile}: ${reported.error}`);
@@ -3587,6 +3761,21 @@ async function main(argv) {
             if (w.remainingPercent <= 5) {
               console.log(`warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}).`);
             }
+          } else {
+            try {
+              const reported = await req({
+                protocol: 1,
+                action: "report",
+                provider,
+                account: profile,
+                result: "QUOTA_UNKNOWN",
+                detail: "remote_usage_unreported"
+              });
+              if (!reported.ok)
+                throw new Error(reported.error);
+            } catch (error) {
+              throw new Error(`REFUSED: could not sync current quota for ${provider}/${profile}: ${error instanceof Error ? error.message : error}`);
+            }
           }
         } else if (/\bHTTP 401\b/.test(u.error ?? "")) {
           try {
@@ -3666,19 +3855,19 @@ ${suggestAccounts(provider)}`);
       if (fromIdx >= 0 && rest[fromIdx + 1])
         from = rest[fromIdx + 1];
       if (rest.includes("--all")) {
-        let profile2 = "main";
+        let profile = "main";
         const profileIdx = rest.indexOf("--profile");
         if (profileIdx >= 0 && rest[profileIdx + 1])
-          profile2 = rest[profileIdx + 1];
+          profile = rest[profileIdx + 1];
         const force = rest.includes("--force");
-        const result = await withClient((c) => importAllFromAuthJson(c, { from, profile: profile2, force }));
-        for (const provider2 of result.imported)
-          console.log(`imported ${provider2}/${profile2}`);
-        for (const provider2 of result.skipped) {
-          console.log(`skipped ${provider2}/${profile2} (already in vault; use --force to overwrite)`);
+        const result = await withClient((c) => importAllFromAuthJson(c, { from, profile, force }));
+        for (const provider of result.imported)
+          console.log(`imported ${provider}/${profile}`);
+        for (const provider of result.skipped) {
+          console.log(`skipped ${provider}/${profile} (already in vault; use --force to overwrite)`);
         }
-        for (const { provider: provider2, error } of result.errors)
-          console.log(`failed ${provider2}/${profile2}: ${error}`);
+        for (const { provider, error } of result.errors)
+          console.log(`failed ${provider}/${profile}: ${error}`);
         console.log(`import-auth --all: ${result.imported.length} imported, ${result.skipped.length} skipped, ${result.errors.length} failed (from ${from}; secrets stored under OAR vault, not logged)`);
         if (result.errors.length > 0)
           process.exitCode = 1;
@@ -3927,7 +4116,7 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
         provider: row.provider,
         profile: row.profile,
         remainingPercent: row.remainingPercent,
-        exhausted: row.remainingPercent <= 0,
+        result: row.remainingPercent <= 0 ? "QUOTA_EXHAUSTED" : "QUOTA_AVAILABLE",
         detail: `recommend_remote_${row.remainingPercent}`
       }]));
       if (json) {

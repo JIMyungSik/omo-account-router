@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { OarDaemon } from "../src/daemon.ts";
+import { OarRouter } from "../src/router.ts";
 import { OarStore } from "../src/store.ts";
 
 const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -288,5 +289,105 @@ describe("oar use refreshes expired usage credentials safely", () => {
       xai: { access: string };
     };
     expect(liveAuth.xai.access).toBe("live-old-access");
+  });
+});
+
+describe("oar usage syncs unreported quota so oar use sees daemon state", () => {
+  let root: string;
+  let socketPath: string;
+  let store: OarStore;
+  let daemon: OarDaemon;
+
+  beforeEach(async () => {
+    root = mkdtempSync(join(tmpdir(), "oar-use-unreported-"));
+    socketPath = join(root, "oar.sock");
+    store = new OarStore({ rootDir: root });
+    store.upsertAccount({
+      provider: "xai",
+      profile: "apple",
+      auth: "valid",
+      availability: "QUOTA_UNKNOWN",
+      priority: 10,
+      credentialRef: "vault:xai:apple",
+      reason: "remote_usage_unknown",
+    });
+    store.putVaultCredential("xai", "apple", {
+      type: "oauth",
+      access: "apple-access",
+      refresh: "apple-refresh",
+      expires: Date.now() + 3600_000,
+    });
+    store.setProviderMode("xai", "manual");
+    store.setAutoFailover("xai", false);
+    store.setPreferred("xai", "apple");
+
+    daemon = new OarDaemon({
+      store,
+      socketPath,
+      authPaths: [],
+      activateOnUse: true,
+      sinks: [],
+    });
+    await daemon.start();
+  });
+
+  afterEach(async () => {
+    if (daemon) await daemon.stop();
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  async function runCli(args: string[]) {
+    const script = `
+      globalThis.fetch = async (input) => {
+        if (String(input) === "https://cli-chat-proxy.grok.com/v1/billing?format=credits") {
+          return new Response(JSON.stringify({
+            config: {
+              isUnifiedBillingUser: true,
+              onDemandCap: { val: 0 },
+              onDemandUsed: { val: 0 },
+              prepaidBalance: { val: 0 },
+            },
+          }), { status: 200 });
+        }
+        throw new Error("unexpected CLI fetch target: " + String(input));
+      };
+      process.argv = [process.execPath, ${JSON.stringify(cliPath)}, ...${JSON.stringify(args)}];
+      await import(${JSON.stringify(pathToFileURL(cliPath).href)});
+    `;
+    const proc = Bun.spawn([process.execPath, "-e", script], {
+      env: {
+        ...process.env,
+        OAR_HOME: root,
+        OAR_SOCK: socketPath,
+        OAR_SINKS: "0",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode };
+  }
+
+  test("usage reports QUOTA_UNKNOWN remote_usage_unreported so use works without force", async () => {
+    expect(() => new OarRouter(store).use("xai", "apple")).toThrow(/REFUSED/);
+
+    const usage = await runCli(["usage", "xai", "apple"]);
+    expect(usage.exitCode).toBe(0);
+    expect(store.getAccount("xai", "apple")?.availability).toBe("QUOTA_UNKNOWN");
+    expect(store.getAccount("xai", "apple")?.reason).toBe("remote_usage_unreported");
+
+    const used = await runCli(["use", "xai", "apple"]);
+    expect(used.exitCode).toBe(0);
+    expect(`${used.stdout}\n${used.stderr}`).not.toContain("--force");
+    expect(used.stdout).toMatch(/apple|preferred|now using/i);
+    expect(used.stdout).toContain("manual use");
+    expect(used.stdout).toContain("auto routing");
+    expect(store.getProviderPolicy("xai").preferred).toBe("apple");
+    expect(store.getAccount("xai", "apple")?.availability).toBe("QUOTA_UNKNOWN");
+    expect(store.getAccount("xai", "apple")?.reason).toBe("remote_usage_unreported");
   });
 });

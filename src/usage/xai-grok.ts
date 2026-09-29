@@ -4,14 +4,42 @@ import type { AccountRemoteUsage, UsageWindow } from "./types.ts";
 /** Grok Build / SuperGrok subscription billing (works with OAR xAI OAuth access tokens). */
 const GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 
+function isGrokCreditsExhaustedHttp(status: number, body: string): boolean {
+  if (status !== 402 && status !== 403) return false;
+  const text = body.toLowerCase();
+  return (
+    text.includes("run out of credits") ||
+    text.includes("need a grok subscription") ||
+    text.includes("add credits")
+  );
+}
+
 function remaining(used: number | null | undefined): number | null {
   if (used == null || !Number.isFinite(used)) return null;
   return Math.max(0, Math.min(100, Math.round((100 - used) * 10) / 10));
 }
 
+/** xAI money/credit fields are often `{ val: number }` on unified billing payloads. */
+function moneyVal(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const val = (raw as { val?: unknown }).val;
+    if (typeof val === "number" && Number.isFinite(val)) return val;
+  }
+  return null;
+}
+
+function roundPercent(n: number): number {
+  return Math.max(0, Math.min(100, Math.round(n * 10) / 10));
+}
+
 /**
  * Fetch Grok subscription credit usage for an xAI OAuth vault credential.
  * Verified against live OAR vault tokens (not the separate Management API prepaid path).
+ *
+ * Unified / Apple IAP billing (`isUnifiedBillingUser`) often omits `creditUsagePercent`
+ * and reports `onDemandCap.val === 0`. That is authenticated unreported usage, not 0%.
+ * An explicit non-unified `onDemandCap.val === 0` is entitlement exhaustion.
  */
 export async function fetchXaiGrokSubscriptionUsage(
   provider: string,
@@ -45,6 +73,42 @@ export async function fetchXaiGrokSubscriptionUsage(
       signal: AbortSignal.timeout(15_000),
     });
     const text = await response.text();
+    if (!response.ok) {
+      if (isGrokCreditsExhaustedHttp(response.status, text)) {
+        return {
+          provider,
+          profile,
+          source: "grok-billing",
+          fetchedAt,
+          ok: true,
+          windows: [
+            {
+              kind: "period",
+              usedPercent: 100,
+              remainingPercent: 0,
+              label: "grok",
+              limitReached: true,
+            },
+          ],
+          extras: {
+            httpStatus: response.status,
+            diagnostic: "grok-credits-exhausted",
+            unreported: false,
+            entitlementExhausted: true,
+          },
+        };
+      }
+      return {
+        provider,
+        profile,
+        source: "grok-billing",
+        fetchedAt,
+        ok: false,
+        error: `HTTP ${response.status}`,
+        windows: [],
+        extras: { httpStatus: response.status },
+      };
+    }
     let data: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(text);
@@ -60,17 +124,7 @@ export async function fetchXaiGrokSubscriptionUsage(
         ok: false,
         error: `invalid JSON (HTTP ${response.status})`,
         windows: [],
-      };
-    }
-    if (!response.ok) {
-      return {
-        provider,
-        profile,
-        source: "grok-billing",
-        fetchedAt,
-        ok: false,
-        error: `HTTP ${response.status}`,
-        windows: [],
+        extras: { httpStatus: response.status },
       };
     }
 
@@ -78,8 +132,42 @@ export async function fetchXaiGrokSubscriptionUsage(
       string,
       unknown
     >;
-    const usedRaw = config.creditUsagePercent;
-    const used = typeof usedRaw === "number" && Number.isFinite(usedRaw) ? usedRaw : null;
+    const isUnifiedBillingUser = config.isUnifiedBillingUser === true;
+    const creditUsed =
+      typeof config.creditUsagePercent === "number" && Number.isFinite(config.creditUsagePercent)
+        ? config.creditUsagePercent
+        : null;
+    const onDemandCap = moneyVal(config.onDemandCap);
+    const onDemandUsed = moneyVal(config.onDemandUsed);
+    const prepaidBalance = moneyVal(config.prepaidBalance);
+
+    let used: number | null = creditUsed;
+    let limitReached = false;
+    let unreported = false;
+    let entitlementExhausted = false;
+
+    if (used == null) {
+      if (onDemandCap === 0) {
+        // Exact zero cap: exhausted only when this is a real entitlement, not Apple/unified IAP.
+        if (isUnifiedBillingUser) {
+          unreported = true;
+        } else {
+          used = 100;
+          limitReached = true;
+          entitlementExhausted = true;
+        }
+      } else if (onDemandCap != null && onDemandCap > 0 && onDemandUsed != null) {
+        used = roundPercent((onDemandUsed / onDemandCap) * 100);
+        limitReached = onDemandUsed >= onDemandCap;
+        entitlementExhausted = limitReached;
+      } else {
+        unreported = true;
+      }
+    } else {
+      limitReached = used >= 100;
+      entitlementExhausted = limitReached;
+    }
+
     const period = config.currentPeriod;
     let resetsAt: string | null = null;
     let windowSeconds: number | null = null;
@@ -110,7 +198,7 @@ export async function fetchXaiGrokSubscriptionUsage(
         resetsAt,
         windowSeconds,
         label: "grok",
-        limitReached: used != null && used >= 100,
+        limitReached: used != null && (used >= 100 || limitReached),
       },
     ];
 
@@ -142,7 +230,12 @@ export async function fetchXaiGrokSubscriptionUsage(
       windows,
       extras: {
         periodType,
-        prepaidBalance: (config.prepaidBalance as { val?: number } | undefined)?.val,
+        prepaidBalance,
+        isUnifiedBillingUser,
+        onDemandCap,
+        onDemandUsed,
+        unreported,
+        entitlementExhausted,
       },
     };
   } catch (error) {

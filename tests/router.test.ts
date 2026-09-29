@@ -99,6 +99,61 @@ describe("OarRouter resolve/use/report", () => {
     expect(store.getAccount("xai", "account-a")?.availability).toBe("QUOTA_EXHAUSTED");
   });
 
+  test("SUCCESS does not auto-promote unreported quota", () => {
+    store.upsertAccount({
+      provider: "xai",
+      profile: "account-a",
+      auth: "valid",
+      availability: "QUOTA_UNKNOWN",
+      reason: "remote_usage_unreported",
+      priority: 10,
+      credentialRef: "vault:xai:account-a",
+    });
+
+    router.reportResult({ provider: "xai", account: "account-a", result: "SUCCESS" });
+
+    const account = store.getAccount("xai", "account-a");
+    expect(account?.availability).toBe("QUOTA_UNKNOWN");
+    expect(account?.reason).toBe("remote_usage_unreported");
+  });
+
+  test("manual unreported use requires remote_usage_unreported, not arbitrary QUOTA_UNKNOWN", () => {
+    store.upsertAccount({
+      provider: "xai",
+      profile: "account-a",
+      auth: "valid",
+      availability: "QUOTA_UNKNOWN",
+      reason: "remote_usage_unreported",
+      priority: 10,
+      credentialRef: "vault:xai:account-a",
+    });
+    const allowed = router.use("xai", "account-a");
+    expect(allowed.profile).toBe("account-a");
+    expect(allowed.status).toBe("available");
+
+    store.upsertAccount({
+      provider: "xai",
+      profile: "account-b",
+      auth: "valid",
+      availability: "QUOTA_UNKNOWN",
+      reason: "remote_usage_unknown",
+      priority: 20,
+      credentialRef: "vault:xai:account-b",
+    });
+    expect(() => router.use("xai", "account-b")).toThrow(/REFUSED/);
+
+    store.upsertAccount({
+      provider: "xai",
+      profile: "account-b",
+      auth: "valid",
+      availability: "QUOTA_UNKNOWN",
+      reason: undefined,
+      priority: 20,
+      credentialRef: "vault:xai:account-b",
+    });
+    expect(() => router.use("xai", "account-b")).toThrow(/REFUSED/);
+  });
+
   test("authoritative available quota clears stale QUOTA_EXHAUSTED", () => {
     router.reportResult({ provider: "xai", account: "account-a", result: "QUOTA_EXHAUSTED" });
     router.reportResult({ provider: "xai", account: "account-a", result: "QUOTA_AVAILABLE" });
@@ -108,5 +163,28 @@ describe("OarRouter resolve/use/report", () => {
     expect(account?.availability).toBe("AVAILABLE");
     expect(account?.reason).toBeUndefined();
     expect(account?.until).toBeNull();
+  });
+
+  test("QUOTA_UNKNOWN report syncs remote_usage_unreported for manual use only", () => {
+    router.reportResult({
+      provider: "xai",
+      account: "account-a",
+      result: "QUOTA_UNKNOWN",
+      detail: "remote_usage_unreported",
+    });
+    const account = store.getAccount("xai", "account-a");
+    expect(account?.availability).toBe("QUOTA_UNKNOWN");
+    expect(account?.reason).toBe("remote_usage_unreported");
+    expect(account?.auth).toBe("valid");
+
+    const used = router.use("xai", "account-a");
+    expect(used.status).toBe("available");
+    expect(used.profile).toBe("account-a");
+
+    store.setProviderMode("xai", "auto");
+    store.setAutoFailover("xai", true);
+    const auto = router.resolve({ provider: "xai" });
+    expect(auto.status).toBe("available");
+    expect(auto.profile).toBe("account-b");
   });
 });

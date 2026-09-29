@@ -35,7 +35,10 @@ type QuotaPollResult = {
   failovers: Array<{ provider: string; from: string; to: string }>;
 };
 
-function readFrame(buf: Buffer): { msg?: string; rest: Buffer } {
+function readFrame(buf: Buffer<ArrayBufferLike>): {
+  msg?: string;
+  rest: Buffer<ArrayBufferLike>;
+} {
   const idx = buf.indexOf(0);
   if (idx === -1) return { rest: buf };
   return { msg: buf.subarray(0, idx).toString("utf8"), rest: buf.subarray(idx + 1) };
@@ -147,9 +150,9 @@ export class OarDaemon {
   }
 
   private handleSocket(socket: Socket): void {
-    let buf = Buffer.alloc(0);
-    socket.on("data", async (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
+    let buf: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    socket.on("data", async (chunk: Buffer | string) => {
+      buf = Buffer.concat([buf, typeof chunk === "string" ? Buffer.from(chunk) : chunk]);
       while (true) {
         const { msg, rest } = readFrame(buf);
         buf = rest;
@@ -251,13 +254,15 @@ export class OarDaemon {
       }
       const primary =
         row.windows.find((window) => window.remainingPercent != null) ?? row.windows[0];
-      if (!primary || primary.remainingPercent == null) {
+      if (row.extras?.unreported === true || !primary || primary.remainingPercent == null) {
         const account = this.store.getAccount(row.provider, row.profile);
         if (account) {
           this.store.upsertAccount({
             ...account,
             availability: "QUOTA_UNKNOWN",
-            reason: "remote_usage_unknown",
+            reason: row.extras?.unreported === true
+              ? "remote_usage_unreported"
+              : "remote_usage_unknown",
             lastChecked: new Date().toISOString(),
           });
         }
@@ -356,7 +361,7 @@ export class OarDaemon {
       }
       const primary =
         usage.windows.find((window) => window.remainingPercent != null) ?? usage.windows[0];
-      if (!primary || primary.remainingPercent == null) {
+      if (usage.extras?.unreported === true || !primary || primary.remainingPercent == null) {
         checked.push({ provider, profile: current.profile, ok: false });
         continue;
       }
@@ -477,7 +482,12 @@ export class OarDaemon {
                 activatedPaths: act.paths,
                 via: act.via,
                 sinks: act.sinks,
-                message: `${req.provider} ${req.profile} is now preferred. Running OMO sessions will use it on their next eligible request.`,
+                message:
+                  resolved.availability === "QUOTA_UNKNOWN"
+                    ? `${req.provider} ${req.profile} is now preferred for manual use. ` +
+                      "Remote quota is unreported; auto routing will wait for verified usage."
+                    : `${req.provider} ${req.profile} is now preferred. ` +
+                      "Running OMO sessions will use it on their next eligible request.",
               },
             };
           }

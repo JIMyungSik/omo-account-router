@@ -23,6 +23,7 @@ export type OarRequest =
       account: ProfileId;
       result: ReportResult;
       retryAfterSec?: number;
+      /** For QUOTA_UNKNOWN, prefer remote_usage_unreported (manual use only; never auto/failover). */
       detail?: string;
       /** Profiles verified above 0% by the same remote-usage batch. */
       verifiedPositiveProfiles?: ProfileId[];

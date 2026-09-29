@@ -1,10 +1,37 @@
 
+function isUnreportedUsage(usage: AccountRemoteUsage): boolean {
+  if (usage.extras?.unreported === true) return true;
+  const primary =
+    usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
+  return !primary || primary.remainingPercent == null;
+}
+
 function applyUsageToAccountState(store: OarStore, usage: AccountRemoteUsage): void {
   const account = store.getAccount(usage.provider, usage.profile);
   if (!account || !usage.ok) return;
   const primary =
     usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
-  if (!primary || primary.remainingPercent == null) return;
+
+  // Authenticated provider-unreported usage is not 0%. Do not exhaust.
+  // Mark QUOTA_UNKNOWN so auto-failover will not treat the account as verified-positive.
+  if (isUnreportedUsage(usage) || !primary || primary.remainingPercent == null) {
+    if (
+      account.availability === "QUOTA_EXHAUSTED" ||
+      account.availability === "AVAILABLE" ||
+      account.availability === "ACTIVE" ||
+      account.availability === "UNKNOWN"
+    ) {
+      store.upsertAccount({
+        ...account,
+        availability: "QUOTA_UNKNOWN",
+        reason: "remote_usage_unreported",
+        until: null,
+        lastChecked: usage.fetchedAt,
+      });
+    }
+    return;
+  }
+
   if (primary.remainingPercent <= 0 || primary.limitReached) {
     const next: AccountRecord = {
       ...account,
@@ -23,6 +50,14 @@ function applyUsageToAccountState(store: OarStore, usage: AccountRemoteUsage): v
       until: null,
       lastChecked: usage.fetchedAt,
     });
+  } else if (account.availability === "QUOTA_UNKNOWN" && primary.remainingPercent > 0 && !primary.limitReached) {
+    store.upsertAccount({
+      ...account,
+      availability: "AVAILABLE",
+      reason: undefined,
+      until: null,
+      lastChecked: usage.fetchedAt,
+    });
   }
 }
 
@@ -34,6 +69,19 @@ import { getCachedUsage, putCachedUsage } from "./cache.ts";
 import { fetchCodexUsage } from "./codex.ts";
 import type { AccountRemoteUsage } from "./types.ts";
 import { fetchXaiGrokSubscriptionUsage } from "./xai-grok.ts";
+
+function attachUsageHttpDiagnostics(usage: AccountRemoteUsage): AccountRemoteUsage {
+  if (usage.ok || !usage.error) return usage;
+  const match = /\bHTTP (\d+)\b/.exec(usage.error);
+  if (!match) return usage;
+  const httpStatus = Number(match[1]);
+  if (!Number.isFinite(httpStatus)) return usage;
+  const extras: Record<string, unknown> = { ...usage.extras, httpStatus };
+  if (httpStatus === 401 && usage.source === "codex-wham") {
+    extras.diagnostic = "chatgpt-wham-unauthorized";
+  }
+  return { ...usage, extras };
+}
 
 export type FetchUsageOptions = {
   root?: string;
@@ -83,10 +131,12 @@ export async function fetchRemoteUsage(
   let result: AccountRemoteUsage;
   if (resolveProvider(provider) === "chatgpt-subscription") {
     result = await fetchCodexUsage(provider, profile, cred, { fetchImpl: opts?.fetchImpl });
+    result = attachUsageHttpDiagnostics(result);
   } else if (resolveProvider(provider) === "xai") {
     result = await fetchXaiGrokSubscriptionUsage(provider, profile, cred, {
       fetchImpl: opts?.fetchImpl,
     });
+    result = attachUsageHttpDiagnostics(result);
   } else {
     result = {
       provider,

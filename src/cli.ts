@@ -328,8 +328,8 @@ async function healXaiRelogin(store: OarStore): Promise<boolean> {
 type QuotaObservation = {
   readonly provider: string;
   readonly profile: string;
-  readonly remainingPercent: number;
-  readonly exhausted: boolean;
+  readonly remainingPercent: number | null;
+  readonly result: "QUOTA_EXHAUSTED" | "QUOTA_AVAILABLE" | "QUOTA_UNKNOWN";
   readonly detail: string;
 };
 
@@ -339,12 +339,22 @@ function quotaObservations(rows: readonly AccountRemoteUsage[]): QuotaObservatio
     if (!row.ok) continue;
     const primary =
       row.windows.find((window) => window.remainingPercent != null) ?? row.windows[0];
-    if (!primary || primary.remainingPercent == null) continue;
+    if (!primary || primary.remainingPercent == null || row.extras?.unreported === true) {
+      observations.push({
+        provider: row.provider,
+        profile: row.profile,
+        remainingPercent: primary?.remainingPercent ?? null,
+        result: "QUOTA_UNKNOWN",
+        detail: "remote_usage_unreported",
+      });
+      continue;
+    }
+    const exhausted = primary.remainingPercent <= 0 || Boolean(primary.limitReached);
     observations.push({
       provider: row.provider,
       profile: row.profile,
       remainingPercent: primary.remainingPercent,
-      exhausted: primary.remainingPercent <= 0 || Boolean(primary.limitReached),
+      result: exhausted ? "QUOTA_EXHAUSTED" : "QUOTA_AVAILABLE",
       detail: `remote_usage_${primary.label ?? primary.kind}_${primary.remainingPercent}`,
     });
   }
@@ -354,15 +364,14 @@ function quotaObservations(rows: readonly AccountRemoteUsage[]): QuotaObservatio
 async function syncQuotaObservations(observations: readonly QuotaObservation[]): Promise<void> {
   const positiveByProvider = new Map<string, string[]>();
   for (const observation of observations) {
-    if (observation.exhausted) continue;
+    if (observation.result !== "QUOTA_AVAILABLE") continue;
     const profiles = positiveByProvider.get(observation.provider) ?? [];
     profiles.push(observation.profile);
     positiveByProvider.set(observation.provider, profiles);
   }
-  const ordered = [
-    ...observations.filter((observation) => !observation.exhausted),
-    ...observations.filter((observation) => observation.exhausted),
-  ];
+  const rank = (result: QuotaObservation["result"]) =>
+    result === "QUOTA_AVAILABLE" ? 0 : result === "QUOTA_UNKNOWN" ? 1 : 2;
+  const ordered = [...observations].sort((a, b) => rank(a.result) - rank(b.result));
   for (const observation of ordered) {
     try {
       const reported = await req({
@@ -370,9 +379,9 @@ async function syncQuotaObservations(observations: readonly QuotaObservation[]):
         action: "report",
         provider: observation.provider,
         account: observation.profile,
-        result: observation.exhausted ? "QUOTA_EXHAUSTED" : "QUOTA_AVAILABLE",
+        result: observation.result,
         detail: observation.detail,
-        ...(observation.exhausted
+        ...(observation.result === "QUOTA_EXHAUSTED"
           ? { verifiedPositiveProfiles: positiveByProvider.get(observation.provider) ?? [] }
           : {}),
       });
@@ -765,6 +774,22 @@ async function main(argv: string[]) {
                 `warning: remote remaining ~${w.remainingPercent}% (${w.label ?? w.kind}).`,
               );
             }
+          } else {
+            try {
+              const reported = await req({
+                protocol: 1,
+                action: "report",
+                provider,
+                account: profile,
+                result: "QUOTA_UNKNOWN",
+                detail: "remote_usage_unreported",
+              });
+              if (!reported.ok) throw new Error(reported.error);
+            } catch (error) {
+              throw new Error(
+                `REFUSED: could not sync current quota for ${provider}/${profile}: ${error instanceof Error ? error.message : error}`,
+              );
+            }
           }
         } else if (/\bHTTP 401\b/.test(u.error ?? "")) {
           try {
@@ -1132,7 +1157,7 @@ async function main(argv: string[]) {
                 provider: row.provider,
                 profile: row.profile,
                 remainingPercent: row.remainingPercent,
-                exhausted: row.remainingPercent <= 0,
+                result: row.remainingPercent <= 0 ? "QUOTA_EXHAUSTED" : "QUOTA_AVAILABLE",
                 detail: `recommend_remote_${row.remainingPercent}`,
               }],
         ),
