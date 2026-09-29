@@ -51,8 +51,8 @@ export class OarClient {
       socket.on("connect", () => {
         socket.write(payload);
       });
-      socket.on("data", (chunk) => {
-        buf = Buffer.concat([buf, chunk]);
+      socket.on("data", (chunk: Buffer | string) => {
+        buf = Buffer.concat([buf, typeof chunk === "string" ? Buffer.from(chunk) : chunk]);
         const idx = buf.indexOf(0);
         if (idx === -1) return;
         clearTimeout(timer);

@@ -69,6 +69,9 @@ export function formatUsageTable(rows: AccountRemoteUsage[]): string {
       // Primary used/reset for display
       const primary =
         isXaiProvider(u.provider) ? grok : weekly ?? session ?? u.windows[0];
+      const unreported =
+        u.extras?.unreported === true ||
+        (isXaiProvider(u.provider) && (primary?.remainingPercent == null || primary == null));
 
       return {
         provider: u.provider,
@@ -80,7 +83,7 @@ export function formatUsageTable(rows: AccountRemoteUsage[]): string {
         used: fmtPct(primary?.usedPercent),
         reset: shortReset(primary?.resetsAt),
         source: u.source,
-        note: primary?.limitReached ? "LIMIT" : "",
+        note: primary?.limitReached ? "LIMIT" : unreported ? "unreported" : "",
       };
     }),
   );

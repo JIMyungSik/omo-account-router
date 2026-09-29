@@ -356,6 +356,94 @@ describe("remote quota auto failover", () => {
     expect(live.xai.access).toBe("main-access");
   });
 
+  test("unreported sibling remains unknown during failover verification", async () => {
+    const sub = store.getAccount("xai", "sub");
+    expect(sub).toBeDefined();
+    if (!sub) throw new Error("sub fixture missing");
+    store.upsertAccount({ ...sub, availability: "AVAILABLE", reason: undefined });
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          config: {
+            isUnifiedBillingUser: true,
+            onDemandCap: { val: 0 },
+            onDemandUsed: { val: 0 },
+          },
+        }),
+        { status: 200 },
+      );
+    const client = new OarClient({ socketPath });
+
+    const response = await client.request({
+      protocol: 1,
+      action: "report",
+      provider: "xai",
+      account: "main",
+      result: "QUOTA_EXHAUSTED",
+    });
+
+    expect(response.ok).toBe(true);
+    expect(store.getAccount("xai", "sub")?.availability).toBe("QUOTA_UNKNOWN");
+    expect(store.getAccount("xai", "sub")?.reason).toBe("remote_usage_unreported");
+    expect(store.getProviderPolicy("xai").preferred).toBe("main");
+  });
+
+  test("manual activation preserves unreported quota state", async () => {
+    const sub = store.getAccount("xai", "sub");
+    expect(sub).toBeDefined();
+    if (!sub) throw new Error("sub fixture missing");
+    store.upsertAccount({
+      ...sub,
+      auth: "valid",
+      availability: "QUOTA_UNKNOWN",
+      reason: "remote_usage_unreported",
+    });
+    const client = new OarClient({ socketPath });
+
+    const response = await client.request({
+      protocol: 1,
+      action: "use",
+      provider: "xai",
+      profile: "sub",
+    });
+
+    expect(response.ok).toBe(true);
+    expect(store.getAccount("xai", "sub")?.availability).toBe("QUOTA_UNKNOWN");
+    expect(store.getAccount("xai", "sub")?.reason).toBe("remote_usage_unreported");
+
+    const resolved = await client.request({ protocol: 1, action: "resolve", provider: "xai" });
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      expect((resolved.data as { profile: string }).profile).not.toBe("sub");
+    }
+  });
+
+  test("quota polling does not promote unreported preferred usage", async () => {
+    store.upsertAccount({
+      ...store.getAccount("xai", "main")!,
+      availability: "QUOTA_UNKNOWN",
+      reason: "remote_usage_unreported",
+    });
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          config: {
+            isUnifiedBillingUser: true,
+            onDemandCap: { val: 0 },
+            onDemandUsed: { val: 0 },
+          },
+        }),
+        { status: 200 },
+      );
+    const client = new OarClient({ socketPath });
+
+    const response = await client.request({ protocol: 1, action: "poll-quota" });
+
+    expect(response.ok).toBe(true);
+    expect(store.getAccount("xai", "main")?.availability).toBe("QUOTA_UNKNOWN");
+    expect(store.getAccount("xai", "main")?.reason).toBe("remote_usage_unreported");
+  });
+
   test("manual quota poll switches after preferred reaches verified 0%", async () => {
     globalThis.fetch = async (_input, init) => {
       const authorization = init?.headers?.Authorization;

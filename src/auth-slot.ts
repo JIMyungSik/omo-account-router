@@ -194,7 +194,9 @@ export class AuthSlotActivator {
       this.store.upsertAccount({
         ...account,
         lastUsedAt: new Date().toISOString(),
-        availability: "ACTIVE",
+        // A manual activation must not turn provider-unreported quota into
+        // an auto-eligible account. Keep the verified-unknown state intact.
+        availability: account.availability === "QUOTA_UNKNOWN" ? "QUOTA_UNKNOWN" : "ACTIVE",
       });
     }
   }

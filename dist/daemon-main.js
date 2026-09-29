@@ -823,8 +823,8 @@ class AuthSlotActivator {
     if (fresherLive && !sawOtherKnownProfile) {
       this.store.putVaultCredential(provider, profile, fresherLive);
       this.markProfileActive(provider, profile);
-      const act2 = await this.activate(provider, profile);
-      return { ...act2, via: `${act2.via}+vault-pull-up`, skipped: false };
+      const act = await this.activate(provider, profile);
+      return { ...act, via: `${act.via}+vault-pull-up`, skipped: false };
     }
     if (!sawMissing && !sawOtherKnownProfile && !fresherLive) {
       const sinks = this.applySinks(provider, cred);
@@ -863,7 +863,7 @@ class AuthSlotActivator {
       this.store.upsertAccount({
         ...account,
         lastUsedAt: new Date().toISOString(),
-        availability: "ACTIVE"
+        availability: account.availability === "QUOTA_UNKNOWN" ? "QUOTA_UNKNOWN" : "ACTIVE"
       });
     }
   }
@@ -1462,6 +1462,7 @@ class AccountRefreshLock {
 var REPORT_RESULTS = [
   "SUCCESS",
   "QUOTA_AVAILABLE",
+  "QUOTA_UNKNOWN",
   "AUTH_EXPIRED",
   "AUTH_REVOKED",
   "RATE_LIMITED",
@@ -1512,6 +1513,9 @@ function isEligible(a, now = Date.now()) {
   }
   return ELIGIBLE.includes(a.availability) || a.availability === "UNKNOWN";
 }
+function isManualUnreportedUsable(a) {
+  return a.auth === "valid" && a.availability === "QUOTA_UNKNOWN" && a.reason === "remote_usage_unreported" && !a.disabled;
+}
 function refuseReason(account) {
   if (account.availability === "QUOTA_EXHAUSTED") {
     return `quota exhausted (0% / limit)${account.until ? `; resets ~ ${account.until}` : ""}`;
@@ -1556,6 +1560,9 @@ class OarRouter {
       if (preferred && isEligible(preferred)) {
         return this.toResponse(preferred);
       }
+      if (preferred && isManualUnreportedUsable(preferred) && policy.mode === "manual" && !policy.autoFailover) {
+        return this.toResponse(preferred);
+      }
       if (preferred && !isEligible(preferred) && policy.mode === "manual" && !policy.autoFailover) {
         return {
           provider: req.provider,
@@ -1598,7 +1605,8 @@ class OarRouter {
     if (!account) {
       throw new Error(`Unknown account ${provider}/${profile}`);
     }
-    if (!opts?.force && !isEligible(account)) {
+    const allowUnreportedManual = isManualUnreportedUsable(account);
+    if (!opts?.force && !isEligible(account) && !allowUnreportedManual) {
       throw new Error(`REFUSED: ${provider}/${profile} is not usable — ${refuseReason(account)}. ` + `Not switching (even if auto is on). Pass force to override.`);
     }
     this.store.setPreferred(provider, profile);
@@ -1606,7 +1614,7 @@ class OarRouter {
       ...account,
       lastUsedAt: new Date().toISOString()
     });
-    if (opts?.force) {
+    if (opts?.force || allowUnreportedManual) {
       return this.toResponse(this.store.getAccount(provider, profile) ?? account);
     }
     return this.resolve({ provider });
@@ -1619,7 +1627,7 @@ class OarRouter {
     if (!account)
       return;
     if (req.result === "QUOTA_AVAILABLE") {
-      const next2 = {
+      const next = {
         ...account,
         auth: "valid",
         availability: "AVAILABLE",
@@ -1627,10 +1635,31 @@ class OarRouter {
         until: null,
         lastChecked: new Date().toISOString()
       };
-      this.store.upsertAccount(next2);
-      return next2;
+      this.store.upsertAccount(next);
+      return next;
+    }
+    if (req.result === "QUOTA_UNKNOWN") {
+      const next = {
+        ...account,
+        auth: "valid",
+        availability: "QUOTA_UNKNOWN",
+        reason: req.detail ?? "remote_usage_unreported",
+        until: null,
+        lastChecked: new Date().toISOString()
+      };
+      this.store.upsertAccount(next);
+      return next;
     }
     if (req.result === "SUCCESS") {
+      if (account.availability === "QUOTA_UNKNOWN" && account.reason === "remote_usage_unreported") {
+        const kept = {
+          ...account,
+          lastChecked: new Date().toISOString(),
+          lastUsedAt: new Date().toISOString()
+        };
+        this.store.upsertAccount(kept);
+        return kept;
+      }
       if (account.availability === "QUOTA_EXHAUSTED") {
         const kept = {
           ...account,
@@ -1640,7 +1669,7 @@ class OarRouter {
         this.store.upsertAccount(kept);
         return kept;
       }
-      const next2 = {
+      const next = {
         ...account,
         auth: "valid",
         availability: "AVAILABLE",
@@ -1649,8 +1678,8 @@ class OarRouter {
         lastChecked: new Date().toISOString(),
         lastUsedAt: new Date().toISOString()
       };
-      this.store.upsertAccount(next2);
-      return next2;
+      this.store.upsertAccount(next);
+      return next;
     }
     const failure = req.result;
     const next = {
@@ -1675,6 +1704,11 @@ class OarRouter {
         next.availability = "QUOTA_EXHAUSTED";
         next.until = req.retryAfterSec ? new Date(Date.now() + req.retryAfterSec * 1000).toISOString() : null;
         break;
+      case "QUOTA_UNKNOWN":
+        next.auth = "valid";
+        next.availability = "QUOTA_UNKNOWN";
+        next.until = null;
+        break;
       case "NETWORK_ERROR":
       case "SERVER_ERROR":
       case "BAD_REQUEST":
@@ -1692,7 +1726,7 @@ class OarRouter {
     }
     this.store.upsertAccount(next);
     const policy = this.store.getProviderPolicy(req.provider);
-    if (policy.autoFailover && isAccountFailoverCandidate(failure) && policy.mode === "auto") {}
+    if (failure !== "QUOTA_UNKNOWN" && policy.autoFailover && isAccountFailoverCandidate(failure) && policy.mode === "auto") {}
     return next;
   }
   toResponse(account) {
@@ -1760,421 +1794,6 @@ function putCachedUsage(entry, root = defaultOarRoot()) {
   const cache = loadUsageCache(root);
   cache.entries[cacheKey(entry.provider, entry.profile)] = entry;
   saveUsageCache(cache, root);
-}
-
-// src/usage/codex.ts
-var WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-function remaining(used) {
-  if (used == null || !Number.isFinite(used))
-    return null;
-  return Math.max(0, Math.min(100, Math.round((100 - used) * 10) / 10));
-}
-function kindFromSeconds(seconds) {
-  if (seconds == null || !Number.isFinite(seconds))
-    return "other";
-  if (seconds <= 6 * 3600)
-    return "session";
-  if (seconds >= 6 * 24 * 3600)
-    return "weekly";
-  return "other";
-}
-function windowFromWham(raw, label) {
-  if (!raw || typeof raw !== "object")
-    return null;
-  const w = raw;
-  const usedRaw = w.used_percent ?? w.usedPercent;
-  const used = typeof usedRaw === "number" && Number.isFinite(usedRaw) ? usedRaw : null;
-  const secRaw = w.limit_window_seconds ?? w.windowDurationMins;
-  let windowSeconds = null;
-  if (typeof w.limit_window_seconds === "number")
-    windowSeconds = w.limit_window_seconds;
-  else if (typeof w.windowDurationMins === "number")
-    windowSeconds = w.windowDurationMins * 60;
-  const resetAtRaw = w.reset_at ?? w.resetsAt;
-  let resetsAt = null;
-  if (typeof resetAtRaw === "number" && Number.isFinite(resetAtRaw)) {
-    resetsAt = new Date(resetAtRaw * (resetAtRaw < 1000000000000 ? 1000 : 1)).toISOString();
-  } else if (typeof resetAtRaw === "string") {
-    resetsAt = resetAtRaw;
-  }
-  const kind = kindFromSeconds(windowSeconds);
-  return {
-    kind,
-    usedPercent: used,
-    remainingPercent: remaining(used),
-    resetsAt,
-    windowSeconds,
-    label: label ?? (kind === "session" ? "5h" : kind === "weekly" ? "week" : "window"),
-    limitReached: Boolean(w.limit_reached ?? w.limitReached)
-  };
-}
-async function fetchCodexUsage(provider, profile, credential, opts) {
-  const fetchedAt = new Date().toISOString();
-  if (credential.type !== "oauth") {
-    return {
-      provider,
-      profile,
-      source: "codex-wham",
-      fetchedAt,
-      ok: false,
-      error: "codex usage requires oauth credential",
-      windows: []
-    };
-  }
-  const headers = {
-    Authorization: `Bearer ${credential.access}`,
-    Accept: "application/json",
-    "User-Agent": "omo-account-router/0.1"
-  };
-  if (credential.accountId) {
-    headers["ChatGPT-Account-Id"] = credential.accountId;
-  }
-  const fetchImpl = opts?.fetchImpl ?? fetch;
-  try {
-    const response = await fetchImpl(WHAM_USAGE_URL, {
-      method: "GET",
-      headers,
-      signal: AbortSignal.timeout(15000)
-    });
-    const text = await response.text();
-    let data = {};
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        data = parsed;
-      }
-    } catch {
-      return {
-        provider,
-        profile,
-        source: "codex-wham",
-        fetchedAt,
-        ok: false,
-        error: `invalid JSON (HTTP ${response.status})`,
-        windows: []
-      };
-    }
-    if (!response.ok) {
-      return {
-        provider,
-        profile,
-        source: "codex-wham",
-        fetchedAt,
-        ok: false,
-        error: `HTTP ${response.status}`,
-        windows: []
-      };
-    }
-    const windows = [];
-    const rateLimit = data.rate_limit;
-    if (rateLimit && typeof rateLimit === "object") {
-      const rl = rateLimit;
-      const primary = windowFromWham(rl.primary_window);
-      if (primary)
-        windows.push(primary);
-      const secondary = windowFromWham(rl.secondary_window);
-      if (secondary)
-        windows.push(secondary);
-    }
-    const additional = data.additional_rate_limits;
-    if (Array.isArray(additional)) {
-      for (const item of additional) {
-        if (!item || typeof item !== "object")
-          continue;
-        const row = item;
-        const name = typeof row.limit_name === "string" ? row.limit_name : "extra";
-        const nested = row.rate_limit;
-        if (nested && typeof nested === "object") {
-          const n = nested;
-          const w = windowFromWham(n.primary_window, name);
-          if (w)
-            windows.push(w);
-        }
-      }
-    }
-    return {
-      provider,
-      profile,
-      source: "codex-wham",
-      fetchedAt,
-      ok: true,
-      windows,
-      extras: {
-        limitReached: Boolean(rateLimit && typeof rateLimit === "object" && rateLimit.limit_reached)
-      }
-    };
-  } catch (error) {
-    return {
-      provider,
-      profile,
-      source: "codex-wham",
-      fetchedAt,
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-      windows: []
-    };
-  }
-}
-
-// src/usage/xai-grok.ts
-var GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
-function remaining2(used) {
-  if (used == null || !Number.isFinite(used))
-    return null;
-  return Math.max(0, Math.min(100, Math.round((100 - used) * 10) / 10));
-}
-async function fetchXaiGrokSubscriptionUsage(provider, profile, credential, opts) {
-  const fetchedAt = new Date().toISOString();
-  if (credential.type !== "oauth") {
-    return {
-      provider,
-      profile,
-      source: "grok-billing",
-      fetchedAt,
-      ok: false,
-      error: "xai grok subscription usage requires oauth credential",
-      windows: []
-    };
-  }
-  const fetchImpl = opts?.fetchImpl ?? fetch;
-  try {
-    const response = await fetchImpl(GROK_BILLING_URL, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${credential.access}`,
-        "x-xai-token-auth": "xai-grok-cli",
-        Accept: "application/json",
-        "User-Agent": "GrokCLI/1.0.4"
-      },
-      signal: AbortSignal.timeout(15000)
-    });
-    const text = await response.text();
-    let data = {};
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        data = parsed;
-      }
-    } catch {
-      return {
-        provider,
-        profile,
-        source: "grok-billing",
-        fetchedAt,
-        ok: false,
-        error: `invalid JSON (HTTP ${response.status})`,
-        windows: []
-      };
-    }
-    if (!response.ok) {
-      return {
-        provider,
-        profile,
-        source: "grok-billing",
-        fetchedAt,
-        ok: false,
-        error: `HTTP ${response.status}`,
-        windows: []
-      };
-    }
-    const config = data.config && typeof data.config === "object" ? data.config : data;
-    const usedRaw = config.creditUsagePercent;
-    const used = typeof usedRaw === "number" && Number.isFinite(usedRaw) ? usedRaw : null;
-    const period = config.currentPeriod;
-    let resetsAt = null;
-    let windowSeconds = null;
-    let periodType;
-    if (period && typeof period === "object") {
-      const p = period;
-      periodType = typeof p.type === "string" ? p.type : undefined;
-      if (typeof p.end === "string")
-        resetsAt = p.end;
-      if (typeof p.start === "string" && typeof p.end === "string") {
-        const ms = Date.parse(p.end) - Date.parse(p.start);
-        if (Number.isFinite(ms) && ms > 0)
-          windowSeconds = Math.round(ms / 1000);
-      }
-    }
-    if (!resetsAt && typeof config.billingPeriodEnd === "string") {
-      resetsAt = config.billingPeriodEnd;
-    }
-    const kind = periodType?.includes("WEEKLY") || windowSeconds != null && windowSeconds >= 6 * 24 * 3600 ? "weekly" : "period";
-    const windows = [
-      {
-        kind,
-        usedPercent: used,
-        remainingPercent: remaining2(used),
-        resetsAt,
-        windowSeconds,
-        label: "grok",
-        limitReached: used != null && used >= 100
-      }
-    ];
-    const productUsage = config.productUsage;
-    if (Array.isArray(productUsage)) {
-      for (const row of productUsage) {
-        if (!row || typeof row !== "object")
-          continue;
-        const r = row;
-        const product = typeof r.product === "string" ? r.product : "product";
-        const pu = typeof r.usagePercent === "number" ? r.usagePercent : null;
-        if (product.toLowerCase() === "grokbuild" && pu === used)
-          continue;
-        windows.push({
-          kind: "other",
-          usedPercent: pu,
-          remainingPercent: remaining2(pu),
-          resetsAt,
-          label: product,
-          limitReached: pu != null && pu >= 100
-        });
-      }
-    }
-    return {
-      provider,
-      profile,
-      source: "grok-billing",
-      fetchedAt,
-      ok: true,
-      windows,
-      extras: {
-        periodType,
-        prepaidBalance: config.prepaidBalance?.val
-      }
-    };
-  } catch (error) {
-    return {
-      provider,
-      profile,
-      source: "grok-billing",
-      fetchedAt,
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-      windows: []
-    };
-  }
-}
-
-// src/usage/fetch.ts
-function applyUsageToAccountState(store, usage) {
-  const account = store.getAccount(usage.provider, usage.profile);
-  if (!account || !usage.ok)
-    return;
-  const primary = usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
-  if (!primary || primary.remainingPercent == null)
-    return;
-  if (primary.remainingPercent <= 0 || primary.limitReached) {
-    const next = {
-      ...account,
-      availability: "QUOTA_EXHAUSTED",
-      reason: `remote_usage_${primary.label ?? primary.kind}_0`,
-      lastChecked: usage.fetchedAt,
-      until: primary.resetsAt ?? null
-    };
-    store.upsertAccount(next);
-  } else if (account.availability === "QUOTA_EXHAUSTED" && primary.remainingPercent > 5) {
-    store.upsertAccount({
-      ...account,
-      availability: "AVAILABLE",
-      reason: undefined,
-      until: null,
-      lastChecked: usage.fetchedAt
-    });
-  }
-}
-async function fetchRemoteUsage(store, provider, profile, opts) {
-  const root = opts?.root ?? store.rootDir ?? defaultOarRoot();
-  const maxAgeMs = opts?.maxAgeMs ?? 60000;
-  if (!opts?.force) {
-    const cached2 = getCachedUsage(provider, profile, { maxAgeMs, root });
-    if (cached2)
-      return cached2;
-  }
-  const cred = store.getVaultCredential(provider, profile);
-  if (!cred) {
-    const miss = {
-      provider,
-      profile,
-      source: "none",
-      fetchedAt: new Date().toISOString(),
-      ok: false,
-      error: "missing vault credential",
-      windows: []
-    };
-    if (opts?.persistCache !== false) {
-      putCachedUsage(miss, root);
-    }
-    return miss;
-  }
-  let result;
-  if (resolveProvider(provider) === "chatgpt-subscription") {
-    result = await fetchCodexUsage(provider, profile, cred, { fetchImpl: opts?.fetchImpl });
-  } else if (resolveProvider(provider) === "xai") {
-    result = await fetchXaiGrokSubscriptionUsage(provider, profile, cred, {
-      fetchImpl: opts?.fetchImpl
-    });
-  } else {
-    result = {
-      provider,
-      profile,
-      source: "unsupported",
-      fetchedAt: new Date().toISOString(),
-      ok: false,
-      error: `no remote usage adapter for ${provider}`,
-      windows: []
-    };
-  }
-  if (opts?.persistCache !== false) {
-    putCachedUsage(result, root);
-  }
-  if (opts?.applyState !== false) {
-    applyUsageToAccountState(store, result);
-  }
-  return result;
-}
-async function fetchRemoteUsageForAccounts(store, accounts, opts) {
-  const out = [];
-  const queue = [...accounts];
-  const workers = Math.min(3, queue.length || 1);
-  async function worker() {
-    while (queue.length) {
-      if (opts?.shouldContinue && !opts.shouldContinue())
-        return;
-      const next = queue.shift();
-      if (!next)
-        return;
-      out.push(await fetchRemoteUsage(store, next.provider, next.profile, opts));
-    }
-  }
-  await Promise.all(Array.from({ length: workers }, () => worker()));
-  return out;
-}
-
-// src/xai-login.ts
-var XAI_USERINFO_URL = "https://auth.x.ai/oauth2/userinfo";
-async function loginFromXaiUserinfo(cred, opts) {
-  if (!cred || cred.type !== "oauth")
-    return;
-  const fetchImpl = opts?.fetchImpl ?? fetch;
-  const timeoutMs = opts?.timeoutMs ?? 5000;
-  try {
-    const response = await fetchImpl(XAI_USERINFO_URL, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${cred.access}`,
-        Accept: "application/json"
-      },
-      signal: AbortSignal.timeout(timeoutMs)
-    });
-    if (!response.ok)
-      return;
-    const parsed = await response.json();
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      return;
-    return emailFromUnknown(parsed.email);
-  } catch {
-    return;
-  }
 }
 
 // src/import-all.ts
@@ -2350,6 +1969,545 @@ function selectLinkedAccount(slot, provider, authPath, account) {
   return credentialFromSlotEntry(slot, linked[idx]);
 }
 
+// src/usage/codex.ts
+var WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+function remaining(used) {
+  if (used == null || !Number.isFinite(used))
+    return null;
+  return Math.max(0, Math.min(100, Math.round((100 - used) * 10) / 10));
+}
+function kindFromSeconds(seconds) {
+  if (seconds == null || !Number.isFinite(seconds))
+    return "other";
+  if (seconds <= 6 * 3600)
+    return "session";
+  if (seconds >= 6 * 24 * 3600)
+    return "weekly";
+  return "other";
+}
+function windowFromWham(raw, label) {
+  if (!raw || typeof raw !== "object")
+    return null;
+  const w = raw;
+  const usedRaw = w.used_percent ?? w.usedPercent;
+  const used = typeof usedRaw === "number" && Number.isFinite(usedRaw) ? usedRaw : null;
+  const secRaw = w.limit_window_seconds ?? w.windowDurationMins;
+  let windowSeconds = null;
+  if (typeof w.limit_window_seconds === "number")
+    windowSeconds = w.limit_window_seconds;
+  else if (typeof w.windowDurationMins === "number")
+    windowSeconds = w.windowDurationMins * 60;
+  const resetAtRaw = w.reset_at ?? w.resetsAt;
+  let resetsAt = null;
+  if (typeof resetAtRaw === "number" && Number.isFinite(resetAtRaw)) {
+    resetsAt = new Date(resetAtRaw * (resetAtRaw < 1000000000000 ? 1000 : 1)).toISOString();
+  } else if (typeof resetAtRaw === "string") {
+    resetsAt = resetAtRaw;
+  }
+  const kind = kindFromSeconds(windowSeconds);
+  return {
+    kind,
+    usedPercent: used,
+    remainingPercent: remaining(used),
+    resetsAt,
+    windowSeconds,
+    label: label ?? (kind === "session" ? "5h" : kind === "weekly" ? "week" : "window"),
+    limitReached: Boolean(w.limit_reached ?? w.limitReached)
+  };
+}
+async function fetchCodexUsage(provider, profile, credential, opts) {
+  const fetchedAt = new Date().toISOString();
+  if (credential.type !== "oauth") {
+    return {
+      provider,
+      profile,
+      source: "codex-wham",
+      fetchedAt,
+      ok: false,
+      error: "codex usage requires oauth credential",
+      windows: []
+    };
+  }
+  const headers = {
+    Authorization: `Bearer ${credential.access}`,
+    Accept: "application/json",
+    "User-Agent": "omo-account-router/0.1"
+  };
+  const accountId = credential.accountId ?? (credential.idToken ? accountIdFromIdToken(credential.idToken) : undefined);
+  if (accountId) {
+    headers["ChatGPT-Account-Id"] = accountId;
+  }
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  try {
+    const response = await fetchImpl(WHAM_USAGE_URL, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(15000)
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      return {
+        provider,
+        profile,
+        source: "codex-wham",
+        fetchedAt,
+        ok: false,
+        error: `HTTP ${response.status}`,
+        windows: [],
+        extras: {
+          httpStatus: response.status,
+          ...response.status === 401 ? { diagnostic: "chatgpt-wham-unauthorized" } : {}
+        }
+      };
+    }
+    let data = {};
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        data = parsed;
+      }
+    } catch {
+      return {
+        provider,
+        profile,
+        source: "codex-wham",
+        fetchedAt,
+        ok: false,
+        error: `invalid JSON (HTTP ${response.status})`,
+        windows: [],
+        extras: { httpStatus: response.status }
+      };
+    }
+    const windows = [];
+    const rateLimit = data.rate_limit;
+    if (rateLimit && typeof rateLimit === "object") {
+      const rl = rateLimit;
+      const primary = windowFromWham(rl.primary_window);
+      if (primary)
+        windows.push(primary);
+      const secondary = windowFromWham(rl.secondary_window);
+      if (secondary)
+        windows.push(secondary);
+    }
+    const additional = data.additional_rate_limits;
+    if (Array.isArray(additional)) {
+      for (const item of additional) {
+        if (!item || typeof item !== "object")
+          continue;
+        const row = item;
+        const name = typeof row.limit_name === "string" ? row.limit_name : "extra";
+        const nested = row.rate_limit;
+        if (nested && typeof nested === "object") {
+          const n = nested;
+          const w = windowFromWham(n.primary_window, name);
+          if (w)
+            windows.push(w);
+        }
+      }
+    }
+    return {
+      provider,
+      profile,
+      source: "codex-wham",
+      fetchedAt,
+      ok: true,
+      windows,
+      extras: {
+        limitReached: Boolean(rateLimit && typeof rateLimit === "object" && rateLimit.limit_reached)
+      }
+    };
+  } catch (error) {
+    return {
+      provider,
+      profile,
+      source: "codex-wham",
+      fetchedAt,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      windows: []
+    };
+  }
+}
+
+// src/usage/xai-grok.ts
+var GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+function isGrokCreditsExhaustedHttp(status, body) {
+  if (status !== 402 && status !== 403)
+    return false;
+  const text = body.toLowerCase();
+  return text.includes("run out of credits") || text.includes("need a grok subscription") || text.includes("add credits");
+}
+function remaining2(used) {
+  if (used == null || !Number.isFinite(used))
+    return null;
+  return Math.max(0, Math.min(100, Math.round((100 - used) * 10) / 10));
+}
+function moneyVal(raw) {
+  if (typeof raw === "number" && Number.isFinite(raw))
+    return raw;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const val = raw.val;
+    if (typeof val === "number" && Number.isFinite(val))
+      return val;
+  }
+  return null;
+}
+function roundPercent(n) {
+  return Math.max(0, Math.min(100, Math.round(n * 10) / 10));
+}
+async function fetchXaiGrokSubscriptionUsage(provider, profile, credential, opts) {
+  const fetchedAt = new Date().toISOString();
+  if (credential.type !== "oauth") {
+    return {
+      provider,
+      profile,
+      source: "grok-billing",
+      fetchedAt,
+      ok: false,
+      error: "xai grok subscription usage requires oauth credential",
+      windows: []
+    };
+  }
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  try {
+    const response = await fetchImpl(GROK_BILLING_URL, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${credential.access}`,
+        "x-xai-token-auth": "xai-grok-cli",
+        Accept: "application/json",
+        "User-Agent": "GrokCLI/1.0.4"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      if (isGrokCreditsExhaustedHttp(response.status, text)) {
+        return {
+          provider,
+          profile,
+          source: "grok-billing",
+          fetchedAt,
+          ok: true,
+          windows: [
+            {
+              kind: "period",
+              usedPercent: 100,
+              remainingPercent: 0,
+              label: "grok",
+              limitReached: true
+            }
+          ],
+          extras: {
+            httpStatus: response.status,
+            diagnostic: "grok-credits-exhausted",
+            unreported: false,
+            entitlementExhausted: true
+          }
+        };
+      }
+      return {
+        provider,
+        profile,
+        source: "grok-billing",
+        fetchedAt,
+        ok: false,
+        error: `HTTP ${response.status}`,
+        windows: [],
+        extras: { httpStatus: response.status }
+      };
+    }
+    let data = {};
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        data = parsed;
+      }
+    } catch {
+      return {
+        provider,
+        profile,
+        source: "grok-billing",
+        fetchedAt,
+        ok: false,
+        error: `invalid JSON (HTTP ${response.status})`,
+        windows: [],
+        extras: { httpStatus: response.status }
+      };
+    }
+    const config = data.config && typeof data.config === "object" ? data.config : data;
+    const isUnifiedBillingUser = config.isUnifiedBillingUser === true;
+    const creditUsed = typeof config.creditUsagePercent === "number" && Number.isFinite(config.creditUsagePercent) ? config.creditUsagePercent : null;
+    const onDemandCap = moneyVal(config.onDemandCap);
+    const onDemandUsed = moneyVal(config.onDemandUsed);
+    const prepaidBalance = moneyVal(config.prepaidBalance);
+    let used = creditUsed;
+    let limitReached = false;
+    let unreported = false;
+    let entitlementExhausted = false;
+    if (used == null) {
+      if (onDemandCap === 0) {
+        if (isUnifiedBillingUser) {
+          unreported = true;
+        } else {
+          used = 100;
+          limitReached = true;
+          entitlementExhausted = true;
+        }
+      } else if (onDemandCap != null && onDemandCap > 0 && onDemandUsed != null) {
+        used = roundPercent(onDemandUsed / onDemandCap * 100);
+        limitReached = onDemandUsed >= onDemandCap;
+        entitlementExhausted = limitReached;
+      } else {
+        unreported = true;
+      }
+    } else {
+      limitReached = used >= 100;
+      entitlementExhausted = limitReached;
+    }
+    const period = config.currentPeriod;
+    let resetsAt = null;
+    let windowSeconds = null;
+    let periodType;
+    if (period && typeof period === "object") {
+      const p = period;
+      periodType = typeof p.type === "string" ? p.type : undefined;
+      if (typeof p.end === "string")
+        resetsAt = p.end;
+      if (typeof p.start === "string" && typeof p.end === "string") {
+        const ms = Date.parse(p.end) - Date.parse(p.start);
+        if (Number.isFinite(ms) && ms > 0)
+          windowSeconds = Math.round(ms / 1000);
+      }
+    }
+    if (!resetsAt && typeof config.billingPeriodEnd === "string") {
+      resetsAt = config.billingPeriodEnd;
+    }
+    const kind = periodType?.includes("WEEKLY") || windowSeconds != null && windowSeconds >= 6 * 24 * 3600 ? "weekly" : "period";
+    const windows = [
+      {
+        kind,
+        usedPercent: used,
+        remainingPercent: remaining2(used),
+        resetsAt,
+        windowSeconds,
+        label: "grok",
+        limitReached: used != null && (used >= 100 || limitReached)
+      }
+    ];
+    const productUsage = config.productUsage;
+    if (Array.isArray(productUsage)) {
+      for (const row of productUsage) {
+        if (!row || typeof row !== "object")
+          continue;
+        const r = row;
+        const product = typeof r.product === "string" ? r.product : "product";
+        const pu = typeof r.usagePercent === "number" ? r.usagePercent : null;
+        if (product.toLowerCase() === "grokbuild" && pu === used)
+          continue;
+        windows.push({
+          kind: "other",
+          usedPercent: pu,
+          remainingPercent: remaining2(pu),
+          resetsAt,
+          label: product,
+          limitReached: pu != null && pu >= 100
+        });
+      }
+    }
+    return {
+      provider,
+      profile,
+      source: "grok-billing",
+      fetchedAt,
+      ok: true,
+      windows,
+      extras: {
+        periodType,
+        prepaidBalance,
+        isUnifiedBillingUser,
+        onDemandCap,
+        onDemandUsed,
+        unreported,
+        entitlementExhausted
+      }
+    };
+  } catch (error) {
+    return {
+      provider,
+      profile,
+      source: "grok-billing",
+      fetchedAt,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      windows: []
+    };
+  }
+}
+
+// src/usage/fetch.ts
+function isUnreportedUsage(usage) {
+  if (usage.extras?.unreported === true)
+    return true;
+  const primary = usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
+  return !primary || primary.remainingPercent == null;
+}
+function applyUsageToAccountState(store, usage) {
+  const account = store.getAccount(usage.provider, usage.profile);
+  if (!account || !usage.ok)
+    return;
+  const primary = usage.windows.find((w) => w.remainingPercent != null) ?? usage.windows[0];
+  if (isUnreportedUsage(usage) || !primary || primary.remainingPercent == null) {
+    if (account.availability === "QUOTA_EXHAUSTED" || account.availability === "AVAILABLE" || account.availability === "ACTIVE" || account.availability === "UNKNOWN") {
+      store.upsertAccount({
+        ...account,
+        availability: "QUOTA_UNKNOWN",
+        reason: "remote_usage_unreported",
+        until: null,
+        lastChecked: usage.fetchedAt
+      });
+    }
+    return;
+  }
+  if (primary.remainingPercent <= 0 || primary.limitReached) {
+    const next = {
+      ...account,
+      availability: "QUOTA_EXHAUSTED",
+      reason: `remote_usage_${primary.label ?? primary.kind}_0`,
+      lastChecked: usage.fetchedAt,
+      until: primary.resetsAt ?? null
+    };
+    store.upsertAccount(next);
+  } else if (account.availability === "QUOTA_EXHAUSTED" && primary.remainingPercent > 5) {
+    store.upsertAccount({
+      ...account,
+      availability: "AVAILABLE",
+      reason: undefined,
+      until: null,
+      lastChecked: usage.fetchedAt
+    });
+  } else if (account.availability === "QUOTA_UNKNOWN" && primary.remainingPercent > 0 && !primary.limitReached) {
+    store.upsertAccount({
+      ...account,
+      availability: "AVAILABLE",
+      reason: undefined,
+      until: null,
+      lastChecked: usage.fetchedAt
+    });
+  }
+}
+function attachUsageHttpDiagnostics(usage) {
+  if (usage.ok || !usage.error)
+    return usage;
+  const match = /\bHTTP (\d+)\b/.exec(usage.error);
+  if (!match)
+    return usage;
+  const httpStatus = Number(match[1]);
+  if (!Number.isFinite(httpStatus))
+    return usage;
+  const extras = { ...usage.extras, httpStatus };
+  if (httpStatus === 401 && usage.source === "codex-wham") {
+    extras.diagnostic = "chatgpt-wham-unauthorized";
+  }
+  return { ...usage, extras };
+}
+async function fetchRemoteUsage(store, provider, profile, opts) {
+  const root = opts?.root ?? store.rootDir ?? defaultOarRoot();
+  const maxAgeMs = opts?.maxAgeMs ?? 60000;
+  if (!opts?.force) {
+    const cached = getCachedUsage(provider, profile, { maxAgeMs, root });
+    if (cached)
+      return cached;
+  }
+  const cred = store.getVaultCredential(provider, profile);
+  if (!cred) {
+    const miss = {
+      provider,
+      profile,
+      source: "none",
+      fetchedAt: new Date().toISOString(),
+      ok: false,
+      error: "missing vault credential",
+      windows: []
+    };
+    if (opts?.persistCache !== false) {
+      putCachedUsage(miss, root);
+    }
+    return miss;
+  }
+  let result;
+  if (resolveProvider(provider) === "chatgpt-subscription") {
+    result = await fetchCodexUsage(provider, profile, cred, { fetchImpl: opts?.fetchImpl });
+    result = attachUsageHttpDiagnostics(result);
+  } else if (resolveProvider(provider) === "xai") {
+    result = await fetchXaiGrokSubscriptionUsage(provider, profile, cred, {
+      fetchImpl: opts?.fetchImpl
+    });
+    result = attachUsageHttpDiagnostics(result);
+  } else {
+    result = {
+      provider,
+      profile,
+      source: "unsupported",
+      fetchedAt: new Date().toISOString(),
+      ok: false,
+      error: `no remote usage adapter for ${provider}`,
+      windows: []
+    };
+  }
+  if (opts?.persistCache !== false) {
+    putCachedUsage(result, root);
+  }
+  if (opts?.applyState !== false) {
+    applyUsageToAccountState(store, result);
+  }
+  return result;
+}
+async function fetchRemoteUsageForAccounts(store, accounts, opts) {
+  const out = [];
+  const queue = [...accounts];
+  const workers = Math.min(3, queue.length || 1);
+  async function worker() {
+    while (queue.length) {
+      if (opts?.shouldContinue && !opts.shouldContinue())
+        return;
+      const next = queue.shift();
+      if (!next)
+        return;
+      out.push(await fetchRemoteUsage(store, next.provider, next.profile, opts));
+    }
+  }
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return out;
+}
+
+// src/xai-login.ts
+var XAI_USERINFO_URL = "https://auth.x.ai/oauth2/userinfo";
+async function loginFromXaiUserinfo(cred, opts) {
+  if (!cred || cred.type !== "oauth")
+    return;
+  const fetchImpl = opts?.fetchImpl ?? fetch;
+  const timeoutMs = opts?.timeoutMs ?? 5000;
+  try {
+    const response = await fetchImpl(XAI_USERINFO_URL, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${cred.access}`,
+        Accept: "application/json"
+      },
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!response.ok)
+      return;
+    const parsed = await response.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return;
+    return emailFromUnknown(parsed.email);
+  } catch {
+    return;
+  }
+}
+
 // src/xai-relogin-heal.ts
 function findXaiReloginHealCandidate(store, authPaths, now = Date.now()) {
   const preferred = store.getState().providers.xai?.preferred;
@@ -2483,7 +2641,7 @@ class OarDaemon {
   handleSocket(socket) {
     let buf = Buffer.alloc(0);
     socket.on("data", async (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
+      buf = Buffer.concat([buf, typeof chunk === "string" ? Buffer.from(chunk) : chunk]);
       while (true) {
         const { msg, rest } = readFrame(buf);
         buf = rest;
@@ -2572,13 +2730,13 @@ class OarDaemon {
         continue;
       }
       const primary = row.windows.find((window) => window.remainingPercent != null) ?? row.windows[0];
-      if (!primary || primary.remainingPercent == null) {
+      if (row.extras?.unreported === true || !primary || primary.remainingPercent == null) {
         const account = this.store.getAccount(row.provider, row.profile);
         if (account) {
           this.store.upsertAccount({
             ...account,
             availability: "QUOTA_UNKNOWN",
-            reason: "remote_usage_unknown",
+            reason: row.extras?.unreported === true ? "remote_usage_unreported" : "remote_usage_unknown",
             lastChecked: new Date().toISOString()
           });
         }
@@ -2650,7 +2808,7 @@ class OarDaemon {
         continue;
       }
       const primary = usage.windows.find((window) => window.remainingPercent != null) ?? usage.windows[0];
-      if (!primary || primary.remainingPercent == null) {
+      if (usage.extras?.unreported === true || !primary || primary.remainingPercent == null) {
         checked.push({ provider, profile: current.profile, ok: false });
         continue;
       }
@@ -2759,7 +2917,7 @@ class OarDaemon {
                 activatedPaths: act.paths,
                 via: act.via,
                 sinks: act.sinks,
-                message: `${req.provider} ${req.profile} is now preferred. Running OMO sessions will use it on their next eligible request.`
+                message: resolved.availability === "QUOTA_UNKNOWN" ? `${req.provider} ${req.profile} is now preferred for manual use. ` + "Remote quota is unreported; auto routing will wait for verified usage." : `${req.provider} ${req.profile} is now preferred. ` + "Running OMO sessions will use it on their next eligible request."
               }
             };
           }
@@ -2788,9 +2946,9 @@ class OarDaemon {
           return { ok: false, error: `no accounts for ${req.provider}` };
         }
         if (req.profiles) {
-          const unique2 = new Set(req.profiles);
+          const unique = new Set(req.profiles);
           const known = new Set(accounts.map((account) => account.profile));
-          if (unique2.size !== req.profiles.length || req.profiles.length !== accounts.length || req.profiles.some((profile) => !known.has(profile))) {
+          if (unique.size !== req.profiles.length || req.profiles.length !== accounts.length || req.profiles.some((profile) => !known.has(profile))) {
             return {
               ok: false,
               error: `order must list every ${req.provider} profile exactly once ` + `(available: ${[...known].join(", ")})`

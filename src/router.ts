@@ -43,6 +43,16 @@ export function isEligible(a: AccountRecord, now = Date.now()): boolean {
   return ELIGIBLE.includes(a.availability) || a.availability === "UNKNOWN";
 }
 
+/** Valid auth + authenticated unreported remote %: user may `oar use`; auto must not. */
+export function isManualUnreportedUsable(a: AccountRecord): boolean {
+  return (
+    a.auth === "valid" &&
+    a.availability === "QUOTA_UNKNOWN" &&
+    a.reason === "remote_usage_unreported" &&
+    !a.disabled
+  );
+}
+
 export function refuseReason(account: AccountRecord): string {
   if (account.availability === "QUOTA_EXHAUSTED") {
     return `quota exhausted (0% / limit)${account.until ? `; resets ~ ${account.until}` : ""}`;
@@ -85,6 +95,16 @@ export class OarRouter {
     if (policy.preferred) {
       const preferred = accounts.find((a) => a.profile === policy.preferred);
       if (preferred && isEligible(preferred)) {
+        return this.toResponse(preferred);
+      }
+      // Manual stick: authenticated unreported quota is usable after explicit `oar use`.
+      // Auto / autoFailover must not treat unreported as a verified-positive target.
+      if (
+        preferred &&
+        isManualUnreportedUsable(preferred) &&
+        policy.mode === "manual" &&
+        !policy.autoFailover
+      ) {
         return this.toResponse(preferred);
       }
       // Manual mode: stick on preferred even if blocked (caller sees unavailable).
@@ -145,7 +165,8 @@ export class OarRouter {
     if (!account) {
       throw new Error(`Unknown account ${provider}/${profile}`);
     }
-    if (!opts?.force && !isEligible(account)) {
+    const allowUnreportedManual = isManualUnreportedUsable(account);
+    if (!opts?.force && !isEligible(account) && !allowUnreportedManual) {
       throw new Error(
         `REFUSED: ${provider}/${profile} is not usable — ${refuseReason(account)}. ` +
           `Not switching (even if auto is on). Pass force to override.`,
@@ -156,7 +177,7 @@ export class OarRouter {
       ...account,
       lastUsedAt: new Date().toISOString(),
     });
-    if (opts?.force) {
+    if (opts?.force || allowUnreportedManual) {
       return this.toResponse(this.store.getAccount(provider, profile) ?? account);
     }
     return this.resolve({ provider });
@@ -183,8 +204,33 @@ export class OarRouter {
       return next;
     }
 
+    if (req.result === "QUOTA_UNKNOWN") {
+      const next: AccountRecord = {
+        ...account,
+        auth: "valid",
+        availability: "QUOTA_UNKNOWN",
+        reason: req.detail ?? "remote_usage_unreported",
+        until: null,
+        lastChecked: new Date().toISOString(),
+      };
+      this.store.upsertAccount(next);
+      return next;
+    }
+
     if (req.result === "SUCCESS") {
       // Do not clear QUOTA_EXHAUSTED on SUCCESS — 403 was previously mis-labeled SUCCESS.
+      if (
+        account.availability === "QUOTA_UNKNOWN" &&
+        account.reason === "remote_usage_unreported"
+      ) {
+        const kept: AccountRecord = {
+          ...account,
+          lastChecked: new Date().toISOString(),
+          lastUsedAt: new Date().toISOString(),
+        };
+        this.store.upsertAccount(kept);
+        return kept;
+      }
       if (account.availability === "QUOTA_EXHAUSTED") {
         const kept: AccountRecord = {
           ...account,
@@ -207,7 +253,7 @@ export class OarRouter {
       return next;
     }
 
-    const failure = req.result as FailureType;
+    const failure = req.result as FailureType | "QUOTA_UNKNOWN";
     const next: AccountRecord = {
       ...account,
       lastChecked: new Date().toISOString(),
@@ -235,6 +281,11 @@ export class OarRouter {
           ? new Date(Date.now() + req.retryAfterSec * 1000).toISOString()
           : null;
         break;
+      case "QUOTA_UNKNOWN":
+        next.auth = "valid";
+        next.availability = "QUOTA_UNKNOWN";
+        next.until = null;
+        break;
       case "NETWORK_ERROR":
       case "SERVER_ERROR":
       case "BAD_REQUEST":
@@ -255,7 +306,12 @@ export class OarRouter {
     this.store.upsertAccount(next);
 
     const policy = this.store.getProviderPolicy(req.provider);
-    if (policy.autoFailover && isAccountFailoverCandidate(failure) && policy.mode === "auto") {
+    if (
+      failure !== "QUOTA_UNKNOWN" &&
+      policy.autoFailover &&
+      isAccountFailoverCandidate(failure) &&
+      policy.mode === "auto"
+    ) {
       // next resolve() skips ineligible
     }
     return next;

@@ -33,7 +33,7 @@ export type FailureType =
   | "LOCAL_ERROR"
   | "UNKNOWN";
 
-export type ReportResult = FailureType | "SUCCESS" | "QUOTA_AVAILABLE";
+export type ReportResult = FailureType | "SUCCESS" | "QUOTA_AVAILABLE" | "QUOTA_UNKNOWN";
 
 export type OAuthCredential = {
   type: "oauth";
