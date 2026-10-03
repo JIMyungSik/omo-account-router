@@ -131,6 +131,21 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/**
+ * SIGTERM delivery to a process group is asynchronous, so a worker's children can outlive the
+ * child-close event by a few milliseconds. Wait for the exit with a bound instead of asserting
+ * that death has already happened.
+ */
+async function waitForProcessExit(pid: number, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (processAlive(pid)) {
+    if (Date.now() > deadline) {
+      throw new Error(`process ${pid} was still alive after ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 function asTasks(data: unknown): QueueTask[] {
   if (!Array.isArray(data)) throw new Error("expected task list");
   return data as QueueTask[];
@@ -517,7 +532,7 @@ describe("queue daemon integration", () => {
     expect(cancelled.ok).toBe(true);
     const [done] = await finished;
     expect(done.status).toBe("cancelled");
-    expect(processAlive(childPid)).toBe(false);
+    await expect(waitForProcessExit(childPid)).resolves.toBeUndefined();
   });
 
   test("does not dispatch after the window ends during worktree setup", async () => {
