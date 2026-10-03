@@ -63,6 +63,13 @@ export const QUEUE_CONTINUATION_PREAMBLE =
 export const QUEUE_FRESH_CONTINUATION_PREAMBLE =
   "The previous session is not being reused. Continue from the artifacts on disk and finish the job, then end with the sentinel.";
 
+/** Prefix used when the run never reached a worker (repo check or worktree creation failed). */
+export const QUEUE_SETUP_FAILURE_PREFIX = "setup_failed: ";
+
+export function setupFailureMessage(reason: string): string {
+  return `${QUEUE_SETUP_FAILURE_PREFIX}${reason}`;
+}
+
 export function composeQueuePrompt(opts: {
   userPrompt: string;
   continuation?: boolean;
@@ -150,6 +157,19 @@ export function addIsolatedWorktree(opts: {
     return { ok: false, error: `worktree isolation failed: ${detail}` };
   }
   return { ok: true };
+}
+
+/** Record why a run never reached a worker, so the attempt directory is never silently empty. */
+export function writeSetupFailureArtifact(artifactDir: string, message: string): void {
+  try {
+    mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(artifactDir, "setup-error.txt"), `${message}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch {
+    // artifact best effort; the store record already carries the reason
+  }
 }
 
 function writePromptArtifacts(artifactDir: string, userPrompt: string, composed: string): void {

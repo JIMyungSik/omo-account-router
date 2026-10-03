@@ -47,7 +47,8 @@ export type QueueAttemptCause =
   | "provider_error"
   | "missing_sentinel"
   | "exit"
-  | "signal";
+  | "signal"
+  | "setup_failed";
 
 export type QueueAttemptRecord = {
   attempt: number;
@@ -73,6 +74,7 @@ export function inferAttemptCause(record: {
     return "brake_paused";
   }
   if (record.reason?.startsWith("provider_error")) return "provider_error";
+  if (record.reason?.startsWith("setup_failed")) return "setup_failed";
   if (record.reason?.startsWith("signal:")) return "signal";
   if (record.reason?.startsWith("exit:")) return "exit";
   if (record.verdict === "incomplete") return "incomplete_sentinel";
