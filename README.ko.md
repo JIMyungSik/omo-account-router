@@ -134,6 +134,14 @@ oar auto xai off
 # OMO 세션 안에서
 /model-preset use grok-astra
 /model-preset status grok-astra
+
+# 일일 프로모션 모델 창 + 코딩 프롬프트 큐 (opt-in)
+oar schedule configure
+oar schedule status
+oar queue add --repo ~/proj --prompt "flaky 테스트 고쳐"
+oar queue list
+oar queue retry <id>
+oar schedule off
 ```
 
 ## 계정 먼저, 모델은 그다음
@@ -514,12 +522,116 @@ refusal, unknown 오류는 이 preset에서 모델 전환을 일으키지 않습
 /model-preset off grok-astra
 ```
 
+### 일일 프로모션 모델 창 + 코딩 큐
+
+opt-in입니다. `oar schedule configure` 전까지는 꺼져 있습니다. 기본 창은
+Asia/Seoul `[00:00, 10:00)`, 모델은
+`opengateway/deepseek/deepseek-v4.1-flash-ultrafast`, 동시성 3입니다.
+설정한 스케줄이지, 실시간 가격을 보장하지 않습니다.
+
+```bash
+oar schedule configure
+oar schedule configure --timezone Asia/Seoul --start 00:00 --end 10:00 \
+  --provider opengateway --model deepseek/deepseek-v4.1-flash-ultrafast \
+  --concurrency 3 --max-attempts 3
+oar schedule status
+oar schedule off
+```
+
+OAR 확장을 로드한 OMO 세션(자식 세션 포함)은 창 안에서 프로모션 모델로
+바꾸고, 창 밖·비활성화·resume 때 **그 세션의** 이전 모델과 thinking을
+되돌립니다. 이미 열린 세션은 다음 프롬프트를 기다리지 않고 벽시계
+경계에서 전환하며, 긴 tool loop의 매 턴마다 다시 확인합니다. 창이 끝난
+뒤 수동으로 바꾼 모델은 유지되고, 다음 창은 그때의 모델을 새로
+캡처합니다. 전환 실패는 원래 모델을 지우지 않습니다. 이미 열린 세션은
+업데이트된 확장을 다시 로드해야 하며, 실행 중인 프로세스에 핫 주입하지
+않습니다. 세션별 `pi.setModel`만 쓰며 OMO 카테고리 기본값은 건드리지
+않습니다.
+
+```bash
+oar queue add --repo /path/to/repo --prompt "라우터 회귀 테스트 추가"
+oar queue add --repo /path/to/repo --prompt-file ./prompt.txt
+oar queue add --repo /path/to/non-git --prompt "제자리에서 실행" --isolate none
+oar queue add --repo /path/to/repo --prompt "재시도가 많은 작업" --max-attempts 5
+oar queue add --repo /path/to/repo --prompt "두 번째 단계" --depends-on <id>
+oar queue list
+oar queue list --json
+oar queue cancel <id>
+oar queue retry <id>
+```
+
+저장된 프롬프트는 창 안에서만 시작됩니다.
+`--depends-on <id[,id...]>`로 넣은 작업은 나열한 선행 작업이 모두
+DONE 센티널(`status=completed`이고 `verdict=completed`)일 때만
+실행됩니다. 전체 id 또는 유일한 prefix를 받으며, 저장 값은 중복을
+제거한 `dependsOn` 배열입니다. 동시성 슬롯은 *실행 가능한* 작업만
+채우므로, 선행이 안 끝난 종속 작업은 슬롯을 점유하지 않고 다음
+독립 작업이 시작합니다. 선행이 cancelled/failed/incomplete/interrupted로
+끝나면 종속 작업은 `unsatisfiable_dependency` 사유로 대기하며
+자동으로 풀리지 않습니다. `oar queue list`는 `dependsOn`, 미충족 id,
+대기 여부를 보여 줍니다.
+
+격리는 작업마다 고릅니다.
+
+- `--isolate worktree`(기본값)는 git 저장소가 필요하며
+  `OAR_HOME/queue/<id>/work` 독립 worktree에서 실행합니다.
+- `--isolate none`은 git 검사와 worktree 생성을 건너뛰고 저장소
+  디렉터리 자체를 워커 `cwd`로 씁니다. 병렬 작업이 같은 디렉터리를
+  공유하므로 충돌할 수 있습니다. OAR는 그 안에 파일을 만들지 않습니다.
+
+사용자 원문 프롬프트 바이트는 합성 stdin 안에 그대로 남습니다.
+러너는 고정 완료 계약을 붙여, 워커가 마지막 메시지를 아래
+센티널 한 줄로 끝내게 합니다.
+
+- 실제 완료: `OAR_RESULT: DONE`
+- 끝내지 못함: `OAR_RESULT: INCOMPLETE: <reason>`
+
+종료 코드 `0`만으로는 성공이 아닙니다. 판정은 워커 JSON 스트림을
+기계적으로 검사합니다.
+
+- 종료 코드 !== 0 → `failed`
+- 마지막 assistant 메시지에 DONE 센티널 → `completed`
+- 그 외 → `incomplete` (센티널 없음은 성공이 아님)
+- stdout의 `omo-brake paused`는 별도의 원인으로 기록
+- 마지막 assistant의 `stopReason`이 `error`이거나 `errorMessage`가
+  있으면 재시도 가능한 provider 오류이며 성공이 아님
+
+incomplete/failed 워커 실행은 `--max-attempts`(기본 3, 작업별 또는
+`oar schedule configure --max-attempts`로 설정)까지 자동 재시도합니다.
+재시도가 이전 OMO 세션을 이어가는 경우(`--session <id>`)는 직전 시도가
+에이전트가 선언한 `OAR_RESULT: INCOMPLETE:` 센티널로 끝난 때뿐입니다.
+브레이크 pause, provider 오류, 비정상 종료, 센티널 없음, 설정 중
+중단 등 다른 재시도 원인은 **새 세션**을 열고, 이전 세션을 재사용하지
+않으니 디스크 산출물에서 이어서 하라고 전문에 명시합니다. 시도 기록에는
+실제로 쓴 세션 id와 resume/fresh 결정이 남습니다. 한도에 닿으면
+마지막 사유와 함께 `incomplete` 또는 `failed`로 남습니다. `omo-brake
+paused`가 반복된 뒤 시도가 소진되면 종료 사유는
+`omo-brake paused: attempts exhausted`입니다.
+`oar queue retry <id>`는 종료된 incomplete/failed 작업을 다시 무장하고
+시도 예산을 초기화합니다.
+
+센티널은 워커가 스스로 보고하는 값입니다. OAR는 없거나 실패한
+센티널을 거절할 수 있지만, DONE이라고 주장한 작업이 실제로
+올바른지는 독립적으로 증명하지 않습니다.
+
+프롬프트는 argv positional이 아니라
+`omo` print 모드 stdin(`-p`, `--model`, `--mode json`,
+`--no-model-fallback`, `--no-ask-user`, 재시도 시 `--session`)으로
+넘어가므로 앞의 `-`와 `@file` 형태도 그대로 유지되고 파일로 펼쳐지지
+않습니다. 10:00에는 신규 실행과 재시도를 멈추고 진행 중 워커와 그
+자식 프로세스 트리를 중단합니다. 산출물은 검수용으로 남고 자동
+merge/commit은 하지 않습니다. 기본 `worktree`에서 git이 아니면
+실패하고 `--isolate none`을 안내합니다. 데몬을 다시 켜면 남은
+`running` 작업은 `interrupted`가 되며, 이어갈 세션 없이 부분 수정을
+같은 디렉터리에서 조용히 다시 돌리지 않습니다.
+
 ### 범위
 | 함 | 안 함 |
 |----|--------|
-| 계정 vault + 핫스왑 | 모델 자동 변경 |
+| 계정 vault + 핫스왑 | 임의 프로모션 스크랩 |
 | usage % (Codex / Grok) | Orca 자체 계정 UI |
 | 선택적 auto 계정 failover | provider 약관 준수 보장 |
+| opt-in 일일 프로모 모델 + 코딩 큐 | 큐 결과 자동 merge/commit |
 
 ---
 

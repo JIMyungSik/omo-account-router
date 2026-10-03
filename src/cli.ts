@@ -2,7 +2,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyAuthStaleHints } from "./auth-stale.ts";
 import { OarClient } from "./client.ts";
@@ -20,6 +20,14 @@ import {
   resolveActiveAuthPaths,
 } from "./paths.ts";
 import type { OarRequest } from "./protocol.ts";
+import {
+  annotateQueueTasks,
+  formatQueueListText,
+  parseDependsOn,
+  parseMaxAttempts,
+  parseQueueIsolation,
+  type QueueTask,
+} from "./queue-store.ts";
 import { findSenpiInstall } from "./senpi-install.ts";
 import { buildPanelSnapshot, formatPanelText, formatPanelXbar, type StatusPayload } from "./panel.ts";
 import { buildStatusView, formatStatusText, statusViewToJson, wantStatusColor } from "./status-format.ts";
@@ -122,6 +130,51 @@ COMMANDS
   oar poll-quota
       Run the daemon's proactive quota check immediately. Normally the daemon
       runs it every OAR_QUOTA_POLL_SEC seconds (default 60; 0 disables).
+
+  oar schedule configure [--timezone TZ] [--start HH:MM] [--end HH:MM]
+                         [--provider id] [--model id] [--concurrency N]
+                         [--max-attempts N]
+      Enable the daily promotional model window. Defaults: Asia/Seoul
+      [00:00,10:00), opengateway/deepseek/deepseek-v4.1-flash-ultrafast,
+      concurrency 3, max-attempts 3. Existing OMO category defaults are not
+      rewritten; sessions restore their own previous model and thinking
+      outside the window.
+
+  oar schedule status [--json]
+      Show the configured window, promotional model, and whether now is inside.
+
+  oar schedule off
+      Disable the window. Stop new queue launches and interrupt running jobs.
+
+  oar queue add --repo <path> --prompt <text> [--isolate worktree|none]
+               [--max-attempts N] [--depends-on <id[,id...]>]
+  oar queue add --repo <path> --prompt-file <path> [--isolate worktree|none]
+               [--max-attempts N] [--depends-on <id[,id...]>]
+      Persist a coding prompt for isolated OMO execution during the window.
+      The prompt is written to omo stdin in print mode, not as a positional
+      argv value. Leading dashes and @file-looking text stay literal.
+      Default --isolate worktree requires a git repository. --isolate none
+      skips git and runs in the repository directory.
+      Default --max-attempts is the schedule value (3). Incomplete or failed
+      worker runs are retried automatically up to that cap.
+      --depends-on accepts full task ids or unique prefixes. The new task is
+      not dispatched until each prerequisite has a DONE verdict (completed).
+      A cancelled, failed, incomplete, or interrupted prerequisite stays
+      unmet and does not release the dependent.
+
+  oar queue list [--json]
+      List stored queue tasks. Human output shows dependsOn, unmet
+      prerequisites, and whether a task is waiting. JSON includes those
+      fields plus status, attempts, maxAttempts, verdict, reason, and
+      sessionIds.
+
+  oar queue cancel <id>
+      Cancel a queued task or interrupt a running worker. Partial work is kept
+      and is not retried automatically.
+
+  oar queue retry <id>
+      Re-arm a terminal incomplete or failed task, reset its attempt budget,
+      and continue the last captured OMO session when one exists.
 
   oar import-auth <provider> <profile> [--from <auth.json>] [--account <n|name>]
       Copy one provider credential from Senpi auth.json (default ~/.omo/agent/auth.json)
@@ -231,6 +284,8 @@ EXAMPLES
   oar usage --refresh
   oar recommend xai openai-codex
   oar auto xai on
+  oar schedule configure
+  oar queue add --repo ~/proj --prompt "fix the flaky test"
 `;
 }
 
@@ -588,7 +643,60 @@ function suggestAccounts(provider?: string): string {
     : `Try: oar accounts   or   oar import-auth --all`;
 }
 
-async function main(argv: string[]) {
+function printPromotionStatus(data: Record<string, unknown>, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  console.log(`enabled:     ${data.enabled ? "yes" : "no"}`);
+  console.log(`window:      ${data.start}–${data.end} ${data.timezone} [start inclusive, end exclusive]`);
+  console.log(`model:       ${data.modelSelector}`);
+  console.log(`inside hours: ${data.insideHours ? "yes" : "no"}`);
+  console.log(`in window:   ${data.inWindow ? "yes" : "no"}`);
+  console.log(`concurrency: ${data.maxConcurrency}`);
+  if (data.maxAttempts != null) console.log(`max attempts: ${data.maxAttempts}`);
+  console.log(`now:         ${data.now}`);
+  const next = data.nextBoundary;
+  if (next && typeof next === "object" && next !== null && "at" in next) {
+    const entering = "entering" in next && next.entering ? "enter" : "exit";
+    console.log(`next bound:  ${String(next.at)} (${entering})`);
+  }
+}
+
+function readPromptArg(rest: string[]): string {
+  const promptIdx = rest.indexOf("--prompt");
+  const fileIdx = rest.indexOf("--prompt-file");
+  if (promptIdx >= 0 && fileIdx >= 0) {
+    throw new Error("use either --prompt or --prompt-file, not both");
+  }
+  if (fileIdx >= 0) {
+    const path = rest[fileIdx + 1];
+    if (!path || path.startsWith("--")) throw new Error("flag --prompt-file requires a value");
+    return readFileSync(path, "utf8");
+  }
+  if (promptIdx >= 0) {
+    const value = rest[promptIdx + 1];
+    if (value === undefined) throw new Error("flag --prompt requires a value");
+    return value;
+  }
+  throw new Error(
+    "usage: oar queue add --repo <path> --prompt <text>|--prompt-file <path> [--isolate worktree|none] [--max-attempts N] [--depends-on <id[,id...]>]",
+  );
+}
+
+function collectDependsOn(flags: string[]): string[] {
+  const collected: string[] = [];
+  for (let i = 0; i < flags.length; i++) {
+    if (flags[i] !== "--depends-on") continue;
+    const value = flags[i + 1];
+    if (!value || value.startsWith("--")) throw new Error("flag --depends-on requires a value");
+    collected.push(...parseDependsOn(value));
+    i++;
+  }
+  return parseDependsOn(collected);
+}
+
+export async function runCli(argv: string[]) {
   const [cmd, ...rest] = argv;
   if (cmd === "-h" || cmd === "--help") {
     console.log(usage());
@@ -1339,12 +1447,153 @@ async function main(argv: string[]) {
       if (sub === "status") return daemonStatus();
       throw new Error("usage: oar daemon start|stop|status");
     }
+    case "schedule": {
+      const sub = rest[0];
+      if (sub === "configure") {
+        const flags = rest.slice(1);
+        const valueFlags = new Set([
+          "--timezone",
+          "--start",
+          "--end",
+          "--provider",
+          "--model",
+          "--concurrency",
+          "--max-attempts",
+        ]);
+        rejectUnknownFlags(flags, new Set(["--json", ...valueFlags]), valueFlags);
+        const flagValue = (name: string): string | undefined => {
+          const idx = flags.indexOf(name);
+          return idx >= 0 ? flags[idx + 1] : undefined;
+        };
+        let maxConcurrency: number | undefined;
+        const concurrency = flagValue("--concurrency");
+        if (concurrency != null) {
+          maxConcurrency = Number(concurrency);
+          if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
+            throw new Error("--concurrency must be an integer >= 1");
+          }
+        }
+        let maxAttempts: number | undefined;
+        const attempts = flagValue("--max-attempts");
+        if (attempts != null) maxAttempts = parseMaxAttempts(Number(attempts));
+        const res = await req({
+          protocol: 1,
+          action: "schedule-configure",
+          ...(flagValue("--timezone") ? { timezone: flagValue("--timezone") } : {}),
+          ...(flagValue("--start") ? { start: flagValue("--start") } : {}),
+          ...(flagValue("--end") ? { end: flagValue("--end") } : {}),
+          ...(flagValue("--provider") ? { provider: flagValue("--provider") } : {}),
+          ...(flagValue("--model") ? { model: flagValue("--model") } : {}),
+          ...(maxConcurrency != null ? { maxConcurrency } : {}),
+          ...(maxAttempts != null ? { maxAttempts } : {}),
+        });
+        if (!res.ok) throw new Error(res.error);
+        printPromotionStatus(res.data as Record<string, unknown>, flags.includes("--json"));
+        return;
+      }
+      if (sub === "status") {
+        rejectUnknownFlags(rest.slice(1), new Set(["--json"]));
+        const res = await req({ protocol: 1, action: "schedule-status" });
+        if (!res.ok) throw new Error(res.error);
+        printPromotionStatus(res.data as Record<string, unknown>, rest.includes("--json"));
+        return;
+      }
+      if (sub === "off") {
+        rejectUnknownFlags(rest.slice(1), new Set([]));
+        const res = await req({ protocol: 1, action: "schedule-off" });
+        if (!res.ok) throw new Error(res.error);
+        printPromotionStatus(res.data as Record<string, unknown>, false);
+        return;
+      }
+      throw new Error("usage: oar schedule configure|status|off");
+    }
+    case "queue": {
+      const sub = rest[0];
+      if (sub === "add") {
+        const flags = rest.slice(1);
+        const valueFlags = new Set([
+          "--repo",
+          "--prompt",
+          "--prompt-file",
+          "--isolate",
+          "--max-attempts",
+          "--depends-on",
+        ]);
+        rejectUnknownFlags(flags, valueFlags, valueFlags);
+        const repoIdx = flags.indexOf("--repo");
+        const repo = repoIdx >= 0 ? flags[repoIdx + 1] : undefined;
+        if (!repo || repo.startsWith("--")) {
+          throw new Error(
+            "usage: oar queue add --repo <path> --prompt <text>|--prompt-file <path> [--isolate worktree|none] [--max-attempts N] [--depends-on <id[,id...]>]",
+          );
+        }
+        const prompt = readPromptArg(flags);
+        const isolateIdx = flags.indexOf("--isolate");
+        const isolation = isolateIdx >= 0 ? parseQueueIsolation(flags[isolateIdx + 1]) : undefined;
+        const maxIdx = flags.indexOf("--max-attempts");
+        const maxAttempts = maxIdx >= 0 ? parseMaxAttempts(Number(flags[maxIdx + 1])) : undefined;
+        const dependsOn = collectDependsOn(flags);
+        const res = await req({
+          protocol: 1,
+          action: "queue-add",
+          prompt,
+          repository: resolve(repo),
+          ...(isolation ? { isolation } : {}),
+          ...(maxAttempts != null ? { maxAttempts } : {}),
+          ...(dependsOn.length > 0 ? { dependsOn } : {}),
+        });
+        if (!res.ok) throw new Error(res.error);
+        console.log(JSON.stringify(res.data, null, 2));
+        return;
+      }
+      if (sub === "list") {
+        rejectUnknownFlags(rest.slice(1), new Set(["--json"]));
+        const res = await req({ protocol: 1, action: "queue-list" });
+        if (!res.ok) throw new Error(res.error);
+        const tasks = res.data as QueueTask[];
+        if (rest.includes("--json")) {
+          console.log(JSON.stringify(tasks, null, 2));
+          return;
+        }
+        console.log(formatQueueListText(annotateQueueTasks(tasks)));
+        return;
+      }
+      if (sub === "cancel") {
+        const id = rest[1];
+        if (!id) throw new Error("usage: oar queue cancel <id>");
+        const res = await req({ protocol: 1, action: "queue-cancel", id });
+        if (!res.ok) throw new Error(res.error);
+        console.log(JSON.stringify(res.data, null, 2));
+        return;
+      }
+      if (sub === "retry") {
+        const id = rest[1];
+        if (!id) throw new Error("usage: oar queue retry <id>");
+        const res = await req({ protocol: 1, action: "queue-retry", id });
+        if (!res.ok) throw new Error(res.error);
+        console.log(JSON.stringify(res.data, null, 2));
+        return;
+      }
+      throw new Error("usage: oar queue add|list|cancel|retry");
+    }
     default:
       throw new Error(`unknown command: ${cmd} (try: oar -h)`);
   }
 }
 
-main(process.argv.slice(2)).catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exit(1);
-});
+function isCliEntrypoint(): boolean {
+  const arg = process.argv[1];
+  if (!arg) return false;
+  try {
+    return resolve(arg) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (isCliEntrypoint()) {
+  runCli(process.argv.slice(2)).catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
+  });
+}

@@ -135,6 +135,14 @@ oar auto xai off
 # Inside an OMO session
 /model-preset use grok-astra
 /model-preset status grok-astra
+
+# Daily promotional model window + coding prompt queue (opt-in)
+oar schedule configure
+oar schedule status
+oar queue add --repo ~/proj --prompt "fix the flaky test"
+oar queue list
+oar queue retry <id>
+oar schedule off
 ```
 
 ## Account first, model second
@@ -521,12 +529,118 @@ model-not-found, refusal, and unknown failures do not advance this preset.
 /model-preset off grok-astra
 ```
 
+### Daily promotional model window + coding queue
+
+Opt-in. Disabled until `oar schedule configure`. Default window is Asia/Seoul
+`[00:00, 10:00)` with model
+`opengateway/deepseek/deepseek-v4.1-flash-ultrafast` and concurrency 3. This is
+a configured schedule, not a live price guarantee.
+
+```bash
+oar schedule configure
+oar schedule configure --timezone Asia/Seoul --start 00:00 --end 10:00 \
+  --provider opengateway --model deepseek/deepseek-v4.1-flash-ultrafast \
+  --concurrency 3 --max-attempts 3
+oar schedule status
+oar schedule off
+```
+
+OMO sessions that load the OAR extension, including child sessions, switch to
+the promotional model inside the window and restore **that session's** previous
+model and thinking outside it, after disable, and on resume. Loaded sessions
+switch at the wall-clock boundary, not only on the next prompt, and re-check on
+every agent turn. After a window ends, a later manual model choice is kept; the
+next window captures that current model. Failures leave the original model in
+place. Already-open sessions need the updated extension loaded; OAR does not
+hot-inject into a running process. Per-session `pi.setModel` is used — OMO
+category defaults are not rewritten.
+
+```bash
+oar queue add --repo /path/to/repo --prompt "add regression tests for the router"
+oar queue add --repo /path/to/repo --prompt-file ./prompt.txt
+oar queue add --repo /path/to/non-git --prompt "run in place" --isolate none
+oar queue add --repo /path/to/repo --prompt "retry-heavy job" --max-attempts 5
+oar queue add --repo /path/to/repo --prompt "step two" --depends-on <id>
+oar queue list
+oar queue list --json
+oar queue cancel <id>
+oar queue retry <id>
+```
+
+Queued prompts start only inside the window. A task added with
+`--depends-on <id[,id...]>` stays queued until every listed prerequisite
+has a DONE sentinel (`status=completed` and `verdict=completed`). Full
+ids or unique prefixes are accepted and stored as a de-duplicated
+`dependsOn` array. Arrival order still applies among *eligible* tasks:
+a blocked dependent does not take a concurrency slot, so the next
+independent job can start. If a prerequisite ends cancelled, failed,
+incomplete, or interrupted, the dependent stays waiting with an
+`unsatisfiable_dependency` reason — it is not silently released.
+`oar queue list` shows `dependsOn`, unmet ids, and whether the task is
+waiting.
+
+Isolation is per task:
+
+- `--isolate worktree` (default) requires a git repository and runs in a
+  detached worktree under `OAR_HOME/queue/<id>/work`.
+- `--isolate none` skips git and worktree creation. The worker `cwd` is the
+  repository directory itself. Parallel jobs share that directory and may
+  collide; OAR does not create files inside it.
+
+The stored prompt bytes stay verbatim inside the composed stdin payload.
+The runner appends a fixed completion contract that requires the worker to
+end its final message with exactly one sentinel line:
+
+- `OAR_RESULT: DONE` on real completion
+- `OAR_RESULT: INCOMPLETE: <reason>` when it could not finish
+
+Exit code `0` is never treated as success by itself. Verdicts are
+machine-checked against the worker JSON stream:
+
+- exit code !== 0 → `failed`
+- last assistant message has the DONE sentinel → `completed`
+- otherwise → `incomplete` (missing sentinel is never success)
+- `omo-brake paused` in stdout is recorded as its own cause
+- a final assistant `stopReason` of `error` or an `errorMessage` is a
+  retryable provider error, not success
+
+Incomplete or failed worker runs are re-queued automatically up to
+`--max-attempts` (default 3, configurable per task or via
+`oar schedule configure --max-attempts`). A retry resumes the previous
+OMO session (`--session <id>`) only when that attempt ended with an
+agent-declared `OAR_RESULT: INCOMPLETE:` sentinel. Every other retry
+cause — brake pause, provider error, non-zero exit, missing sentinel,
+or interrupted setup — starts a **fresh** session and tells the worker
+the previous session is not being reused, so it must continue from
+artifacts on disk. Attempt history records the session id actually used
+and whether that run resumed or started fresh. After the cap, the task
+stays `incomplete` or `failed` with the last reason. Exhausting all
+attempts after repeated `omo-brake paused` results uses the distinct
+terminal reason `omo-brake paused: attempts exhausted`. `oar queue retry <id>`
+re-arms a terminal incomplete/failed task and resets its attempt budget.
+
+The sentinel is self-reported by the worker. OAR can reject a missing or
+failed sentinel, but it cannot independently prove that the claimed DONE
+work is correct.
+
+The stored prompt is written to `omo` stdin
+in print mode (`-p`, `--model`, `--mode json`, `--no-model-fallback`,
+`--no-ask-user`, and `--session` on retries) so leading dashes and `@file`
+text stay literal and are not expanded. At 10:00 new launches — including
+retries — stop and running workers, including their child process trees,
+are interrupted. Artifacts stay for review; nothing is merged or committed.
+A non-git path with the default `worktree` strategy fails and tells you to
+pass `--isolate none`. Restarting the daemon marks leftover `running` jobs
+as `interrupted` and does not silently rerun a partial edit without the
+continuation session.
+
 ### Scope
 | In scope | Out of scope |
 |----------|----------------|
-| Account vault + hot-switch | Picking models for you |
+| Account vault + hot-switch | Scraping arbitrary promotions |
 | Usage % (Codex / Grok) | Orca’s own multi-account UI |
 | Optional auto account failover | Guaranteed provider ToS compliance |
+| Opt-in daily promo model + coding queue | Auto-merge/commit of queue results |
 
 ---
 

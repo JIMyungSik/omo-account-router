@@ -9,6 +9,16 @@ import { classifyFailure } from "./classifier.ts";
 import { EventLog } from "./events.ts";
 import { LeaseManager } from "./lease.ts";
 import type { OarRequest, OarResponse } from "./protocol.ts";
+import {
+  isInPromotionWindow,
+  nextWindowBoundary,
+  normalizePromotionSchedule,
+  promotionStatusView,
+} from "./promotion.ts";
+import { PromotionStore } from "./promotion-store.ts";
+import { QueueManager, type QueueEvent, type QueueSleep } from "./queue-manager.ts";
+import { createOmoQueueRunner, type OmoCommand, type QueueRunner } from "./queue-runner.ts";
+import { annotateQueueTask, annotateQueueTasks, QueueStore } from "./queue-store.ts";
 import { AccountRefreshLock } from "./refresh-lock.ts";
 import { resolveProvider } from "./provider-alias.ts";
 import { parseReportResult } from "./report-results.ts";
@@ -28,6 +38,12 @@ export type DaemonOptions = {
   sinks?: readonly AccountSink[];
   /** Zero disables background polling. Production daemon-main supplies 60 seconds. */
   quotaPollIntervalMs?: number;
+  /** Injected clock for promotional window tests. Wall timers are disabled when set. */
+  now?: () => number;
+  queueRunner?: QueueRunner;
+  omoCommand?: OmoCommand;
+  queueRetryDelayMs?: number;
+  queueSleep?: QueueSleep;
 };
 
 type QuotaPollResult = {
@@ -59,6 +75,14 @@ export class OarDaemon {
   private quotaPollInFlight = false;
   private running = false;
   private lifecycleEpoch = 0;
+  private readonly now: () => number;
+  private readonly useWallPromotionTimer: boolean;
+  private readonly promotionStore: PromotionStore;
+  private readonly queueStore: QueueStore;
+  private readonly queueManager: QueueManager;
+  private readonly queueListeners = new Set<(event: QueueEvent) => void>();
+  private promotionTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastInWindow: boolean | undefined;
 
   constructor(opts: DaemonOptions) {
     this.store = opts.store;
@@ -73,6 +97,65 @@ export class OarDaemon {
     this.activateOnUse = opts.activateOnUse ?? true;
     this.events = EventLog.forRoot(opts.store.rootDir);
     this.quotaPollIntervalMs = opts.quotaPollIntervalMs ?? 0;
+    this.now = opts.now ?? Date.now;
+    this.useWallPromotionTimer = opts.now == null;
+    this.promotionStore = new PromotionStore({ rootDir: opts.store.rootDir });
+    this.queueStore = new QueueStore({ rootDir: opts.store.rootDir });
+    this.queueManager = new QueueManager({
+      store: this.queueStore,
+      schedule: () => this.promotionStore.get(),
+      now: this.now,
+      runner: opts.queueRunner ?? createOmoQueueRunner(opts.omoCommand ?? { bin: "omo" }),
+      emit: (event) => this.emitQueueEvent(event),
+      retryDelayMs: opts.queueRetryDelayMs,
+      sleep: opts.queueSleep,
+    });
+  }
+
+  onQueueEvent(handler: (event: QueueEvent) => void): () => void {
+    this.queueListeners.add(handler);
+    return () => {
+      this.queueListeners.delete(handler);
+    };
+  }
+
+  async reconcilePromotion(): Promise<void> {
+    const schedule = this.promotionStore.get();
+    const inWindow = isInPromotionWindow(this.now(), schedule);
+    if (this.lastInWindow === true && !inWindow) {
+      this.emitQueueEvent({ type: "promotion:exited" });
+    } else if (this.lastInWindow === false && inWindow) {
+      this.emitQueueEvent({ type: "promotion:entered" });
+    } else if (this.lastInWindow === undefined && inWindow) {
+      this.emitQueueEvent({ type: "promotion:entered" });
+    }
+    this.lastInWindow = inWindow;
+    await this.queueManager.reconcile();
+    this.armPromotionTimer();
+  }
+
+  private emitQueueEvent(event: QueueEvent): void {
+    this.events.append({
+      ts: new Date(this.now()).toISOString(),
+      event: event.type,
+      reason: "id" in event ? event.id : undefined,
+    });
+    for (const handler of [...this.queueListeners]) handler(event);
+  }
+
+  private armPromotionTimer(): void {
+    if (this.promotionTimer) {
+      clearTimeout(this.promotionTimer);
+      this.promotionTimer = null;
+    }
+    if (!this.useWallPromotionTimer || !this.running) return;
+    const next = nextWindowBoundary(this.now(), this.promotionStore.get());
+    if (!next) return;
+    const delay = Math.max(0, Math.min(next.at - this.now(), 2_147_000_000));
+    this.promotionTimer = setTimeout(() => {
+      void this.reconcilePromotion();
+    }, delay);
+    this.promotionTimer.unref();
   }
 
   get refresh(): AccountRefreshLock {
@@ -110,6 +193,9 @@ export class OarDaemon {
     this.running = true;
     this.lifecycleEpoch += 1;
     this.events.append({ ts: new Date().toISOString(), event: "daemon_start", pid: process.pid });
+    this.queueManager.resetLifecycle();
+    this.queueManager.markStaleRunning();
+    await this.reconcilePromotion();
     if (this.quotaPollIntervalMs > 0) {
       void this.runScheduledQuotaPoll();
       this.quotaPollTimer = setInterval(() => {
@@ -122,6 +208,11 @@ export class OarDaemon {
   async stop(): Promise<void> {
     this.running = false;
     this.lifecycleEpoch += 1;
+    if (this.promotionTimer) {
+      clearTimeout(this.promotionTimer);
+      this.promotionTimer = null;
+    }
+    await this.queueManager.shutdown();
     if (this.quotaPollTimer) {
       clearInterval(this.quotaPollTimer);
       this.quotaPollTimer = null;
@@ -904,8 +995,96 @@ export class OarDaemon {
             leaseCount: this.leases.list().length,
             quotaPollIntervalMs: this.quotaPollIntervalMs,
             pid: process.pid,
+            promotion: promotionStatusView(this.promotionStore.get(), this.now()),
           },
         };
+      case "schedule-configure": {
+        const current = this.promotionStore.get();
+        try {
+          const next = normalizePromotionSchedule({
+            ...current,
+            enabled: true,
+            ...(req.timezone != null ? { timezone: req.timezone } : {}),
+            ...(req.start != null ? { start: req.start } : {}),
+            ...(req.end != null ? { end: req.end } : {}),
+            ...(req.provider != null ? { provider: req.provider } : {}),
+            ...(req.model != null ? { model: req.model } : {}),
+            ...(req.maxConcurrency != null ? { maxConcurrency: req.maxConcurrency } : {}),
+            ...(req.maxAttempts != null ? { maxAttempts: req.maxAttempts } : {}),
+          });
+          const saved = this.promotionStore.set(next);
+          this.events.append({
+            ts: new Date(this.now()).toISOString(),
+            event: "schedule-configure",
+            reason: `${saved.timezone} ${saved.start}-${saved.end} ${saved.provider}/${saved.model}`,
+          });
+          await this.reconcilePromotion();
+          return { ok: true, data: promotionStatusView(saved, this.now()) };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      case "schedule-status":
+        return { ok: true, data: promotionStatusView(this.promotionStore.get(), this.now()) };
+      case "schedule-off": {
+        const saved = this.promotionStore.set({ ...this.promotionStore.get(), enabled: false });
+        this.events.append({
+          ts: new Date(this.now()).toISOString(),
+          event: "schedule-off",
+        });
+        await this.reconcilePromotion();
+        return { ok: true, data: promotionStatusView(saved, this.now()) };
+      }
+      case "queue-add": {
+        try {
+          const task = this.queueStore.add({
+            prompt: req.prompt,
+            repository: req.repository,
+            isolation: req.isolation,
+            maxAttempts: req.maxAttempts ?? this.promotionStore.get().maxAttempts,
+            dependsOn: req.dependsOn,
+            nowMs: this.now(),
+          });
+          this.events.append({
+            ts: new Date(this.now()).toISOString(),
+            event: "queue-add",
+            reason: task.id,
+          });
+          await this.reconcilePromotion();
+          const latest = this.queueStore.get(task.id) ?? task;
+          return { ok: true, data: annotateQueueTask(latest, this.queueStore.list()) };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      case "queue-list":
+        return { ok: true, data: annotateQueueTasks(this.queueStore.list()) };
+      case "queue-cancel": {
+        try {
+          const task = await this.queueManager.cancel(req.id);
+          this.events.append({
+            ts: new Date(this.now()).toISOString(),
+            event: "queue-cancel",
+            reason: req.id,
+          });
+          return { ok: true, data: task };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      case "queue-retry": {
+        try {
+          const task = await this.queueManager.retry(req.id);
+          this.events.append({
+            ts: new Date(this.now()).toISOString(),
+            event: "queue-retry",
+            reason: req.id,
+          });
+          return { ok: true, data: task };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
       default:
         return { ok: false, error: `unknown action` };
     }
