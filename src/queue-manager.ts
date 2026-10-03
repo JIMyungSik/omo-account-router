@@ -7,6 +7,8 @@ import {
   inspectRepositoryPath,
   judgeQueueRun,
   OAR_BRAKE_EXHAUSTED_REASON,
+  setupFailureMessage,
+  writeSetupFailureArtifact,
   type IsolateWorktree,
   type QueueRunner,
   type QueueRunJudgment,
@@ -224,6 +226,25 @@ export class QueueManager {
       });
       this.emit({ type: "queue:job-finished", id, status });
     };
+    // A failed setup (repo check, worktree creation) never reached the worker, so it used no
+    // attempt. Record it as an attempt so the retry budget still governs, and re-queue while
+    // budget remains instead of ending the task as terminal on a transient error.
+    const finishSetupFailure = (message: string) => {
+      if (handle.reason) {
+        finishAbort(statusForAbort(handle.reason), { error: handle.reason });
+        return;
+      }
+      writeSetupFailureArtifact(attemptDir, message);
+      const outcome = this.recordAttempt(
+        id,
+        attemptDir,
+        { code: 1, signal: null, stdout: "", stderr: message },
+        task.startedAt,
+        { verdict: "failed", reason: setupFailureMessage(message), cause: "setup_failed" },
+        "fresh",
+      );
+      if (outcome.canRetry) void this.sleep(this.retryDelayMs);
+    };
 
     try {
       if (this.shouldStop(handle)) {
@@ -235,7 +256,7 @@ export class QueueManager {
       const repo =
         isolation === "none" ? inspectRepositoryPath(task.repository) : inspectRepository(task.repository);
       if (!repo.ok) {
-        finishAbort(handle.reason ? statusForAbort(handle.reason) : "failed", { error: repo.error });
+        finishSetupFailure(repo.error);
         return;
       }
       if (this.shouldStop(handle)) {
@@ -249,7 +270,7 @@ export class QueueManager {
         if (!task.worktreeDir || !existsSync(worktreeDir)) {
           const isolated = this.isolateWorktree({ repository: resolve(task.repository), worktreeDir });
           if (!isolated.ok) {
-            finishAbort(handle.reason ? statusForAbort(handle.reason) : "failed", { error: isolated.error });
+            finishSetupFailure(isolated.error);
             return;
           }
         }

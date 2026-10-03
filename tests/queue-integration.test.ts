@@ -18,6 +18,7 @@ import {
   QUEUE_COMPLETION_CONTRACT,
   QUEUE_CONTINUATION_PREAMBLE,
   QUEUE_FRESH_CONTINUATION_PREAMBLE,
+  type QueueRunner,
 } from "../src/queue-runner.ts";
 import { QueueManager, type QueueEvent } from "../src/queue-manager.ts";
 import {
@@ -76,6 +77,26 @@ function initRepo(dir: string): void {
   writeFileSync(join(dir, "README"), "source\n");
   run(["add", "."]);
   run(["commit", "-m", "init"]);
+}
+
+/** Poll the store until a task reaches a terminal status, so tests never rely on a fixed sleep. */
+async function waitForStatus(
+  store: QueueStore,
+  id: string,
+  status: QueueTask["status"],
+  timeoutMs = 4000,
+): Promise<QueueTask> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const task = store.get(id);
+    if (task?.status === status) return task;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `timeout waiting for ${id} to reach ${status}, saw ${task?.status ?? "missing"} (${task?.reason ?? ""})`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 function waitForFile(path: string, timeoutMs = 4000): Promise<string> {
@@ -345,19 +366,28 @@ describe("queue daemon integration", () => {
     process.env.OAR_FAKE_OMO_MODE = "complete";
     const bare = join(root, "not-git");
     mkdirSync(bare);
-    const finished = waitEvents(daemon, (event) => event.type === "queue:job-finished", 1);
+    // A permanently unsuitable repository burns every attempt before it is terminal, so
+    // wait for the terminal event rather than the first job-finished event.
+    const finished = waitEvents(
+      daemon,
+      (event) => event.type === "queue:job-finished" && event.status === "failed",
+      1,
+    );
     await enableSchedule();
     const res = await client.request({
       protocol: 1,
       action: "queue-add",
       prompt: "should fail isolation",
       repository: bare,
+      maxAttempts: 1,
     });
     expect(res.ok).toBe(true);
     const [done] = await finished;
     expect(done.status).toBe("failed");
     const task = asTasks((await client.request({ protocol: 1, action: "queue-list" })).data)[0];
     expect(task?.isolation).toBe("worktree");
+    expect(task?.attempts).toBe(1);
+    expect(task?.attemptHistory[0]?.cause).toBe("setup_failed");
     expect(task?.error).toMatch(/not a git/i);
     expect(task?.error).toMatch(/--isolate none/);
     expect(task?.worktreeDir).toBeUndefined();
@@ -929,6 +959,108 @@ describe("queue daemon integration", () => {
     expect(blocked?.status).toBe("queued");
     expect(blocked?.waiting).toBe(true);
     expect(blocked?.reason).toMatch(/unsatisfiable_dependency: .*incomplete/);
+  });
+});
+
+describe("queue setup failures", () => {
+  function setupFailureManager(opts: {
+    rootDir: string;
+    repo: string;
+    isolateWorktree: (opts: { repository: string; worktreeDir: string }) => { ok: true } | { ok: false; error: string };
+    runner?: QueueRunner;
+  }) {
+    const store = new QueueStore({ rootDir: opts.rootDir });
+    const manager = new QueueManager({
+      store,
+      schedule: () => ENABLED_SCHEDULE,
+      now: () => KST_MIDNIGHT,
+      runner: opts.runner ?? (async () => ({ code: 0, signal: null, stdout: "", stderr: "" })),
+      isolateWorktree: opts.isolateWorktree,
+      emit: () => {},
+      retryDelayMs: 0,
+      sleep: async () => {},
+    });
+    return { store, manager };
+  }
+
+  test("a transient worktree failure consumes one attempt and retries to success", async () => {
+    const root = mkdtempSync(join(tmpdir(), "oar-setup-retry-"));
+    const repo = join(root, "repo");
+    initRepo(repo);
+    let isolateCalls = 0;
+    const { store, manager } = setupFailureManager({
+      rootDir: join(root, "oar"),
+      repo,
+      isolateWorktree: () => {
+        isolateCalls += 1;
+        return isolateCalls === 1 ? { ok: false, error: "transient disk error" } : { ok: true };
+      },
+      runner: async () => ({
+        code: 0,
+        signal: null,
+        stdout: JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: OAR_RESULT_DONE }],
+            stopReason: "stop",
+          },
+        }),
+        stderr: "",
+      }),
+    });
+    try {
+      const task = store.add({
+        prompt: "work",
+        repository: repo,
+        maxAttempts: 3,
+        nowMs: KST_MIDNIGHT,
+      });
+      await manager.reconcile();
+      const after = await waitForStatus(store, task.id, "completed");
+      expect(after.attempts).toBe(2);
+      expect(after.attemptHistory).toHaveLength(2);
+      expect(after.attemptHistory[0]).toMatchObject({
+        attempt: 1,
+        cause: "setup_failed",
+        verdict: "failed",
+        reason: "setup_failed: transient disk error",
+      });
+      expect(after.attemptHistory[1]).toMatchObject({ attempt: 2, cause: "done", verdict: "completed" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a persistent worktree failure exhausts the budget and leaves an artifact", async () => {
+    const root = mkdtempSync(join(tmpdir(), "oar-setup-exhaust-"));
+    const repo = join(root, "repo");
+    initRepo(repo);
+    const { store, manager } = setupFailureManager({
+      rootDir: join(root, "oar"),
+      repo,
+      isolateWorktree: () => ({ ok: false, error: "disk full" }),
+    });
+    try {
+      const task = store.add({
+        prompt: "work",
+        repository: repo,
+        maxAttempts: 3,
+        nowMs: KST_MIDNIGHT,
+      });
+      await manager.reconcile();
+      const after = await waitForStatus(store, task.id, "failed");
+      expect(after.attempts).toBe(3);
+      expect(after.attemptHistory).toHaveLength(3);
+      expect(after.reason).toBe("setup_failed: disk full");
+      expect(after.error).toBe("setup_failed: disk full");
+      expect(after.attemptHistory.every((item) => item.cause === "setup_failed")).toBe(true);
+      const artifact = join(store.attemptArtifactDir(task.id, 3), "setup-error.txt");
+      expect(existsSync(artifact)).toBe(true);
+      expect(readFileSync(artifact, "utf8").trim()).toBe("disk full");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

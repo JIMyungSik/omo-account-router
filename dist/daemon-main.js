@@ -1688,6 +1688,10 @@ var QUEUE_COMPLETION_CONTRACT = [
 `);
 var QUEUE_CONTINUATION_PREAMBLE = "The previous attempt ended without completion. You must now finish the job and end with the sentinel.";
 var QUEUE_FRESH_CONTINUATION_PREAMBLE = "The previous session is not being reused. Continue from the artifacts on disk and finish the job, then end with the sentinel.";
+var QUEUE_SETUP_FAILURE_PREFIX = "setup_failed: ";
+function setupFailureMessage(reason) {
+  return `${QUEUE_SETUP_FAILURE_PREFIX}${reason}`;
+}
 function composeQueuePrompt(opts) {
   const parts = [];
   if (opts.continuation) {
@@ -1762,6 +1766,16 @@ function addIsolatedWorktree(opts) {
     return { ok: false, error: `worktree isolation failed: ${detail}` };
   }
   return { ok: true };
+}
+function writeSetupFailureArtifact(artifactDir, message) {
+  try {
+    mkdirSync5(artifactDir, { recursive: true, mode: 448 });
+    writeFileSync4(join5(artifactDir, "setup-error.txt"), `${message}
+`, {
+      encoding: "utf8",
+      mode: 384
+    });
+  } catch {}
 }
 function writePromptArtifacts(artifactDir, userPrompt, composed) {
   mkdirSync5(artifactDir, { recursive: true, mode: 448 });
@@ -2028,6 +2042,8 @@ function inferAttemptCause(record) {
   }
   if (record.reason?.startsWith("provider_error"))
     return "provider_error";
+  if (record.reason?.startsWith("setup_failed"))
+    return "setup_failed";
   if (record.reason?.startsWith("signal:"))
     return "signal";
   if (record.reason?.startsWith("exit:"))
@@ -2468,6 +2484,16 @@ class QueueManager {
       });
       this.emit({ type: "queue:job-finished", id, status });
     };
+    const finishSetupFailure = (message) => {
+      if (handle.reason) {
+        finishAbort(statusForAbort(handle.reason), { error: handle.reason });
+        return;
+      }
+      writeSetupFailureArtifact(attemptDir, message);
+      const outcome = this.recordAttempt(id, attemptDir, { code: 1, signal: null, stdout: "", stderr: message }, task.startedAt, { verdict: "failed", reason: setupFailureMessage(message), cause: "setup_failed" }, "fresh");
+      if (outcome.canRetry)
+        this.sleep(this.retryDelayMs);
+    };
     try {
       if (this.shouldStop(handle)) {
         const reason = handle.reason ?? abortReasonNow(handle, this.now, this.schedule);
@@ -2477,7 +2503,7 @@ class QueueManager {
       const isolation = task.isolation ?? DEFAULT_QUEUE_ISOLATION;
       const repo = isolation === "none" ? inspectRepositoryPath(task.repository) : inspectRepository(task.repository);
       if (!repo.ok) {
-        finishAbort(handle.reason ? statusForAbort(handle.reason) : "failed", { error: repo.error });
+        finishSetupFailure(repo.error);
         return;
       }
       if (this.shouldStop(handle)) {
@@ -2491,7 +2517,7 @@ class QueueManager {
         if (!task.worktreeDir || !existsSync11(worktreeDir)) {
           const isolated = this.isolateWorktree({ repository: resolve(task.repository), worktreeDir });
           if (!isolated.ok) {
-            finishAbort(handle.reason ? statusForAbort(handle.reason) : "failed", { error: isolated.error });
+            finishSetupFailure(isolated.error);
             return;
           }
         }
