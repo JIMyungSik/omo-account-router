@@ -21,24 +21,54 @@ import {
   createModelPresetController,
   registerModelPresetCommand,
 } from "./oar-model-presets.js";
+import { createPromotionController } from "./oar-promotion.js";
 import { bootstrapAuto, classifyStatus, request } from "./oar-senpi-client.js";
 
 export function createOarExtension({
   requestFn = request,
   bootstrapFn = bootstrapAuto,
+  now = () => Date.now(),
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
+  refreshMs,
 } = {}) {
-  return (pi) => registerOarExtension(pi, { requestFn, bootstrapFn });
+  return (pi) =>
+    registerOarExtension(pi, { requestFn, bootstrapFn, now, setTimeoutFn, clearTimeoutFn, refreshMs });
 }
 
-function registerOarExtension(pi, { requestFn, bootstrapFn }) {
+function registerOarExtension(pi, { requestFn, bootstrapFn, now, setTimeoutFn, clearTimeoutFn, refreshMs }) {
   const holder = `omo:${process.pid}:${process.env.SENPI_TASK_ID || process.env.OMO_MEMBER || "session"}`;
   let last = { provider: null, model: null, profile: null, leaseId: null };
   const modelPreset = createModelPresetController();
+  const promotion = createPromotionController({
+    requestFn,
+    now,
+    setTimeoutFn,
+    clearTimeoutFn,
+    refreshMs,
+  });
   let bootstrapped = false;
 
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
     bootstrapped = true;
     await bootstrapFn(pi);
+    await promotion.sync(pi, ctx);
+  });
+
+  pi.on("before_agent_start", async (_event, ctx) => {
+    await promotion.sync(pi, ctx);
+  });
+
+  pi.on("turn_start", async (_event, ctx) => {
+    await promotion.sync(pi, ctx);
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    try {
+      await promotion.sync(pi, ctx);
+    } finally {
+      promotion.dispose();
+    }
   });
 
   // Some hosts skip session_start for short tasks — still bootstrap once.

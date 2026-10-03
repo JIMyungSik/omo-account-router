@@ -4,3 +4,8 @@ node_modules/
 .oar/
 *.tmp
 *.tgz
+
+# local agent/runtime state, never published
+.cursor-delegation/
+.omo/thread-tools/
+next-prompt.txt

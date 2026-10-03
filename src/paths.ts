@@ -23,6 +23,18 @@ export function oarEventsPath(root = defaultOarRoot()): string {
   return join(root, "events.jsonl");
 }
 
+export function oarPromotionPath(root = defaultOarRoot()): string {
+  return join(root, "promotion.json");
+}
+
+export function oarQueuePath(root = defaultOarRoot()): string {
+  return join(root, "queue.json");
+}
+
+export function oarQueueDir(root = defaultOarRoot()): string {
+  return join(root, "queue");
+}
+
 function unique(paths: string[]): string[] {
   const out: string[] = [];
   for (const p of paths) {

@@ -1,3 +1,4 @@
+import type { QueueIsolationStrategy } from "./queue-store.ts";
 import type {
   FailureType,
   ProfileId,
@@ -66,7 +67,32 @@ export type OarRequest =
   | { protocol: 1; action: "poll-quota" }
   | { protocol: 1; action: "doctor" }
   /** Enable auto+failover for every provider that has 2+ vault profiles. */
-  | { protocol: 1; action: "bootstrap-auto" };
+  | { protocol: 1; action: "bootstrap-auto" }
+  | {
+      protocol: 1;
+      action: "schedule-configure";
+      timezone?: string;
+      start?: string;
+      end?: string;
+      provider?: string;
+      model?: string;
+      maxConcurrency?: number;
+      maxAttempts?: number;
+    }
+  | { protocol: 1; action: "schedule-status" }
+  | { protocol: 1; action: "schedule-off" }
+  | {
+      protocol: 1;
+      action: "queue-add";
+      prompt: string;
+      repository: string;
+      isolation?: QueueIsolationStrategy;
+      maxAttempts?: number;
+      dependsOn?: string[];
+    }
+  | { protocol: 1; action: "queue-list" }
+  | { protocol: 1; action: "queue-cancel"; id: string }
+  | { protocol: 1; action: "queue-retry"; id: string };
 
 export type OarResponse =
   | { ok: true; data: unknown }

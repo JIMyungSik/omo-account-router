@@ -2,9 +2,9 @@
 // @bun
 
 // src/daemon.ts
-import { chmodSync as chmodSync4, existsSync as existsSync9, mkdirSync as mkdirSync5, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { chmodSync as chmodSync5, existsSync as existsSync13, mkdirSync as mkdirSync7, unlinkSync, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer } from "node:net";
-import { dirname as dirname6 } from "node:path";
+import { dirname as dirname8 } from "node:path";
 
 // src/provider-alias.ts
 var PROVIDER_ALIASES = {
@@ -693,6 +693,15 @@ function oarVaultDir(root = defaultOarRoot()) {
 }
 function oarEventsPath(root = defaultOarRoot()) {
   return join2(root, "events.jsonl");
+}
+function oarPromotionPath(root = defaultOarRoot()) {
+  return join2(root, "promotion.json");
+}
+function oarQueuePath(root = defaultOarRoot()) {
+  return join2(root, "queue.json");
+}
+function oarQueueDir(root = defaultOarRoot()) {
+  return join2(root, "queue");
 }
 function unique(paths) {
   const out = [];
@@ -1438,6 +1447,1196 @@ class LeaseManager {
   }
 }
 
+// src/promotion.ts
+var DEFAULT_PROMOTION_SCHEDULE = {
+  enabled: false,
+  timezone: "Asia/Seoul",
+  start: "00:00",
+  end: "10:00",
+  provider: "opengateway",
+  model: "deepseek/deepseek-v4.1-flash-ultrafast",
+  maxConcurrency: 3,
+  maxAttempts: 3
+};
+function promotionalModelSelector(schedule) {
+  return `${schedule.provider}/${schedule.model}`;
+}
+function parseClock(hhmm) {
+  const match = /^(\d{2}):(\d{2})$/.exec(hhmm);
+  if (!match)
+    throw new Error(`invalid time ${hhmm}; use HH:MM`);
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59)
+    throw new Error(`invalid time ${hhmm}; use HH:MM`);
+  return hour * 60 + minute;
+}
+function assertValidTimeZone(timeZone) {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(new Date(0));
+  } catch {
+    throw new Error(`invalid timezone ${timeZone}`);
+  }
+}
+function normalizePromotionSchedule(raw) {
+  const next = {
+    enabled: Boolean(raw?.enabled),
+    timezone: typeof raw?.timezone === "string" && raw.timezone ? raw.timezone : DEFAULT_PROMOTION_SCHEDULE.timezone,
+    start: typeof raw?.start === "string" && raw.start ? raw.start : DEFAULT_PROMOTION_SCHEDULE.start,
+    end: typeof raw?.end === "string" && raw.end ? raw.end : DEFAULT_PROMOTION_SCHEDULE.end,
+    provider: typeof raw?.provider === "string" && raw.provider ? raw.provider : DEFAULT_PROMOTION_SCHEDULE.provider,
+    model: typeof raw?.model === "string" && raw.model ? raw.model : DEFAULT_PROMOTION_SCHEDULE.model,
+    maxConcurrency: Number.isInteger(raw?.maxConcurrency) && (raw?.maxConcurrency ?? 0) >= 1 ? Number(raw?.maxConcurrency) : DEFAULT_PROMOTION_SCHEDULE.maxConcurrency,
+    maxAttempts: Number.isInteger(raw?.maxAttempts) && (raw?.maxAttempts ?? 0) >= 1 ? Number(raw?.maxAttempts) : DEFAULT_PROMOTION_SCHEDULE.maxAttempts
+  };
+  parseClock(next.start);
+  parseClock(next.end);
+  assertValidTimeZone(next.timezone);
+  if (!next.provider.trim() || !next.model.trim()) {
+    throw new Error("provider and model are required");
+  }
+  return next;
+}
+function readZonedParts(date, timeZone) {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  });
+  const parts = {};
+  for (const part of dtf.formatToParts(date)) {
+    if (part.type !== "literal")
+      parts[part.type] = part.value;
+  }
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second)
+  };
+}
+function zonedOffsetMs(instant, timeZone) {
+  const parts = readZonedParts(instant, timeZone);
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return asUtc - instant.getTime();
+}
+function zonedCivilToUtc(timeZone, year, month, day, hour, minute) {
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0);
+  const offset = zonedOffsetMs(new Date(utcGuess), timeZone);
+  let utc = utcGuess - offset;
+  const offset2 = zonedOffsetMs(new Date(utc), timeZone);
+  if (offset2 !== offset)
+    utc = utcGuess - offset2;
+  return utc;
+}
+function addCivilDays(year, month, day, delta) {
+  const dt = new Date(Date.UTC(year, month - 1, day + delta));
+  return { year: dt.getUTCFullYear(), month: dt.getUTCMonth() + 1, day: dt.getUTCDate() };
+}
+function localMinutes(nowMs, timeZone) {
+  const parts = readZonedParts(new Date(nowMs), timeZone);
+  return parts.hour * 60 + parts.minute;
+}
+function isInsidePromotionHours(nowMs, schedule) {
+  const start = parseClock(schedule.start);
+  const end = parseClock(schedule.end);
+  if (start === end)
+    return false;
+  const minutes = localMinutes(nowMs, schedule.timezone);
+  if (start < end)
+    return minutes >= start && minutes < end;
+  return minutes >= start || minutes < end;
+}
+function isInPromotionWindow(nowMs, schedule) {
+  return schedule.enabled && isInsidePromotionHours(nowMs, schedule);
+}
+function nextWindowBoundary(nowMs, schedule) {
+  if (!schedule.enabled)
+    return;
+  const start = parseClock(schedule.start);
+  const end = parseClock(schedule.end);
+  if (start === end)
+    return;
+  const parts = readZonedParts(new Date(nowMs), schedule.timezone);
+  const startHour = Math.floor(start / 60);
+  const startMinute = start % 60;
+  const endHour = Math.floor(end / 60);
+  const endMinute = end % 60;
+  const candidates = [];
+  for (const delta of [-1, 0, 1, 2]) {
+    const day = addCivilDays(parts.year, parts.month, parts.day, delta);
+    candidates.push({
+      at: zonedCivilToUtc(schedule.timezone, day.year, day.month, day.day, startHour, startMinute),
+      entering: true
+    });
+    candidates.push({
+      at: zonedCivilToUtc(schedule.timezone, day.year, day.month, day.day, endHour, endMinute),
+      entering: false
+    });
+  }
+  return candidates.filter((item) => item.at > nowMs).sort((a, b) => a.at - b.at)[0];
+}
+function promotionStatusView(schedule, nowMs) {
+  const insideHours = isInsidePromotionHours(nowMs, schedule);
+  const next = nextWindowBoundary(nowMs, schedule);
+  return {
+    ...schedule,
+    modelSelector: promotionalModelSelector(schedule),
+    insideHours,
+    inWindow: schedule.enabled && insideHours,
+    now: new Date(nowMs).toISOString(),
+    ...next ? { nextBoundary: { at: new Date(next.at).toISOString(), entering: next.entering } } : {}
+  };
+}
+
+// src/promotion-store.ts
+import { existsSync as existsSync8, readFileSync as readFileSync5 } from "node:fs";
+
+// src/json-file.ts
+import { chmodSync as chmodSync3, mkdirSync as mkdirSync4, renameSync as renameSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname5 } from "node:path";
+function atomicWriteJson2(path, data, mode = 384) {
+  mkdirSync4(dirname5(path), { recursive: true, mode: 448 });
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync3(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
+  renameSync3(tmp, path);
+  try {
+    chmodSync3(path, mode);
+  } catch {}
+}
+
+// src/promotion-store.ts
+class PromotionStore {
+  rootDir;
+  path;
+  constructor(opts) {
+    this.rootDir = opts?.rootDir ?? defaultOarRoot();
+    this.path = oarPromotionPath(this.rootDir);
+  }
+  get() {
+    return this.load().schedule;
+  }
+  set(schedule) {
+    const normalized = normalizePromotionSchedule(schedule);
+    const file = {
+      version: 1,
+      schedule: normalized,
+      updatedAt: new Date().toISOString()
+    };
+    atomicWriteJson2(this.path, file, 384);
+    return normalized;
+  }
+  load() {
+    if (!existsSync8(this.path)) {
+      return {
+        version: 1,
+        schedule: { ...DEFAULT_PROMOTION_SCHEDULE },
+        updatedAt: new Date(0).toISOString()
+      };
+    }
+    try {
+      const parsed = JSON.parse(readFileSync5(this.path, "utf8"));
+      if (parsed?.version !== 1 || !parsed.schedule) {
+        return {
+          version: 1,
+          schedule: { ...DEFAULT_PROMOTION_SCHEDULE },
+          updatedAt: new Date(0).toISOString()
+        };
+      }
+      return {
+        version: 1,
+        schedule: normalizePromotionSchedule(parsed.schedule),
+        updatedAt: parsed.updatedAt ?? new Date(0).toISOString()
+      };
+    } catch {
+      return {
+        version: 1,
+        schedule: { ...DEFAULT_PROMOTION_SCHEDULE },
+        updatedAt: new Date(0).toISOString()
+      };
+    }
+  }
+}
+
+// src/queue-manager.ts
+import { existsSync as existsSync11 } from "node:fs";
+import { join as join7, resolve } from "node:path";
+
+// src/queue-runner.ts
+import { spawn, spawnSync } from "node:child_process";
+import { appendFileSync as appendFileSync2, existsSync as existsSync9, mkdirSync as mkdirSync5, statSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname6, join as join5 } from "node:path";
+var OAR_RESULT_DONE = "OAR_RESULT: DONE";
+var OAR_RESULT_INCOMPLETE_PREFIX = "OAR_RESULT: INCOMPLETE:";
+var OAR_BRAKE_MARKER = "omo-brake paused";
+var OAR_BRAKE_EXHAUSTED_REASON = "omo-brake paused: attempts exhausted";
+var QUEUE_COMPLETION_CONTRACT = [
+  "----- OAR completion contract -----",
+  "End your final message with exactly one sentinel line:",
+  OAR_RESULT_DONE,
+  "If you could not finish, end with exactly one sentinel line:",
+  `${OAR_RESULT_INCOMPLETE_PREFIX} <reason>`,
+  "Do not write anything after the sentinel line."
+].join(`
+`);
+var QUEUE_CONTINUATION_PREAMBLE = "The previous attempt ended without completion. You must now finish the job and end with the sentinel.";
+var QUEUE_FRESH_CONTINUATION_PREAMBLE = "The previous session is not being reused. Continue from the artifacts on disk and finish the job, then end with the sentinel.";
+function composeQueuePrompt(opts) {
+  const parts = [];
+  if (opts.continuation) {
+    parts.push(opts.continuationKind === "fresh" ? QUEUE_FRESH_CONTINUATION_PREAMBLE : QUEUE_CONTINUATION_PREAMBLE);
+    if (opts.priorReason)
+      parts.push(`Prior result: ${opts.priorReason}`);
+    parts.push("");
+  }
+  parts.push(opts.userPrompt);
+  parts.push(QUEUE_COMPLETION_CONTRACT);
+  return parts.join(`
+`);
+}
+function buildOmoArgv(opts) {
+  const args = [
+    "--mode",
+    "json",
+    "--model",
+    opts.modelSelector,
+    "--no-model-fallback",
+    "--no-ask-user"
+  ];
+  if (opts.sessionId) {
+    args.push("--session", opts.sessionId);
+  }
+  args.push("-p");
+  return args;
+}
+function inspectRepositoryPath(repository) {
+  if (!repository)
+    return { ok: false, error: "repository is required" };
+  if (!existsSync9(repository))
+    return { ok: false, error: `repository not found: ${repository}` };
+  try {
+    if (!statSync(repository).isDirectory()) {
+      return { ok: false, error: `repository is not a directory: ${repository}` };
+    }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  return { ok: true };
+}
+function inspectRepository(repository) {
+  const path = inspectRepositoryPath(repository);
+  if (!path.ok)
+    return path;
+  const inside = spawnSync("git", ["-C", repository, "rev-parse", "--is-inside-work-tree"], {
+    encoding: "utf8"
+  });
+  if (inside.status !== 0 || inside.stdout.trim() !== "true") {
+    return {
+      ok: false,
+      error: "Not a git repository; pass --isolate none to run in this directory."
+    };
+  }
+  const head = spawnSync("git", ["-C", repository, "rev-parse", "--verify", "HEAD"], {
+    encoding: "utf8"
+  });
+  if (head.status !== 0) {
+    return { ok: false, error: "unsuitable repository: no commits" };
+  }
+  return { ok: true };
+}
+function addIsolatedWorktree(opts) {
+  mkdirSync5(dirname6(opts.worktreeDir), { recursive: true, mode: 448 });
+  if (existsSync9(opts.worktreeDir)) {
+    return { ok: false, error: `worktree path already exists: ${opts.worktreeDir}` };
+  }
+  const added = spawnSync("git", ["-C", opts.repository, "worktree", "add", "--detach", opts.worktreeDir, "HEAD"], { encoding: "utf8" });
+  if (added.status !== 0) {
+    const detail = (added.stderr || added.stdout || "git worktree add failed").trim();
+    return { ok: false, error: `worktree isolation failed: ${detail}` };
+  }
+  return { ok: true };
+}
+function writePromptArtifacts(artifactDir, userPrompt, composed) {
+  mkdirSync5(artifactDir, { recursive: true, mode: 448 });
+  writeFileSync4(join5(artifactDir, "user-prompt.txt"), userPrompt, { encoding: "utf8", mode: 384 });
+  writeFileSync4(join5(artifactDir, "prompt.txt"), composed, { encoding: "utf8", mode: 384 });
+}
+function terminateProcessTree(child, signal) {
+  const pid = child.pid;
+  if (pid == null)
+    return;
+  if (process.platform === "win32") {
+    const force = signal === "SIGKILL";
+    const args = force ? ["/PID", String(pid), "/T", "/F"] : ["/PID", String(pid), "/T"];
+    try {
+      spawn("taskkill", args, { stdio: "ignore" });
+    } catch {
+      try {
+        child.kill(signal);
+      } catch {}
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {}
+  }
+}
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function parseWorkerJsonStream(stdout) {
+  const events = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{"))
+      continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (isRecord3(parsed))
+        events.push(parsed);
+    } catch {}
+  }
+  return events;
+}
+function extractSessionId(stdout) {
+  for (const event of parseWorkerJsonStream(stdout)) {
+    if (event.type === "session" && typeof event.id === "string" && event.id.length > 0) {
+      return event.id;
+    }
+  }
+  return;
+}
+function assistantText(message) {
+  const content = message.content;
+  if (typeof content === "string")
+    return content;
+  if (!Array.isArray(content))
+    return "";
+  const parts = [];
+  for (const item of content) {
+    if (isRecord3(item) && item.type === "text" && typeof item.text === "string") {
+      parts.push(item.text);
+    }
+  }
+  return parts.join("");
+}
+function considerAssistant(message, last) {
+  if (message.role !== "assistant")
+    return last;
+  return {
+    text: assistantText(message),
+    stopReason: typeof message.stopReason === "string" ? message.stopReason : undefined,
+    errorMessage: typeof message.errorMessage === "string" ? message.errorMessage : undefined
+  };
+}
+function extractLastAssistant(stdout) {
+  let last;
+  for (const event of parseWorkerJsonStream(stdout)) {
+    if (isRecord3(event.message))
+      last = considerAssistant(event.message, last);
+    if (Array.isArray(event.messages)) {
+      for (const item of event.messages) {
+        if (isRecord3(item))
+          last = considerAssistant(item, last);
+      }
+    }
+    if (event.role === "assistant")
+      last = considerAssistant(event, last);
+  }
+  return last;
+}
+function hasDoneSentinel(text) {
+  return /(?:^|\n)OAR_RESULT: DONE(?:\r?\n|$)/.test(text);
+}
+function extractIncompleteReason(text) {
+  const matches = [...text.matchAll(/(?:^|\n)OAR_RESULT: INCOMPLETE: ([^\r\n]*)/g)];
+  const last = matches.at(-1);
+  if (!last)
+    return;
+  const reason = (last[1] ?? "").trim();
+  return reason.length > 0 ? reason : "incomplete";
+}
+function judgeQueueRun(result) {
+  const sessionId = extractSessionId(result.stdout);
+  const assistant = extractLastAssistant(result.stdout);
+  if (result.code !== 0) {
+    return {
+      verdict: "failed",
+      reason: result.signal ? `signal:${result.signal}` : `exit:${result.code ?? "unknown"}`,
+      cause: result.signal ? "signal" : "exit",
+      sessionId
+    };
+  }
+  if (result.stdout.includes(OAR_BRAKE_MARKER)) {
+    return { verdict: "incomplete", reason: OAR_BRAKE_MARKER, cause: "brake_paused", sessionId };
+  }
+  if (assistant && (assistant.stopReason === "error" || assistant.errorMessage)) {
+    return {
+      verdict: "incomplete",
+      reason: assistant.errorMessage ? `provider_error: ${assistant.errorMessage}` : "provider_error",
+      cause: "provider_error",
+      sessionId
+    };
+  }
+  const text = assistant?.text ?? "";
+  if (hasDoneSentinel(text)) {
+    return { verdict: "completed", reason: "done", cause: "done", sessionId };
+  }
+  const incomplete = extractIncompleteReason(text);
+  if (incomplete !== undefined) {
+    return { verdict: "incomplete", reason: incomplete, cause: "incomplete_sentinel", sessionId };
+  }
+  return { verdict: "incomplete", reason: "missing_sentinel", cause: "missing_sentinel", sessionId };
+}
+function createOmoQueueRunner(command = { bin: "omo" }) {
+  const prefix = command.prefixArgs ?? [];
+  return (req, signal) => {
+    const composed = composeQueuePrompt({
+      userPrompt: req.prompt,
+      continuation: req.continuation,
+      continuationKind: req.continuationKind,
+      priorReason: req.priorReason
+    });
+    writePromptArtifacts(req.artifactDir, req.prompt, composed);
+    const args = [
+      ...prefix,
+      ...buildOmoArgv({ modelSelector: req.modelSelector, sessionId: req.sessionId })
+    ];
+    writeFileSync4(join5(req.artifactDir, "argv.json"), JSON.stringify(args, null, 2), {
+      encoding: "utf8",
+      mode: 384
+    });
+    const stdoutPath = join5(req.artifactDir, "stdout.log");
+    const stderrPath = join5(req.artifactDir, "stderr.log");
+    writeFileSync4(stdoutPath, "", { encoding: "utf8", mode: 384 });
+    writeFileSync4(stderrPath, "", { encoding: "utf8", mode: 384 });
+    return new Promise((resolve, reject) => {
+      let child;
+      try {
+        child = spawn(command.bin, args, {
+          cwd: req.cwd,
+          env: { ...process.env, OAR_QUEUE_JOB_ID: req.id },
+          stdio: ["pipe", "pipe", "pipe"],
+          detached: process.platform !== "win32"
+        });
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      child.stdin?.on("error", () => {});
+      try {
+        child.stdin?.end(composed, "utf8");
+      } catch {}
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let killTimer;
+      const finish = (result) => {
+        if (settled)
+          return;
+        settled = true;
+        if (killTimer)
+          clearTimeout(killTimer);
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const onAbort = () => {
+        if (child.exitCode != null || child.signalCode != null)
+          return;
+        terminateProcessTree(child, "SIGTERM");
+        killTimer = setTimeout(() => {
+          if (child.exitCode == null && child.signalCode == null) {
+            terminateProcessTree(child, "SIGKILL");
+          }
+        }, 1000);
+      };
+      child.stdout?.on("data", (chunk) => {
+        const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+        stdout += text;
+        appendFileSync2(stdoutPath, text);
+      });
+      child.stderr?.on("data", (chunk) => {
+        const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+        stderr += text;
+        appendFileSync2(stderrPath, text);
+      });
+      child.on("error", (error) => {
+        if (settled)
+          return;
+        settled = true;
+        if (killTimer)
+          clearTimeout(killTimer);
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      });
+      child.on("close", (code, closeSignal) => {
+        finish({ code, signal: closeSignal, stdout, stderr });
+      });
+      if (signal.aborted)
+        onAbort();
+      else
+        signal.addEventListener("abort", onAbort);
+    });
+  };
+}
+
+// src/queue-store.ts
+import { existsSync as existsSync10, readFileSync as readFileSync6 } from "node:fs";
+import { join as join6 } from "node:path";
+var QUEUE_ISOLATION_STRATEGIES = ["worktree", "none"];
+var DEFAULT_QUEUE_ISOLATION = "worktree";
+var DEFAULT_QUEUE_MAX_ATTEMPTS = 3;
+function isQueueIsolation(value) {
+  return typeof value === "string" && QUEUE_ISOLATION_STRATEGIES.includes(value);
+}
+function parseQueueIsolation(value) {
+  if (value == null || value === "")
+    return DEFAULT_QUEUE_ISOLATION;
+  if (isQueueIsolation(value))
+    return value;
+  throw new Error(`unknown isolation strategy: ${String(value)} (use worktree or none)`);
+}
+function parseMaxAttempts(value) {
+  if (value == null || value === "")
+    return DEFAULT_QUEUE_MAX_ATTEMPTS;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error("maxAttempts must be an integer >= 1");
+  }
+  return n;
+}
+function inferAttemptCause(record) {
+  if (record.cause)
+    return record.cause;
+  if (record.verdict === "completed")
+    return "done";
+  if (record.reason === "missing_sentinel")
+    return "missing_sentinel";
+  if (record.reason === "omo-brake paused" || record.reason?.startsWith("omo-brake paused")) {
+    return "brake_paused";
+  }
+  if (record.reason?.startsWith("provider_error"))
+    return "provider_error";
+  if (record.reason?.startsWith("signal:"))
+    return "signal";
+  if (record.reason?.startsWith("exit:"))
+    return "exit";
+  if (record.verdict === "incomplete")
+    return "incomplete_sentinel";
+  if (record.verdict === "failed")
+    return "exit";
+  return;
+}
+function shouldResumeQueueSession(previous) {
+  return inferAttemptCause(previous ?? {}) === "incomplete_sentinel";
+}
+function parseDependsOn(value) {
+  if (value == null || value === "")
+    return [];
+  const raw = Array.isArray(value) ? value : String(value).split(",");
+  const seen = new Set;
+  const out = [];
+  for (const item of raw) {
+    const id = String(item).trim();
+    if (!id || seen.has(id))
+      continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+function resolveQueueTaskRef(tasks, ref) {
+  const token = ref.trim();
+  if (!token)
+    throw new Error("queue task id is required");
+  const exact = tasks.find((task) => task.id === token);
+  if (exact)
+    return exact;
+  const matches = tasks.filter((task) => task.id.startsWith(token));
+  if (matches.length === 1)
+    return matches[0];
+  if (matches.length > 1)
+    throw new Error(`ambiguous queue task id prefix: ${token}`);
+  throw new Error(`unknown queue task ${token}`);
+}
+function resolveDependsOn(value, tasks, selfId) {
+  const refs = parseDependsOn(value);
+  const resolved = [];
+  const seen = new Set;
+  for (const ref of refs) {
+    if (selfId && ref === selfId)
+      throw new Error("cannot depend on itself");
+    const task = resolveQueueTaskRef(tasks, ref);
+    if (selfId && task.id === selfId)
+      throw new Error("cannot depend on itself");
+    if (seen.has(task.id))
+      continue;
+    seen.add(task.id);
+    resolved.push(task.id);
+  }
+  return resolved;
+}
+var TERMINAL = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "incomplete"
+]);
+function isTerminalQueueStatus(status) {
+  return TERMINAL.has(status);
+}
+function isSuccessfulQueueCompletion(task) {
+  return task?.status === "completed" && task.verdict === "completed";
+}
+function evaluateQueueDependencies(task, tasks) {
+  const byId = new Map(tasks.map((item) => [item.id, item]));
+  const dependsOn = Array.isArray(task.dependsOn) ? task.dependsOn : [];
+  const unmetDependsOn = [];
+  const reasons = [];
+  for (const id of dependsOn) {
+    const dep = byId.get(id);
+    if (isSuccessfulQueueCompletion(dep))
+      continue;
+    unmetDependsOn.push(id);
+    if (!dep) {
+      reasons.push(`unsatisfiable_dependency: ${id} (unknown)`);
+      continue;
+    }
+    if (isTerminalQueueStatus(dep.status) && dep.status !== "completed") {
+      reasons.push(`unsatisfiable_dependency: ${id} (${dep.status})`);
+      continue;
+    }
+    reasons.push(`unmet_dependency: ${id} (${dep.status})`);
+  }
+  return {
+    dependsOn,
+    unmetDependsOn,
+    waiting: unmetDependsOn.length > 0,
+    ready: unmetDependsOn.length === 0,
+    ...reasons.length > 0 ? { reason: reasons.join("; ") } : {}
+  };
+}
+function annotateQueueTask(task, tasks) {
+  return { ...task, ...evaluateQueueDependencies(task, tasks) };
+}
+function annotateQueueTasks(tasks) {
+  return tasks.map((task) => annotateQueueTask(task, tasks));
+}
+function isDependencyWaitReason(reason) {
+  return typeof reason === "string" && (reason.startsWith("unmet_dependency:") || reason.startsWith("unsatisfiable_dependency:"));
+}
+
+class QueueStore {
+  rootDir;
+  path;
+  constructor(opts) {
+    this.rootDir = opts?.rootDir ?? defaultOarRoot();
+    this.path = oarQueuePath(this.rootDir);
+  }
+  artifactDir(id) {
+    return join6(oarQueueDir(this.rootDir), id);
+  }
+  attemptArtifactDir(id, attempt) {
+    return join6(this.artifactDir(id), `attempt-${attempt}`);
+  }
+  list() {
+    return this.load().tasks.map((task) => ({ ...task }));
+  }
+  get(id) {
+    const task = this.load().tasks.find((item) => item.id === id);
+    return task ? { ...task } : undefined;
+  }
+  resolve(ref) {
+    return { ...resolveQueueTaskRef(this.list(), ref) };
+  }
+  nextQueued() {
+    return this.listQueued()[0];
+  }
+  listQueued() {
+    return this.list().filter((task) => task.status === "queued").sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  }
+  add(input) {
+    const prompt = input.prompt;
+    if (typeof prompt !== "string" || prompt.length === 0) {
+      throw new Error("prompt must be a non-empty string");
+    }
+    if (!input.repository)
+      throw new Error("repository is required");
+    const isolation = parseQueueIsolation(input.isolation);
+    const maxAttempts = parseMaxAttempts(input.maxAttempts);
+    const data = this.load();
+    const id = crypto.randomUUID();
+    const dependsOn = resolveDependsOn(input.dependsOn, data.tasks, id);
+    const task = {
+      id,
+      prompt,
+      repository: input.repository,
+      isolation,
+      status: "queued",
+      maxAttempts,
+      attempts: 0,
+      sessionIds: [],
+      attemptHistory: [],
+      dependsOn,
+      createdAt: new Date(input.nowMs).toISOString(),
+      artifactDir: this.artifactDir(id)
+    };
+    data.tasks.push(task);
+    this.save(data);
+    return { ...task };
+  }
+  update(id, patch) {
+    const data = this.load();
+    const idx = data.tasks.findIndex((task) => task.id === id);
+    if (idx < 0)
+      throw new Error(`unknown queue task ${id}`);
+    const current = data.tasks[idx];
+    const next = { ...current, ...patch, id: current.id };
+    data.tasks[idx] = next;
+    this.save(data);
+    return { ...next };
+  }
+  rearm(id) {
+    const task = this.get(id);
+    if (!task)
+      throw new Error(`unknown queue task ${id}`);
+    if (task.status !== "incomplete" && task.status !== "failed") {
+      throw new Error(`cannot retry ${id} (${task.status})`);
+    }
+    return this.update(id, {
+      status: "queued",
+      attempts: 0,
+      finishedAt: undefined,
+      error: undefined,
+      verdict: undefined,
+      reason: undefined
+    });
+  }
+  markStaleRunning(nowMs) {
+    const data = this.load();
+    const interrupted = [];
+    const finishedAt = new Date(nowMs).toISOString();
+    data.tasks = data.tasks.map((task) => {
+      if (task.status !== "running")
+        return task;
+      const next = {
+        ...task,
+        status: "interrupted",
+        finishedAt,
+        error: task.error ?? "daemon_restart",
+        reason: task.reason ?? "daemon_restart"
+      };
+      interrupted.push({ ...next });
+      return next;
+    });
+    if (interrupted.length > 0)
+      this.save(data);
+    return interrupted;
+  }
+  load() {
+    if (!existsSync10(this.path)) {
+      return { version: 1, tasks: [], updatedAt: new Date(0).toISOString() };
+    }
+    try {
+      const parsed = JSON.parse(readFileSync6(this.path, "utf8"));
+      if (parsed?.version !== 1 || !Array.isArray(parsed.tasks)) {
+        return { version: 1, tasks: [], updatedAt: new Date(0).toISOString() };
+      }
+      return {
+        version: 1,
+        tasks: parsed.tasks.filter((task) => Boolean(task?.id && task.prompt && task.repository)).map((task) => normalizeLoadedTask(task)),
+        updatedAt: parsed.updatedAt ?? new Date(0).toISOString()
+      };
+    } catch {
+      return { version: 1, tasks: [], updatedAt: new Date(0).toISOString() };
+    }
+  }
+  save(data) {
+    atomicWriteJson2(this.path, { ...data, updatedAt: new Date().toISOString() }, 384);
+  }
+}
+function normalizeAttemptRecord(item) {
+  const cause = inferAttemptCause(item);
+  const sessionMode = item.sessionMode === "resume" ? "resume" : "fresh";
+  return {
+    ...item,
+    sessionMode,
+    ...cause ? { cause } : { cause: "missing_sentinel" }
+  };
+}
+function normalizeLoadedTask(task) {
+  const sessionIds = Array.isArray(task.sessionIds) ? task.sessionIds.filter((id) => typeof id === "string" && id.length > 0) : [];
+  const attemptHistory = Array.isArray(task.attemptHistory) ? task.attemptHistory.filter((item) => item && typeof item.attempt === "number").map((item) => normalizeAttemptRecord(item)) : [];
+  let maxAttempts = DEFAULT_QUEUE_MAX_ATTEMPTS;
+  try {
+    maxAttempts = parseMaxAttempts(task.maxAttempts);
+  } catch {
+    maxAttempts = DEFAULT_QUEUE_MAX_ATTEMPTS;
+  }
+  return {
+    ...task,
+    isolation: isQueueIsolation(task.isolation) ? task.isolation : DEFAULT_QUEUE_ISOLATION,
+    maxAttempts,
+    attempts: Number.isInteger(task.attempts) && (task.attempts ?? 0) >= 0 ? Number(task.attempts) : 0,
+    sessionIds,
+    attemptHistory,
+    dependsOn: parseDependsOn(task.dependsOn)
+  };
+}
+
+// src/queue-manager.ts
+var OUTPUT_LIMIT = 8000;
+var DEFAULT_QUEUE_RETRY_DELAY_MS = 250;
+function defaultSleep(ms) {
+  if (ms <= 0)
+    return Promise.resolve();
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+class QueueManager {
+  store;
+  schedule;
+  now;
+  runner;
+  isolateWorktree;
+  emit;
+  retryDelayMs;
+  sleep;
+  jobs = new Map;
+  shuttingDown = false;
+  constructor(opts) {
+    this.store = opts.store;
+    this.schedule = opts.schedule;
+    this.now = opts.now;
+    this.runner = opts.runner;
+    this.isolateWorktree = opts.isolateWorktree ?? addIsolatedWorktree;
+    this.emit = opts.emit;
+    this.retryDelayMs = opts.retryDelayMs ?? DEFAULT_QUEUE_RETRY_DELAY_MS;
+    this.sleep = opts.sleep ?? defaultSleep;
+  }
+  runningCount() {
+    return this.jobs.size;
+  }
+  markStaleRunning() {
+    const interrupted = this.store.markStaleRunning(this.now());
+    for (const task of interrupted) {
+      this.emit({ type: "queue:job-finished", id: task.id, status: "interrupted" });
+    }
+    return interrupted;
+  }
+  async reconcile() {
+    if (this.shuttingDown)
+      return;
+    const inWindow = isInPromotionWindow(this.now(), this.schedule());
+    if (!inWindow) {
+      await this.interruptAll("outside_window");
+      return;
+    }
+    this.fillSlots();
+  }
+  async cancel(id) {
+    const task = this.store.resolve(id);
+    if (task.status === "queued") {
+      const cancelled = this.store.update(task.id, {
+        status: "cancelled",
+        finishedAt: new Date(this.now()).toISOString(),
+        error: "cancelled",
+        reason: "cancelled"
+      });
+      this.refreshDependencyReasons();
+      return cancelled;
+    }
+    if (task.status === "running") {
+      await this.abortJob(task.id, "cancel");
+      this.refreshDependencyReasons();
+      const latest = this.store.get(task.id);
+      if (!latest)
+        throw new Error(`unknown queue task ${id}`);
+      return latest;
+    }
+    throw new Error(`cannot cancel ${task.id} (${task.status})`);
+  }
+  async retry(id) {
+    const resolved = this.store.resolve(id);
+    const rearmed = this.store.rearm(resolved.id);
+    await this.reconcile();
+    return this.store.get(resolved.id) ?? rearmed;
+  }
+  async shutdown() {
+    this.shuttingDown = true;
+    await this.interruptAll("daemon_stop");
+  }
+  resetLifecycle() {
+    this.shuttingDown = false;
+  }
+  refreshDependencyReasons() {
+    const snapshot = this.store.list();
+    for (const task of snapshot) {
+      if (task.status !== "queued")
+        continue;
+      this.recordDependencyState(task, evaluateQueueDependencies(task, snapshot));
+    }
+  }
+  fillSlots() {
+    if (this.shuttingDown)
+      return;
+    const cap = this.schedule().maxConcurrency;
+    const snapshot = this.store.list();
+    const queued = snapshot.filter((task) => task.status === "queued").sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+    for (const task of queued) {
+      if (this.jobs.size >= cap)
+        break;
+      if (!isInPromotionWindow(this.now(), this.schedule()))
+        return;
+      if (this.jobs.has(task.id))
+        continue;
+      const gate = evaluateQueueDependencies(task, snapshot);
+      this.recordDependencyState(task, gate);
+      if (!gate.ready)
+        continue;
+      if (!this.launch(task))
+        break;
+    }
+  }
+  recordDependencyState(task, gate) {
+    if (task.status !== "queued")
+      return;
+    if (gate.ready) {
+      if (isDependencyWaitReason(task.reason)) {
+        this.store.update(task.id, { reason: undefined, error: undefined });
+      }
+      return;
+    }
+    if (task.reason === gate.reason)
+      return;
+    this.store.update(task.id, {
+      reason: gate.reason,
+      error: gate.reason
+    });
+  }
+  launch(task) {
+    if (this.shuttingDown || !isInPromotionWindow(this.now(), this.schedule()))
+      return false;
+    const abort = new AbortController;
+    const handle = { abort, done: Promise.resolve() };
+    this.jobs.set(task.id, handle);
+    const nextAttempt = (task.attempts ?? 0) + 1;
+    const baseDir = task.artifactDir ?? this.store.artifactDir(task.id);
+    this.store.update(task.id, {
+      status: "running",
+      startedAt: new Date(this.now()).toISOString(),
+      attempts: nextAttempt,
+      artifactDir: baseDir,
+      ...isDependencyWaitReason(task.reason) ? { reason: undefined, error: undefined } : {}
+    });
+    this.emit({ type: "queue:job-started", id: task.id });
+    handle.done = this.run(task.id, handle).finally(() => {
+      this.jobs.delete(task.id);
+      if (!this.shuttingDown && isInPromotionWindow(this.now(), this.schedule())) {
+        this.fillSlots();
+      }
+    });
+    return true;
+  }
+  async run(id, handle) {
+    const task = this.store.get(id);
+    if (!task)
+      return;
+    const baseDir = task.artifactDir ?? this.store.artifactDir(id);
+    const attemptNo = task.attempts > 0 ? task.attempts : 1;
+    const attemptDir = this.store.attemptArtifactDir(id, attemptNo);
+    const finishAbort = (status, extra) => {
+      this.store.update(id, {
+        status,
+        finishedAt: new Date(this.now()).toISOString(),
+        ...extra?.output != null ? { output: extra.output } : {},
+        ...extra?.error != null ? { error: extra.error, reason: extra.error } : {}
+      });
+      this.emit({ type: "queue:job-finished", id, status });
+    };
+    try {
+      if (this.shouldStop(handle)) {
+        const reason = handle.reason ?? abortReasonNow(handle, this.now, this.schedule);
+        finishAbort(statusForAbort(reason), { error: reason });
+        return;
+      }
+      const isolation = task.isolation ?? DEFAULT_QUEUE_ISOLATION;
+      const repo = isolation === "none" ? inspectRepositoryPath(task.repository) : inspectRepository(task.repository);
+      if (!repo.ok) {
+        finishAbort(handle.reason ? statusForAbort(handle.reason) : "failed", { error: repo.error });
+        return;
+      }
+      if (this.shouldStop(handle)) {
+        const reason = handle.reason ?? abortReasonNow(handle, this.now, this.schedule);
+        finishAbort(statusForAbort(reason), { error: reason });
+        return;
+      }
+      let cwd = resolve(task.repository);
+      if (isolation === "worktree") {
+        const worktreeDir = task.worktreeDir ?? join7(baseDir, "work");
+        if (!task.worktreeDir || !existsSync11(worktreeDir)) {
+          const isolated = this.isolateWorktree({ repository: resolve(task.repository), worktreeDir });
+          if (!isolated.ok) {
+            finishAbort(handle.reason ? statusForAbort(handle.reason) : "failed", { error: isolated.error });
+            return;
+          }
+        }
+        if (this.shouldStop(handle)) {
+          const reason = handle.reason ?? abortReasonNow(handle, this.now, this.schedule);
+          finishAbort(statusForAbort(reason), { error: reason });
+          return;
+        }
+        this.store.update(id, { worktreeDir, artifactDir: baseDir });
+        cwd = worktreeDir;
+      }
+      if (this.shouldStop(handle)) {
+        const reason = handle.reason ?? abortReasonNow(handle, this.now, this.schedule);
+        finishAbort(statusForAbort(reason), { error: reason });
+        return;
+      }
+      const latest = this.store.get(id) ?? task;
+      const previous = latest.attemptHistory.at(-1);
+      const continuation = latest.attemptHistory.length > 0;
+      const resume = continuation && shouldResumeQueueSession(previous);
+      const sessionMode = resume ? "resume" : "fresh";
+      const sessionId = resume ? previous?.sessionId ?? latest.sessionIds.at(-1) : undefined;
+      const schedule = this.schedule();
+      const result = await this.runner({
+        id,
+        prompt: latest.prompt,
+        cwd,
+        modelSelector: promotionalModelSelector(schedule),
+        artifactDir: attemptDir,
+        sessionId,
+        continuation,
+        continuationKind: continuation ? sessionMode : undefined,
+        priorReason: latest.reason
+      }, handle.abort.signal);
+      if (handle.reason) {
+        finishAbort(statusForAbort(handle.reason), {
+          output: clipOutput(result.stdout, result.stderr),
+          error: handle.reason
+        });
+        return;
+      }
+      const recorded = this.recordAttempt(id, attemptDir, result, latest.startedAt, undefined, sessionMode);
+      if (recorded.canRetry && !this.shouldStop(handle)) {
+        await this.sleep(this.retryDelayMs);
+      }
+    } catch (error) {
+      if (handle.reason) {
+        finishAbort(statusForAbort(handle.reason), {
+          error: handle.reason
+        });
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      const recorded = this.recordAttempt(id, attemptDir, { code: 1, signal: null, stdout: "", stderr: message }, task.startedAt, { verdict: "failed", reason: message, cause: "exit" }, "fresh");
+      if (recorded.canRetry && !this.shouldStop(handle)) {
+        await this.sleep(this.retryDelayMs);
+      }
+    }
+  }
+  recordAttempt(id, attemptDir, result, startedAt, override, sessionMode = "fresh") {
+    const task = this.store.get(id);
+    if (!task)
+      return { canRetry: false };
+    const judged = override ?? judgeQueueRun(result);
+    const sessionId = judged.sessionId;
+    const sessionIds = sessionId ? [...task.sessionIds, sessionId] : [...task.sessionIds];
+    const finishedAt = new Date(this.now()).toISOString();
+    const record = {
+      attempt: task.attempts,
+      ...sessionId ? { sessionId } : {},
+      sessionMode,
+      cause: judged.cause,
+      verdict: judged.verdict,
+      reason: judged.reason,
+      artifactDir: attemptDir,
+      startedAt: startedAt ?? finishedAt,
+      finishedAt
+    };
+    const attemptHistory = [...task.attemptHistory, record];
+    const maxAttempts = task.maxAttempts ?? DEFAULT_QUEUE_MAX_ATTEMPTS;
+    const retryable = judged.verdict === "incomplete" || judged.verdict === "failed";
+    const canRetry = retryable && task.attempts < maxAttempts;
+    const brakeCount = attemptHistory.filter((item) => item.cause === "brake_paused").length;
+    const reason = !canRetry && judged.cause === "brake_paused" && brakeCount >= 2 ? OAR_BRAKE_EXHAUSTED_REASON : judged.reason;
+    if (reason !== record.reason) {
+      record.reason = reason;
+    }
+    const status = judged.verdict === "completed" ? "completed" : canRetry ? "queued" : judged.verdict;
+    this.store.update(id, {
+      status,
+      verdict: judged.verdict,
+      reason,
+      sessionIds,
+      attemptHistory,
+      artifactDir: task.artifactDir ?? this.store.artifactDir(id),
+      output: clipOutput(result.stdout, result.stderr),
+      error: judged.verdict === "completed" ? undefined : reason,
+      finishedAt
+    });
+    this.emit({ type: "queue:job-finished", id, status: canRetry ? judged.verdict : status });
+    return { canRetry };
+  }
+  shouldStop(handle) {
+    if (handle.abort.signal.aborted || this.shuttingDown)
+      return true;
+    if (!isInPromotionWindow(this.now(), this.schedule())) {
+      handle.reason = handle.reason ?? "outside_window";
+      if (!handle.abort.signal.aborted)
+        handle.abort.abort();
+      return true;
+    }
+    return false;
+  }
+  async interruptAll(reason) {
+    const ids = [...this.jobs.keys()];
+    await Promise.all(ids.map((id) => this.abortJob(id, reason)));
+  }
+  async abortJob(id, reason) {
+    const job = this.jobs.get(id);
+    if (!job)
+      return;
+    job.reason = reason;
+    if (!job.abort.signal.aborted)
+      job.abort.abort();
+    await job.done;
+  }
+}
+function abortReasonNow(handle, now, schedule) {
+  if (handle.reason)
+    return handle.reason;
+  if (!isInPromotionWindow(now(), schedule()))
+    return "outside_window";
+  return "daemon_stop";
+}
+function statusForAbort(reason) {
+  return reason === "cancel" ? "cancelled" : "interrupted";
+}
+function clipOutput(stdout, stderr) {
+  const text = [stdout, stderr].filter((part) => part.length > 0).join(`
+`);
+  if (text.length <= OUTPUT_LIMIT)
+    return text;
+  return text.slice(0, OUTPUT_LIMIT);
+}
+
 // src/refresh-lock.ts
 class AccountRefreshLock {
   inflight = new Map;
@@ -1741,20 +2940,20 @@ class OarRouter {
 }
 
 // src/usage/cache.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync4, readFileSync as readFileSync5, renameSync as renameSync3, writeFileSync as writeFileSync3, chmodSync as chmodSync3 } from "node:fs";
-import { dirname as dirname5, join as join5 } from "node:path";
+import { existsSync as existsSync12, mkdirSync as mkdirSync6, readFileSync as readFileSync7, renameSync as renameSync4, writeFileSync as writeFileSync5, chmodSync as chmodSync4 } from "node:fs";
+import { dirname as dirname7, join as join8 } from "node:path";
 function usageCachePath(root = defaultOarRoot()) {
-  return join5(root, "usage-cache.json");
+  return join8(root, "usage-cache.json");
 }
 function cacheKey(provider, profile) {
   return `${provider}/${profile}`;
 }
 function loadUsageCache(root = defaultOarRoot()) {
   const path = usageCachePath(root);
-  if (!existsSync8(path))
+  if (!existsSync12(path))
     return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
   try {
-    const parsed = JSON.parse(readFileSync5(path, "utf8"));
+    const parsed = JSON.parse(readFileSync7(path, "utf8"));
     if (parsed?.version !== 1 || !parsed.entries) {
       return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
     }
@@ -1765,17 +2964,17 @@ function loadUsageCache(root = defaultOarRoot()) {
 }
 function saveUsageCache(cache, root = defaultOarRoot()) {
   const path = usageCachePath(root);
-  mkdirSync4(dirname5(path), { recursive: true, mode: 448 });
+  mkdirSync6(dirname7(path), { recursive: true, mode: 448 });
   const tmp = `${path}.${process.pid}.tmp`;
   const body = {
     version: 1,
     updatedAt: new Date().toISOString(),
     entries: cache.entries
   };
-  writeFileSync3(tmp, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 384 });
-  renameSync3(tmp, path);
+  writeFileSync5(tmp, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 384 });
+  renameSync4(tmp, path);
   try {
-    chmodSync3(path, 384);
+    chmodSync4(path, 384);
   } catch {}
 }
 function getCachedUsage(provider, profile, opts) {
@@ -1797,12 +2996,12 @@ function putCachedUsage(entry, root = defaultOarRoot()) {
 }
 
 // src/import-all.ts
-import { readFileSync as readFileSync6 } from "node:fs";
-function isRecord3(value) {
+import { readFileSync as readFileSync8 } from "node:fs";
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isStoredCredential(value) {
-  if (!isRecord3(value))
+  if (!isRecord4(value))
     return false;
   if (value.type === "oauth") {
     if (typeof value.access !== "string" || typeof value.refresh !== "string" || typeof value.expires !== "number") {
@@ -1822,13 +3021,13 @@ function isStoredCredential(value) {
 function parseAuthJsonFile(authPath) {
   let raw;
   try {
-    raw = readFileSync6(authPath, "utf8");
+    raw = readFileSync8(authPath, "utf8");
   } catch {
     throw new Error(`unable to read ${authPath}`);
   }
   try {
     const data = JSON.parse(raw);
-    if (!isRecord3(data))
+    if (!isRecord4(data))
       throw new Error("invalid auth.json");
     return data;
   } catch {
@@ -1848,7 +3047,7 @@ function accountIdFromIdToken(idToken) {
   if (!payload)
     return;
   const auth = payload["https://api.openai.com/auth"];
-  if (isRecord3(auth)) {
+  if (isRecord4(auth)) {
     const id = auth.chatgpt_account_id;
     if (typeof id === "string" && id.length > 0)
       return id;
@@ -1859,10 +3058,10 @@ function accountIdFromIdToken(idToken) {
   return;
 }
 function credentialFromNativeCodexAuth(data) {
-  if (!isRecord3(data))
+  if (!isRecord4(data))
     return;
   const tokens = data.tokens;
-  if (!isRecord3(tokens))
+  if (!isRecord4(tokens))
     return;
   const access = tokens.access_token;
   const refresh = tokens.refresh_token;
@@ -1908,7 +3107,7 @@ function latestLoginSlotName(linked) {
   let best = 0;
   let name;
   for (const item of linked) {
-    if (!isRecord3(item) || typeof item.name !== "string")
+    if (!isRecord4(item) || typeof item.name !== "string")
       continue;
     const match = /^login-(\d+)$/.exec(item.name);
     if (!match)
@@ -1924,7 +3123,7 @@ function latestLoginSlotName(linked) {
 function credentialFromSlotEntry(parent, entry) {
   if (isStoredCredential(entry))
     return entry;
-  if (!isRecord3(entry) || parent.type !== "oauth" || typeof entry.access !== "string") {
+  if (!isRecord4(entry) || parent.type !== "oauth" || typeof entry.access !== "string") {
     throw new Error("selected accounts[] entry is not a credential");
   }
   const refresh = typeof entry.refresh === "string" ? entry.refresh : parent.refresh;
@@ -1960,10 +3159,10 @@ function selectLinkedAccount(slot, provider, authPath, account) {
     throw new Error(`${provider} in ${authPath} has no login-N slot to use as latest`);
   }
   const idx = /^\d+$/.test(selected) ? Number(selected) - 1 : linked.findIndex((a) => {
-    return isRecord3(a) && a["name"] === selected;
+    return isRecord4(a) && a["name"] === selected;
   });
   if (idx < 0 || idx >= linked.length) {
-    const names = linked.map((a, i) => isRecord3(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`).join(", ");
+    const names = linked.map((a, i) => isRecord4(a) && typeof a["name"] === "string" ? `${i + 1}=${a["name"]}` : `${i + 1}`).join(", ");
     throw new Error(`--account ${account} not found in ${provider} accounts[] (available: ${names})`);
   }
   return credentialFromSlotEntry(slot, linked[idx]);
@@ -2563,6 +3762,14 @@ class OarDaemon {
   quotaPollInFlight = false;
   running = false;
   lifecycleEpoch = 0;
+  now;
+  useWallPromotionTimer;
+  promotionStore;
+  queueStore;
+  queueManager;
+  queueListeners = new Set;
+  promotionTimer = null;
+  lastInWindow;
   constructor(opts) {
     this.store = opts.store;
     this.router = new OarRouter(opts.store);
@@ -2576,6 +3783,64 @@ class OarDaemon {
     this.activateOnUse = opts.activateOnUse ?? true;
     this.events = EventLog.forRoot(opts.store.rootDir);
     this.quotaPollIntervalMs = opts.quotaPollIntervalMs ?? 0;
+    this.now = opts.now ?? Date.now;
+    this.useWallPromotionTimer = opts.now == null;
+    this.promotionStore = new PromotionStore({ rootDir: opts.store.rootDir });
+    this.queueStore = new QueueStore({ rootDir: opts.store.rootDir });
+    this.queueManager = new QueueManager({
+      store: this.queueStore,
+      schedule: () => this.promotionStore.get(),
+      now: this.now,
+      runner: opts.queueRunner ?? createOmoQueueRunner(opts.omoCommand ?? { bin: "omo" }),
+      emit: (event) => this.emitQueueEvent(event),
+      retryDelayMs: opts.queueRetryDelayMs,
+      sleep: opts.queueSleep
+    });
+  }
+  onQueueEvent(handler) {
+    this.queueListeners.add(handler);
+    return () => {
+      this.queueListeners.delete(handler);
+    };
+  }
+  async reconcilePromotion() {
+    const schedule = this.promotionStore.get();
+    const inWindow = isInPromotionWindow(this.now(), schedule);
+    if (this.lastInWindow === true && !inWindow) {
+      this.emitQueueEvent({ type: "promotion:exited" });
+    } else if (this.lastInWindow === false && inWindow) {
+      this.emitQueueEvent({ type: "promotion:entered" });
+    } else if (this.lastInWindow === undefined && inWindow) {
+      this.emitQueueEvent({ type: "promotion:entered" });
+    }
+    this.lastInWindow = inWindow;
+    await this.queueManager.reconcile();
+    this.armPromotionTimer();
+  }
+  emitQueueEvent(event) {
+    this.events.append({
+      ts: new Date(this.now()).toISOString(),
+      event: event.type,
+      reason: "id" in event ? event.id : undefined
+    });
+    for (const handler of [...this.queueListeners])
+      handler(event);
+  }
+  armPromotionTimer() {
+    if (this.promotionTimer) {
+      clearTimeout(this.promotionTimer);
+      this.promotionTimer = null;
+    }
+    if (!this.useWallPromotionTimer || !this.running)
+      return;
+    const next = nextWindowBoundary(this.now(), this.promotionStore.get());
+    if (!next)
+      return;
+    const delay = Math.max(0, Math.min(next.at - this.now(), 2147000000));
+    this.promotionTimer = setTimeout(() => {
+      this.reconcilePromotion();
+    }, delay);
+    this.promotionTimer.unref();
   }
   get refresh() {
     return this.refreshLock;
@@ -2584,8 +3849,8 @@ class OarDaemon {
     return this.leases;
   }
   async start() {
-    mkdirSync5(dirname6(this.socketPath), { recursive: true, mode: 448 });
-    if (existsSync9(this.socketPath)) {
+    mkdirSync7(dirname8(this.socketPath), { recursive: true, mode: 448 });
+    if (existsSync13(this.socketPath)) {
       try {
         unlinkSync(this.socketPath);
       } catch {}
@@ -2595,15 +3860,18 @@ class OarDaemon {
       this.server.once("error", reject);
       this.server.listen(this.socketPath, () => {
         try {
-          chmodSync4(this.socketPath, 384);
+          chmodSync5(this.socketPath, 384);
         } catch {}
         resolve();
       });
     });
-    writeFileSync4(`${this.socketPath}.pid`, String(process.pid), { mode: 384 });
+    writeFileSync6(`${this.socketPath}.pid`, String(process.pid), { mode: 384 });
     this.running = true;
     this.lifecycleEpoch += 1;
     this.events.append({ ts: new Date().toISOString(), event: "daemon_start", pid: process.pid });
+    this.queueManager.resetLifecycle();
+    this.queueManager.markStaleRunning();
+    await this.reconcilePromotion();
     if (this.quotaPollIntervalMs > 0) {
       this.runScheduledQuotaPoll();
       this.quotaPollTimer = setInterval(() => {
@@ -2615,6 +3883,11 @@ class OarDaemon {
   async stop() {
     this.running = false;
     this.lifecycleEpoch += 1;
+    if (this.promotionTimer) {
+      clearTimeout(this.promotionTimer);
+      this.promotionTimer = null;
+    }
+    await this.queueManager.shutdown();
     if (this.quotaPollTimer) {
       clearInterval(this.quotaPollTimer);
       this.quotaPollTimer = null;
@@ -2625,13 +3898,13 @@ class OarDaemon {
       this.server.close(() => resolve());
     });
     this.server = null;
-    if (existsSync9(this.socketPath)) {
+    if (existsSync13(this.socketPath)) {
       try {
         unlinkSync(this.socketPath);
       } catch {}
     }
     const pidPath = `${this.socketPath}.pid`;
-    if (existsSync9(pidPath)) {
+    if (existsSync13(pidPath)) {
       try {
         unlinkSync(pidPath);
       } catch {}
@@ -3303,9 +4576,97 @@ class OarDaemon {
             accountCount: this.store.listAccounts().length,
             leaseCount: this.leases.list().length,
             quotaPollIntervalMs: this.quotaPollIntervalMs,
-            pid: process.pid
+            pid: process.pid,
+            promotion: promotionStatusView(this.promotionStore.get(), this.now())
           }
         };
+      case "schedule-configure": {
+        const current = this.promotionStore.get();
+        try {
+          const next = normalizePromotionSchedule({
+            ...current,
+            enabled: true,
+            ...req.timezone != null ? { timezone: req.timezone } : {},
+            ...req.start != null ? { start: req.start } : {},
+            ...req.end != null ? { end: req.end } : {},
+            ...req.provider != null ? { provider: req.provider } : {},
+            ...req.model != null ? { model: req.model } : {},
+            ...req.maxConcurrency != null ? { maxConcurrency: req.maxConcurrency } : {},
+            ...req.maxAttempts != null ? { maxAttempts: req.maxAttempts } : {}
+          });
+          const saved = this.promotionStore.set(next);
+          this.events.append({
+            ts: new Date(this.now()).toISOString(),
+            event: "schedule-configure",
+            reason: `${saved.timezone} ${saved.start}-${saved.end} ${saved.provider}/${saved.model}`
+          });
+          await this.reconcilePromotion();
+          return { ok: true, data: promotionStatusView(saved, this.now()) };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      case "schedule-status":
+        return { ok: true, data: promotionStatusView(this.promotionStore.get(), this.now()) };
+      case "schedule-off": {
+        const saved = this.promotionStore.set({ ...this.promotionStore.get(), enabled: false });
+        this.events.append({
+          ts: new Date(this.now()).toISOString(),
+          event: "schedule-off"
+        });
+        await this.reconcilePromotion();
+        return { ok: true, data: promotionStatusView(saved, this.now()) };
+      }
+      case "queue-add": {
+        try {
+          const task = this.queueStore.add({
+            prompt: req.prompt,
+            repository: req.repository,
+            isolation: req.isolation,
+            maxAttempts: req.maxAttempts ?? this.promotionStore.get().maxAttempts,
+            dependsOn: req.dependsOn,
+            nowMs: this.now()
+          });
+          this.events.append({
+            ts: new Date(this.now()).toISOString(),
+            event: "queue-add",
+            reason: task.id
+          });
+          await this.reconcilePromotion();
+          const latest = this.queueStore.get(task.id) ?? task;
+          return { ok: true, data: annotateQueueTask(latest, this.queueStore.list()) };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      case "queue-list":
+        return { ok: true, data: annotateQueueTasks(this.queueStore.list()) };
+      case "queue-cancel": {
+        try {
+          const task = await this.queueManager.cancel(req.id);
+          this.events.append({
+            ts: new Date(this.now()).toISOString(),
+            event: "queue-cancel",
+            reason: req.id
+          });
+          return { ok: true, data: task };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      case "queue-retry": {
+        try {
+          const task = await this.queueManager.retry(req.id);
+          this.events.append({
+            ts: new Date(this.now()).toISOString(),
+            event: "queue-retry",
+            reason: req.id
+          });
+          return { ok: true, data: task };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
       default:
         return { ok: false, error: `unknown action` };
     }
@@ -3313,16 +4674,16 @@ class OarDaemon {
 }
 
 // src/paths.ts
-import { existsSync as existsSync10 } from "node:fs";
+import { existsSync as existsSync14 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join6 } from "node:path";
+import { join as join9 } from "node:path";
 function defaultOarRoot2(env = process.env) {
   if (env.OAR_HOME)
     return env.OAR_HOME;
-  return join6(homedir4(), ".oar");
+  return join9(homedir4(), ".oar");
 }
 function oarSocketPath(root = defaultOarRoot2()) {
-  return join6(root, "oar.sock");
+  return join9(root, "oar.sock");
 }
 function unique2(paths) {
   const out = [];
@@ -3342,33 +4703,33 @@ function resolveActiveAuthPaths2(env = process.env, home = homedir4()) {
     env.PI_CODING_AGENT_DIR
   ].filter((v) => typeof v === "string" && v.length > 0);
   const known = knownAuthJsonCandidates2(home);
-  const existing = known.filter((p) => existsSync10(p));
-  const selected = envDirs.length > 0 ? envDirs.map((dir) => join6(dir, "auth.json")) : [];
+  const existing = known.filter((p) => existsSync14(p));
+  const selected = envDirs.length > 0 ? envDirs.map((dir) => join9(dir, "auth.json")) : [];
   const targets = unique2([...selected, ...existing]);
   if (targets.length > 0)
     return targets;
-  return [join6(home, ".omo", "agent", "auth.json")];
+  return [join9(home, ".omo", "agent", "auth.json")];
 }
 function knownAuthJsonCandidates2(home) {
   return unique2([
-    join6(home, ".omo", "agent", "auth.json"),
-    join6(home, ".omo", "auth.json"),
-    join6(home, ".senpi", "agent", "auth.json"),
-    join6(home, ".senpi", "remote-agent", "auth.json")
+    join9(home, ".omo", "agent", "auth.json"),
+    join9(home, ".omo", "auth.json"),
+    join9(home, ".senpi", "agent", "auth.json"),
+    join9(home, ".senpi", "remote-agent", "auth.json")
   ]);
 }
 
 // src/store.ts
 import {
-  chmodSync as chmodSync5,
-  existsSync as existsSync11,
-  mkdirSync as mkdirSync6,
-  readFileSync as readFileSync7,
-  renameSync as renameSync4,
+  chmodSync as chmodSync6,
+  existsSync as existsSync15,
+  mkdirSync as mkdirSync8,
+  readFileSync as readFileSync9,
+  renameSync as renameSync5,
   unlinkSync as unlinkSync2,
-  writeFileSync as writeFileSync5
+  writeFileSync as writeFileSync7
 } from "node:fs";
-import { dirname as dirname7, join as join7 } from "node:path";
+import { dirname as dirname9, join as join10 } from "node:path";
 var DEFAULT_POLICY = {
   mode: "manual",
   autoFailover: false
@@ -3376,13 +4737,13 @@ var DEFAULT_POLICY = {
 function emptyState() {
   return { version: 1, providers: {}, accounts: [], updatedAt: new Date().toISOString() };
 }
-function atomicWriteJson2(path, data, mode = 384) {
-  mkdirSync6(dirname7(path), { recursive: true, mode: 448 });
+function atomicWriteJson3(path, data, mode = 384) {
+  mkdirSync8(dirname9(path), { recursive: true, mode: 448 });
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync5(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
-  renameSync4(tmp, path);
+  writeFileSync7(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode });
+  renameSync5(tmp, path);
   try {
-    chmodSync5(path, mode);
+    chmodSync6(path, mode);
   } catch {}
 }
 
@@ -3395,8 +4756,8 @@ class OarStore {
     this.rootDir = opts?.rootDir ?? defaultOarRoot();
     this.statePath = oarStatePath(this.rootDir);
     this.vaultDir = oarVaultDir(this.rootDir);
-    mkdirSync6(this.rootDir, { recursive: true, mode: 448 });
-    mkdirSync6(this.vaultDir, { recursive: true, mode: 448 });
+    mkdirSync8(this.rootDir, { recursive: true, mode: 448 });
+    mkdirSync8(this.vaultDir, { recursive: true, mode: 448 });
     this.state = this.load();
     if (this.migrateLegacyProviders())
       this.persist();
@@ -3424,16 +4785,16 @@ class OarStore {
     return true;
   }
   renameVaultFile(from, to, profile) {
-    const oldPath = join7(this.vaultDir, `${from}__${profile}.json`);
-    const nextPath = join7(this.vaultDir, `${to}__${profile}.json`);
-    if (existsSync11(oldPath) && !existsSync11(nextPath))
-      renameSync4(oldPath, nextPath);
+    const oldPath = join10(this.vaultDir, `${from}__${profile}.json`);
+    const nextPath = join10(this.vaultDir, `${to}__${profile}.json`);
+    if (existsSync15(oldPath) && !existsSync15(nextPath))
+      renameSync5(oldPath, nextPath);
   }
   load() {
-    if (!existsSync11(this.statePath))
+    if (!existsSync15(this.statePath))
       return emptyState();
     try {
-      const parsed = JSON.parse(readFileSync7(this.statePath, "utf8"));
+      const parsed = JSON.parse(readFileSync9(this.statePath, "utf8"));
       if (parsed?.version !== 1)
         return emptyState();
       return {
@@ -3448,7 +4809,7 @@ class OarStore {
   }
   persist() {
     this.state.updatedAt = new Date().toISOString();
-    atomicWriteJson2(this.statePath, this.state, 384);
+    atomicWriteJson3(this.statePath, this.state, 384);
   }
   getState() {
     return structuredClone(this.state);
@@ -3477,11 +4838,11 @@ class OarStore {
   removeAccount(provider, profile) {
     const canonical = resolveProvider(provider);
     const vaultPath = this.vaultPath(canonical, profile);
-    const legacyPath = join7(this.vaultDir, `${provider}__${profile}.json`);
-    if (existsSync11(vaultPath)) {
+    const legacyPath = join10(this.vaultDir, `${provider}__${profile}.json`);
+    if (existsSync15(vaultPath)) {
       unlinkSync2(vaultPath);
     }
-    if (legacyPath !== vaultPath && existsSync11(legacyPath))
+    if (legacyPath !== vaultPath && existsSync15(legacyPath))
       unlinkSync2(legacyPath);
     this.state.accounts = this.state.accounts.filter((a) => !(resolveProvider(a.provider) === canonical && a.profile === profile));
     const policy = this.state.providers[canonical] ?? this.state.providers[provider];
@@ -3516,10 +4877,10 @@ class OarStore {
     this.persist();
   }
   vaultPath(provider, profile) {
-    return join7(this.vaultDir, `${resolveProvider(provider)}__${profile}.json`);
+    return join10(this.vaultDir, `${resolveProvider(provider)}__${profile}.json`);
   }
   putVaultCredential(provider, profile, credential) {
-    atomicWriteJson2(this.vaultPath(provider, profile), credential, 384);
+    atomicWriteJson3(this.vaultPath(provider, profile), credential, 384);
     const ref = `vault:${provider}:${profile}`;
     const existing = this.getAccount(provider, profile);
     if (existing) {
@@ -3553,10 +4914,10 @@ class OarStore {
   }
   getVaultCredential(provider, profile) {
     const path = this.vaultPath(provider, profile);
-    if (!existsSync11(path))
+    if (!existsSync15(path))
       return;
     try {
-      return JSON.parse(readFileSync7(path, "utf8"));
+      return JSON.parse(readFileSync9(path, "utf8"));
     } catch {
       return;
     }
@@ -3571,12 +4932,14 @@ var quotaPollSeconds = Number(process.env.OAR_QUOTA_POLL_SEC ?? "60");
 if (!Number.isFinite(quotaPollSeconds) || quotaPollSeconds < 0) {
   throw new Error("OAR_QUOTA_POLL_SEC must be a non-negative number");
 }
+var omoBin = process.env.OAR_OMO_BIN ?? "omo";
 var daemon = new OarDaemon({
   store,
   socketPath,
   authPaths: resolveActiveAuthPaths2(),
   activateOnUse: true,
-  quotaPollIntervalMs: quotaPollSeconds * 1000
+  quotaPollIntervalMs: quotaPollSeconds * 1000,
+  omoCommand: { bin: omoBin }
 });
 async function main() {
   await daemon.start();
