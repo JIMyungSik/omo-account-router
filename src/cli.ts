@@ -10,6 +10,7 @@ import { positionalArgs, rejectUnknownFlags } from "./cli-flags.ts";
 import { isCodexProvider, isXaiProvider } from "./provider-alias.ts";
 import { importAllFromAuthJson, importSelectionUsed, readCredentialFromAuthJson } from "./import-all.ts";
 import { readImportAccountSetting, writeImportAccountSetting } from "./import-pref.ts";
+import { parseModelSelector } from "./model-pin.ts";
 import { parseReportResult } from "./report-results.ts";
 import { formatSinkResultLines } from "./sinks/index.ts";
 import type { SinkApplyResult } from "./sinks/types.ts";
@@ -130,6 +131,20 @@ COMMANDS
   oar poll-quota
       Run the daemon's proactive quota check immediately. Normally the daemon
       runs it every OAR_QUOTA_POLL_SEC seconds (default 60; 0 disables).
+
+  oar model set <provider>/<model-id> [--thinking off|minimal|low|medium|high|xhigh]
+      Switch EVERY OMO session (running and newly started) to this model.
+      Sessions pick it up on their next turn or within ~30s when idle, and apply
+      it once, so a later manual /model change in a session sticks. It also
+      overrides the promotional window while set. Running sessions need an OAR
+      extension that includes this feature (restart omo sessions started before
+      the update).
+
+  oar model status [--json]
+      Show the pinned model, if any.
+
+  oar model clear
+      Stop applying the pin to new sessions. Sessions keep their current model.
 
   oar schedule configure [--timezone TZ] [--start HH:MM] [--end HH:MM]
                          [--provider id] [--model id] [--concurrency N]
@@ -285,6 +300,7 @@ EXAMPLES
   oar recommend xai openai-codex
   oar auto xai on
   oar schedule configure
+  oar model set xai/grok-4.5
   oar queue add --repo ~/proj --prompt "fix the flaky test"
 `;
 }
@@ -641,6 +657,19 @@ function suggestAccounts(provider?: string): string {
   return provider
     ? `Try: oar accounts ${provider}   or   oar import-auth ${provider} <profile>`
     : `Try: oar accounts   or   oar import-auth --all`;
+}
+
+function printModelPin(data: Record<string, unknown>, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  if (!data.active) {
+    console.log("model pin: none");
+    return;
+  }
+  console.log(`model pin: ${data.modelSelector}${data.thinking ? ` (thinking ${data.thinking})` : ""}`);
+  console.log(`set at:    ${data.setAt}`);
 }
 
 function printPromotionStatus(data: Record<string, unknown>, json: boolean): void {
@@ -1446,6 +1475,43 @@ export async function runCli(argv: string[]) {
       if (sub === "stop") return daemonStop();
       if (sub === "status") return daemonStatus();
       throw new Error("usage: oar daemon start|stop|status");
+    }
+    case "model": {
+      const sub = rest[0];
+      if (sub === "set") {
+        const valueFlags = new Set(["--thinking"]);
+        rejectUnknownFlags(rest.slice(1), new Set(["--json", ...valueFlags]), valueFlags);
+        const selectors = positionalArgs(rest.slice(1), valueFlags);
+        if (selectors.length !== 1) throw new Error("usage: oar model set <provider>/<model-id> [--thinking level]");
+        const { provider, model } = parseModelSelector(selectors[0]!);
+        const thinkingIdx = rest.indexOf("--thinking");
+        const thinking = thinkingIdx >= 0 ? rest[thinkingIdx + 1] : undefined;
+        const res = await req({
+          protocol: 1,
+          action: "model-pin-set",
+          provider,
+          model,
+          ...(thinking ? { thinking } : {}),
+        });
+        if (!res.ok) throw new Error(res.error);
+        printModelPin(res.data as Record<string, unknown>, rest.includes("--json"));
+        return;
+      }
+      if (sub === "status") {
+        rejectUnknownFlags(rest.slice(1), new Set(["--json"]));
+        const res = await req({ protocol: 1, action: "model-pin-status" });
+        if (!res.ok) throw new Error(res.error);
+        printModelPin(res.data as Record<string, unknown>, rest.includes("--json"));
+        return;
+      }
+      if (sub === "clear") {
+        rejectUnknownFlags(rest.slice(1), new Set([]));
+        const res = await req({ protocol: 1, action: "model-pin-clear" });
+        if (!res.ok) throw new Error(res.error);
+        printModelPin(res.data as Record<string, unknown>, false);
+        return;
+      }
+      throw new Error("usage: oar model set|status|clear");
     }
     case "schedule": {
       const sub = rest[0];

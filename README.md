@@ -136,6 +136,11 @@ oar auto xai off
 /model-preset use grok-astra
 /model-preset status grok-astra
 
+# Switch every OMO session to one model (running + new; clear to stop)
+oar model set xai/grok-4.5 [--thinking high]
+oar model status
+oar model clear
+
 # Daily promotional model window + coding prompt queue (opt-in)
 oar schedule configure
 oar schedule status
