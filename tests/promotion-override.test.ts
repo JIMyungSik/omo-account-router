@@ -91,7 +91,9 @@ function createTimers() {
       if (idx >= 0) timers.splice(idx, 1);
     },
     async fireFirst() {
-      const timer = timers.shift();
+      // Fake clock: the earliest-due timer fires first (the model pin poller also arms one).
+      const due = timers.reduce((min, t) => (t.ms < min.ms ? t : min), timers[0]!);
+      const timer = due && timers.splice(timers.indexOf(due), 1)[0];
       if (!timer) throw new Error("no timer");
       await timer.fn();
       return timer;

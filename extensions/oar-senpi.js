@@ -21,6 +21,7 @@ import {
   createModelPresetController,
   registerModelPresetCommand,
 } from "./oar-model-presets.js";
+import { createModelPinController } from "./oar-model-pin.js";
 import { createPromotionController } from "./oar-promotion.js";
 import { bootstrapAuto, classifyStatus, request } from "./oar-senpi-client.js";
 
@@ -47,26 +48,34 @@ function registerOarExtension(pi, { requestFn, bootstrapFn, now, setTimeoutFn, c
     clearTimeoutFn,
     refreshMs,
   });
+  const modelPin = createModelPinController({ requestFn, setTimeoutFn, clearTimeoutFn, refreshMs });
   let bootstrapped = false;
+
+  // An explicit `oar model set` pin outranks the promotional window.
+  async function syncModels(ctx) {
+    if (await modelPin.sync(pi, ctx)) return;
+    await promotion.sync(pi, ctx);
+  }
 
   pi.on("session_start", async (_event, ctx) => {
     bootstrapped = true;
     await bootstrapFn(pi);
-    await promotion.sync(pi, ctx);
+    await syncModels(ctx);
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {
-    await promotion.sync(pi, ctx);
+    await syncModels(ctx);
   });
 
   pi.on("turn_start", async (_event, ctx) => {
-    await promotion.sync(pi, ctx);
+    await syncModels(ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     try {
-      await promotion.sync(pi, ctx);
+      await syncModels(ctx);
     } finally {
+      modelPin.dispose();
       promotion.dispose();
     }
   });

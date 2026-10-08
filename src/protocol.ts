@@ -79,6 +79,9 @@ export type OarRequest =
       maxConcurrency?: number;
       maxAttempts?: number;
     }
+  | { protocol: 1; action: "model-pin-set"; provider: string; model: string; thinking?: string }
+  | { protocol: 1; action: "model-pin-status" }
+  | { protocol: 1; action: "model-pin-clear" }
   | { protocol: 1; action: "schedule-status" }
   | { protocol: 1; action: "schedule-off" }
   | {

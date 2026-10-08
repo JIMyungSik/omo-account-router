@@ -16,6 +16,7 @@ import {
   promotionStatusView,
 } from "./promotion.ts";
 import { PromotionStore } from "./promotion-store.ts";
+import { ModelPinStore, modelPinStatusView } from "./model-pin.ts";
 import { QueueManager, type QueueEvent, type QueueSleep } from "./queue-manager.ts";
 import { createOmoQueueRunner, type OmoCommand, type QueueRunner } from "./queue-runner.ts";
 import { annotateQueueTask, annotateQueueTasks, QueueStore } from "./queue-store.ts";
@@ -78,6 +79,7 @@ export class OarDaemon {
   private readonly now: () => number;
   private readonly useWallPromotionTimer: boolean;
   private readonly promotionStore: PromotionStore;
+  private readonly modelPinStore: ModelPinStore;
   private readonly queueStore: QueueStore;
   private readonly queueManager: QueueManager;
   private readonly queueListeners = new Set<(event: QueueEvent) => void>();
@@ -100,6 +102,7 @@ export class OarDaemon {
     this.now = opts.now ?? Date.now;
     this.useWallPromotionTimer = opts.now == null;
     this.promotionStore = new PromotionStore({ rootDir: opts.store.rootDir });
+    this.modelPinStore = new ModelPinStore({ rootDir: opts.store.rootDir });
     this.queueStore = new QueueStore({ rootDir: opts.store.rootDir });
     this.queueManager = new QueueManager({
       store: this.queueStore,
@@ -1023,6 +1026,28 @@ export class OarDaemon {
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : String(error) };
         }
+      }
+      case "model-pin-set": {
+        if (typeof req.provider !== "string" || !req.provider.trim() || typeof req.model !== "string" || !req.model.trim()) {
+          return { ok: false, error: "provider and model are required" };
+        }
+        const pin = this.modelPinStore.set(
+          { provider: req.provider.trim(), model: req.model.trim(), thinking: req.thinking },
+          this.now(),
+        );
+        this.events.append({
+          ts: pin.setAt,
+          event: "model-pin-set",
+          reason: `${pin.provider}/${pin.model}`,
+        });
+        return { ok: true, data: modelPinStatusView(pin) };
+      }
+      case "model-pin-status":
+        return { ok: true, data: modelPinStatusView(this.modelPinStore.get()) };
+      case "model-pin-clear": {
+        this.modelPinStore.clear();
+        this.events.append({ ts: new Date(this.now()).toISOString(), event: "model-pin-clear" });
+        return { ok: true, data: modelPinStatusView(undefined) };
       }
       case "schedule-status":
         return { ok: true, data: promotionStatusView(this.promotionStore.get(), this.now()) };

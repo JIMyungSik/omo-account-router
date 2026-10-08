@@ -27,6 +27,10 @@ export function oarPromotionPath(root = defaultOarRoot()): string {
   return join(root, "promotion.json");
 }
 
+export function oarModelPinPath(root = defaultOarRoot()): string {
+  return join(root, "model-pin.json");
+}
+
 export function oarQueuePath(root = defaultOarRoot()): string {
   return join(root, "queue.json");
 }
