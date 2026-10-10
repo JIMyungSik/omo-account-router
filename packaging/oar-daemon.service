@@ -1,0 +1,15 @@
+# Template for ~/.config/systemd/user/oar-daemon.service.
+# scripts/install.sh replaces __OAR_ROOT__, __BUN_BIN__ and __HOME__ with absolute
+# paths. Do not enable this template file directly.
+[Unit]
+Description=OAR account router daemon
+
+[Service]
+ExecStart=__BUN_BIN__ __OAR_ROOT__/dist/daemon-main.js
+WorkingDirectory=__OAR_ROOT__
+Environment=OAR_HOME=__HOME__/.oar
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

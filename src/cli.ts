@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyAuthStaleHints } from "./auth-stale.ts";
 import { OarClient } from "./client.ts";
-import { positionalArgs, rejectUnknownFlags } from "./cli-flags.ts";
+import { extractWatchFlag, positionalArgs, rejectUnknownFlags } from "./cli-flags.ts";
 import { isCodexProvider, isXaiProvider } from "./provider-alias.ts";
 import { importAllFromAuthJson, importSelectionUsed, readCredentialFromAuthJson } from "./import-all.ts";
 import { readImportAccountSetting, writeImportAccountSetting } from "./import-pref.ts";
@@ -17,6 +17,8 @@ import type { SinkApplyResult } from "./sinks/types.ts";
 import {
   defaultOarRoot,
   discoverAuthJsonFiles,
+  isNamedPipePath,
+  oarPidPath,
   oarSocketPath,
   resolveActiveAuthPaths,
 } from "./paths.ts";
@@ -135,7 +137,10 @@ COMMANDS
   oar model set <provider>/<model-id> [--thinking off|minimal|low|medium|high|xhigh]
       Switch EVERY OMO session (running and newly started) to this model.
       Sessions pick it up on their next turn or within ~30s when idle, and apply
-      it once, so a later manual /model change in a session sticks. It also
+      it once, so a later manual /model change in a session sticks. Before the
+      switch a session with real context is compacted once, so a large context
+      cannot stop the new model from taking effect. Tune or disable that with
+      OAR_MODEL_PIN_PRECOMPACT=0 and OAR_MODEL_PIN_PRECOMPACT_MIN_TOKENS. It also
       overrides the promotional window while set. Running sessions need an OAR
       extension that includes this feature (restart omo sessions started before
       the update).
@@ -226,8 +231,9 @@ COMMANDS
   oar guide second-account
       Step-by-step for logging in a second account without clobbering the live slot.
 
-  oar install [-- <install.sh args>]
-      Run scripts/install.sh (symlink oar, daemon setup). Pass extra args after --.
+  oar install [-- <install args>]
+      Run scripts/install.sh (macOS/Linux) or scripts/install.ps1 (Windows): link oar,
+      set up the daemon, then print live remaining usage. Pass extra args after --.
 
   oar panel [--watch [sec]] [--json] [--xbar] [--hours N] [--refresh] [--no-remote]
       Rich dashboard: accounts, events, remote usage (openai-codex / xai).
@@ -235,9 +241,11 @@ COMMANDS
       --hours N      Event window (default 24). --refresh  Bypass usage cache.
       --no-remote    Skip remote usage fetches.
 
-  oar usage [provider] [profile] [--refresh]
+  oar usage [provider] [profile] [--watch [sec]]
       Always fetch and show remote quota for openai-codex and xai (5H/WK/Grok %).
       OK = request ok. Omit args to list all supported accounts.
+      --watch [sec]  Live view: re-fetch and redraw every sec (default 30, min 10).
+                     Works on macOS, Linux and Windows; needs no daemon. Ctrl+C to stop.
 
   oar recommend [--refresh] [--json] [provider...]
       Rank profiles by eligibility + remote remaining %. Optional provider filter.
@@ -266,7 +274,7 @@ COMMANDS
 
 ENVIRONMENT
   OAR_HOME   State root and vault (default ~/.oar)
-  OAR_SOCK   Unix socket path (default under OAR_HOME)
+  OAR_SOCK   Unix socket path (default under OAR_HOME; a named pipe on Windows)
   Codex sink path: OAR_CODEX_AUTH_PATH > OAR_CODEX_HOME > CODEX_HOME > ~/.codex
   Argo sink path:  OAR_ARGO_SECRETS_PATH or ~/Library/Application Support/com.beyondworks.argo/...
   Disable sinks:   OAR_SINKS=0 / OAR_ARGO_SINK=0 / OAR_CODEX_SINK=0 (restart daemon)
@@ -473,6 +481,13 @@ async function syncQuotaObservations(observations: readonly QuotaObservation[]):
   }
 }
 
+function listUsageTargets(store: OarStore): Array<{ provider: string; profile: string }> {
+  return store
+    .listAccounts()
+    .filter((a) => isCodexProvider(a.provider) || isXaiProvider(a.provider))
+    .map((a) => ({ provider: a.provider, profile: a.profile }));
+}
+
 async function syncRemoteUsageToDaemon(rows: readonly AccountRemoteUsage[]): Promise<void> {
   await syncQuotaObservations(quotaObservations(rows));
 }
@@ -575,7 +590,7 @@ function printStatus(
 async function daemonStart(): Promise<void> {
   const root = process.env.OAR_HOME ?? defaultOarRoot();
   const sock = process.env.OAR_SOCK ?? oarSocketPath(root);
-  if (existsSync(sock)) {
+  if (isNamedPipePath(sock) || existsSync(sock)) {
     try {
       const client = new OarClient({ socketPath: sock });
       const pong = await client.request({ protocol: 1, action: "ping" });
@@ -623,7 +638,7 @@ async function daemonStart(): Promise<void> {
 
 async function daemonStop(): Promise<void> {
   const sock = process.env.OAR_SOCK ?? oarSocketPath();
-  const pidPath = `${sock}.pid`;
+  const pidPath = oarPidPath(sock);
   if (!existsSync(pidPath)) {
     console.log("oar-daemon not running (no pid file)");
     return;
@@ -759,6 +774,15 @@ export async function runCli(argv: string[]) {
         console.log(formatUsageTable(rows));
       }
     } catch (error) {
+      // The daemon is only needed for routing state; remaining usage comes straight from the vault.
+      const root = process.env.OAR_HOME ?? defaultOarRoot();
+      const store = new OarStore({ rootDir: root });
+      const targets = listUsageTargets(store);
+      if (targets.length > 0) {
+        const rows = await fetchRemoteUsageForAccounts(store, targets, { root, force: true });
+        console.log(formatUsageTable(rows));
+        console.log("");
+      }
       console.log(usage());
       console.error(`\n(daemon tip: ${error instanceof Error ? error.message : error})`);
       console.error("Start with: oar daemon start");
@@ -1099,13 +1123,19 @@ export async function runCli(argv: string[]) {
       return;
     }
     case "install": {
-      const scriptPath = join(__dirname, "..", "scripts", "install.sh");
+      const windows = process.platform === "win32";
+      const scriptName = windows ? "install.ps1" : "install.sh";
+      const scriptPath = join(__dirname, "..", "scripts", scriptName);
       if (!existsSync(scriptPath)) {
         throw new Error(
-          `install script not found at ${scriptPath}. Run scripts/install.sh directly from a full checkout.`,
+          `install script not found at ${scriptPath}. Run scripts/${scriptName} directly from a full checkout.`,
         );
       }
-      const result = spawnSync(scriptPath, rest, { stdio: "inherit" });
+      const result = windows
+        ? spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...rest], {
+            stdio: "inherit",
+          })
+        : spawnSync(scriptPath, rest, { stdio: "inherit" });
       if (result.status !== 0) {
         process.exitCode = result.status ?? 1;
       }
@@ -1232,9 +1262,10 @@ export async function runCli(argv: string[]) {
       return;
     }
     case "usage": {
-      rejectUnknownFlags(rest, new Set(["--refresh"]));
-      await warnIfDaemonDown("usage");
-      const args = rest.filter((a) => !a.startsWith("--"));
+      const watch = extractWatchFlag(rest, { defaultSec: 30, minSec: 10 });
+      rejectUnknownFlags(watch.args, new Set(["--refresh"]));
+      const daemonUp = await warnIfDaemonDown("usage");
+      const args = watch.args.filter((a) => !a.startsWith("--"));
       const root = process.env.OAR_HOME ?? defaultOarRoot();
       const store = new OarStore({ rootDir: root });
       const provider = args[0];
@@ -1242,24 +1273,40 @@ export async function runCli(argv: string[]) {
       const targets =
         provider && profile
           ? [{ provider, profile }]
-          : store
-              .listAccounts()
-              .filter((a) => isCodexProvider(a.provider) || isXaiProvider(a.provider))
-              .map((a) => ({ provider: a.provider, profile: a.profile }));
+          : listUsageTargets(store);
       if (targets.length === 0) {
         console.log("no openai-codex / xai accounts in vault");
         return;
       }
-      const rows = await fetchRemoteUsageForAccounts(store, targets, {
-        root,
-        force: true,
-      });
-      // stable sort: provider then profile
-      rows.sort((a, b) =>
-        a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider),
-      );
-      await syncRemoteUsageToDaemon(rows);
-      console.log(formatUsageTable(rows));
+      const renderUsage = async (): Promise<string> => {
+        const rows = await fetchRemoteUsageForAccounts(store, targets, {
+          root,
+          force: true,
+        });
+        // stable sort: provider then profile
+        rows.sort((a, b) =>
+          a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider),
+        );
+        if (daemonUp) await syncRemoteUsageToDaemon(rows);
+        return formatUsageTable(rows);
+      };
+      if (watch.intervalSec > 0) {
+        for (;;) {
+          let frame: string;
+          try {
+            frame = await renderUsage();
+          } catch (error) {
+            frame = `usage fetch failed: ${error instanceof Error ? error.message : error}`;
+          }
+          process.stdout.write("\x1b[2J\x1b[H");
+          console.log(frame);
+          console.log(
+            `\nupdated ${new Date().toLocaleTimeString()}  ·  refreshing every ${watch.intervalSec}s  ·  Ctrl+C to stop`,
+          );
+          await new Promise((r) => setTimeout(r, watch.intervalSec * 1000));
+        }
+      }
+      console.log(await renderUsage());
       return;
     }
     case "recommend":

@@ -1,9 +1,16 @@
+import { createHash } from "node:crypto";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+// Keep in sync with oarSocketPath() in src/paths.ts (Windows uses a named pipe).
 function socketPath() {
-  return process.env.OAR_SOCK || join(process.env.OAR_HOME || join(homedir(), ".oar"), "oar.sock");
+  if (process.env.OAR_SOCK) return process.env.OAR_SOCK;
+  const root = process.env.OAR_HOME || join(homedir(), ".oar");
+  if (process.platform === "win32") {
+    return `\\\\.\\pipe\\oar-${createHash("sha1").update(root.toLowerCase()).digest("hex").slice(0, 12)}`;
+  }
+  return join(root, "oar.sock");
 }
 
 function sleep(ms) {

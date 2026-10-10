@@ -127,9 +127,194 @@ function registerModelPresetCommand(pi) {
   });
 }
 
+// extensions/oar-model-pin.js
+var MODEL_PIN_ENTRY_TYPE = "oar-model-pin";
+var DEFAULT_REFRESH_MS = 30000;
+var DEFAULT_COMPACT_MIN_TOKENS = 20000;
+var DEFAULT_COMPACT_TIMEOUT_MS = 120000;
+var COMPACT_INSTRUCTIONS = "Summarize the whole session before a model switch. Keep the goal, constraints, decisions, changed files and next steps.";
+function envFlagOn(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  return text !== "0" && text !== "false" && text !== "off" && text !== "no";
+}
+function envNumber(value, fallback) {
+  const num = Number(value);
+  return Number.isFinite(num) && num >= 0 ? num : fallback;
+}
+function precompactSettings(env = process.env) {
+  return {
+    enabled: envFlagOn(env?.OAR_MODEL_PIN_PRECOMPACT ?? "1"),
+    minTokens: envNumber(env?.OAR_MODEL_PIN_PRECOMPACT_MIN_TOKENS, DEFAULT_COMPACT_MIN_TOKENS),
+    timeoutMs: envNumber(env?.OAR_MODEL_PIN_PRECOMPACT_TIMEOUT_MS, DEFAULT_COMPACT_TIMEOUT_MS)
+  };
+}
+function waitForCompact(ctx, { timeoutMs, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    function finish(result) {
+      if (settled)
+        return;
+      settled = true;
+      if (timer != null)
+        clearTimeoutFn(timer);
+      resolve(result);
+    }
+    timer = setTimeoutFn(() => finish({ status: "timeout" }), timeoutMs);
+    if (timer && typeof timer.unref === "function")
+      timer.unref();
+    if (settled)
+      clearTimeoutFn(timer);
+    try {
+      ctx.compact({
+        customInstructions: COMPACT_INSTRUCTIONS,
+        onComplete: () => finish({ status: "compacted" }),
+        onError: (error) => finish({ status: "failed", errorMessage: error?.message ?? String(error) })
+      });
+    } catch (error) {
+      finish({ status: "failed", errorMessage: error?.message ?? String(error) });
+    }
+  });
+}
+async function precompactBeforeSwitch({ pi, ctx, settings = precompactSettings(), notify } = {}) {
+  const say = notify ?? ((text, level) => notifyUi(ctx, pi, text, level));
+  if (!settings.enabled)
+    return { status: "disabled" };
+  if (typeof ctx?.compact !== "function")
+    return { status: "unsupported" };
+  const usage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
+  const tokens = usage?.tokens;
+  if (typeof tokens === "number" && tokens < settings.minTokens)
+    return { status: "skipped-small", tokens };
+  const result = await waitForCompact(ctx, settings);
+  if (result.status === "failed") {
+    say(`OAR model pin: pre-switch compaction failed (${result.errorMessage}); switching anyway`, "warning");
+  } else if (result.status === "timeout") {
+    say("OAR model pin: pre-switch compaction timed out; switching anyway", "warning");
+  }
+  return result;
+}
+function notifyUi(ctx, pi, text, level) {
+  if (typeof ctx?.ui?.notify === "function") {
+    ctx.ui.notify(text, level);
+    return;
+  }
+  if (typeof pi?.notify === "function")
+    pi.notify(text, level);
+}
+function isBusy(ctx) {
+  if (typeof ctx?.isIdle === "function")
+    return ctx.isIdle() === false;
+  return ctx?.signal != null;
+}
+function appliedPinId(entries) {
+  let found;
+  for (const entry of entries ?? []) {
+    if (entry?.type === "custom" && entry.customType === MODEL_PIN_ENTRY_TYPE && entry.data?.pinId) {
+      found = entry.data.pinId;
+    }
+  }
+  return found;
+}
+function createModelPinController({
+  requestFn,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
+  refreshMs = DEFAULT_REFRESH_MS,
+  env = process.env,
+  precompact
+} = {}) {
+  let disposed = false;
+  let timer;
+  let piRef;
+  let ctxRef;
+  let chain = Promise.resolve();
+  let failedPinId;
+  const settings = precompactSettings(env);
+  const compactFn = precompact ?? ((args) => precompactBeforeSwitch({ ...args, settings, setTimeoutFn, clearTimeoutFn }));
+  function arm() {
+    if (timer != null)
+      clearTimeoutFn(timer);
+    timer = undefined;
+    if (disposed)
+      return;
+    timer = setTimeoutFn(() => {
+      timer = undefined;
+      if (piRef && ctxRef)
+        return enqueue(piRef, ctxRef);
+    }, Math.max(1, Number(refreshMs) || DEFAULT_REFRESH_MS));
+    if (timer && typeof timer.unref === "function")
+      timer.unref();
+  }
+  async function doSync(pi, ctx) {
+    if (disposed || !ctx || !requestFn)
+      return false;
+    let res;
+    try {
+      res = await requestFn({ protocol: 1, action: "model-pin-status" });
+    } catch {
+      return false;
+    } finally {
+      arm();
+    }
+    const pin = res?.ok ? res.data : undefined;
+    if (disposed || pin?.active !== true || !pin.id || !pin.provider || !pin.model)
+      return false;
+    if (appliedPinId(ctx.sessionManager?.getEntries?.() ?? []) === pin.id)
+      return true;
+    if (failedPinId === pin.id)
+      return true;
+    const current = ctx.model;
+    const alreadyThere = current?.provider === pin.provider && current?.id === pin.model;
+    if (!alreadyThere) {
+      const model = ctx.modelRegistry?.find?.(pin.provider, pin.model);
+      if (!model) {
+        failedPinId = pin.id;
+        notifyUi(ctx, pi, `OAR model pin: cannot switch to ${pin.provider}/${pin.model} (model not found)`, "warning");
+        return true;
+      }
+      if (isBusy(ctx))
+        return true;
+      await compactFn({ pi, ctx });
+      const ok = await pi.setModel(model);
+      if (!ok) {
+        failedPinId = pin.id;
+        notifyUi(ctx, pi, `OAR model pin: cannot switch to ${pin.provider}/${pin.model} (setModel failed)`, "warning");
+        return true;
+      }
+    }
+    if (pin.thinking && typeof pi.setThinkingLevel === "function")
+      pi.setThinkingLevel(pin.thinking);
+    if (typeof pi.appendEntry === "function")
+      pi.appendEntry(MODEL_PIN_ENTRY_TYPE, { v: 1, pinId: pin.id });
+    return true;
+  }
+  function enqueue(pi, ctx) {
+    if (disposed)
+      return Promise.resolve(false);
+    piRef = pi;
+    ctxRef = ctx;
+    const run = () => doSync(pi, ctx);
+    const next = chain.then(run, run);
+    chain = next.then(() => {}, () => {});
+    return next;
+  }
+  return {
+    sync: enqueue,
+    dispose() {
+      disposed = true;
+      if (timer != null)
+        clearTimeoutFn(timer);
+      timer = undefined;
+      piRef = undefined;
+      ctxRef = undefined;
+    }
+  };
+}
+
 // extensions/oar-promotion.js
 var PROMOTION_ENTRY_TYPE = "oar-promotion";
-var DEFAULT_REFRESH_MS = 30000;
+var DEFAULT_REFRESH_MS2 = 30000;
 var MAX_TIMER_MS = 2147000000;
 function latestPromotionRecord(entries) {
   let found;
@@ -169,7 +354,7 @@ function createPromotionController({
   now = () => Date.now(),
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
-  refreshMs = DEFAULT_REFRESH_MS
+  refreshMs = DEFAULT_REFRESH_MS2
 } = {}) {
   let applying = false;
   let disposed = false;
@@ -197,7 +382,7 @@ function createPromotionController({
     clearTimer();
     if (disposed)
       return;
-    const bound = Math.max(1, Number(refreshMs) || DEFAULT_REFRESH_MS);
+    const bound = Math.max(1, Number(refreshMs) || DEFAULT_REFRESH_MS2);
     let delay = bound;
     if (nextBoundary?.at != null) {
       delay = Math.min(Math.max(nextBoundary.at - now(), 0), bound);
@@ -365,11 +550,18 @@ function createPromotionController({
 }
 
 // extensions/oar-senpi-client.js
+import { createHash } from "node:crypto";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 function socketPath() {
-  return process.env.OAR_SOCK || join(process.env.OAR_HOME || join(homedir(), ".oar"), "oar.sock");
+  if (process.env.OAR_SOCK)
+    return process.env.OAR_SOCK;
+  const root = process.env.OAR_HOME || join(homedir(), ".oar");
+  if (process.platform === "win32") {
+    return `\\\\.\\pipe\\oar-${createHash("sha1").update(root.toLowerCase()).digest("hex").slice(0, 12)}`;
+  }
+  return join(root, "oar.sock");
 }
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -507,22 +699,32 @@ function registerOarExtension(pi, { requestFn, bootstrapFn, now, setTimeoutFn, c
     clearTimeoutFn,
     refreshMs
   });
+  const modelPin = createModelPinController({ requestFn, setTimeoutFn, clearTimeoutFn, refreshMs });
   let bootstrapped = false;
+  async function syncModels(ctx) {
+    if (await modelPin.sync(pi, ctx))
+      return;
+    await promotion.sync(pi, ctx);
+  }
   pi.on("session_start", async (_event, ctx) => {
     bootstrapped = true;
     await bootstrapFn(pi);
-    await promotion.sync(pi, ctx);
+    await syncModels(ctx);
   });
   pi.on("before_agent_start", async (_event, ctx) => {
-    await promotion.sync(pi, ctx);
+    await syncModels(ctx);
   });
   pi.on("turn_start", async (_event, ctx) => {
-    await promotion.sync(pi, ctx);
+    await syncModels(ctx);
+  });
+  pi.on("agent_settled", async (_event, ctx) => {
+    await syncModels(ctx);
   });
   pi.on("session_shutdown", async (_event, ctx) => {
     try {
-      await promotion.sync(pi, ctx);
+      await syncModels(ctx);
     } finally {
+      modelPin.dispose();
       promotion.dispose();
     }
   });

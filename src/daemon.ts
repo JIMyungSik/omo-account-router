@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
+import { isNamedPipePath, oarPidPath } from "./paths.ts";
 import { createAdapter } from "./adapters/index.ts";
 import { AuthSlotActivator } from "./auth-slot.ts";
 import { createDefaultSinks } from "./sinks/index.ts";
@@ -170,8 +171,9 @@ export class OarDaemon {
   }
 
   async start(): Promise<void> {
-    mkdirSync(dirname(this.socketPath), { recursive: true, mode: 0o700 });
-    if (existsSync(this.socketPath)) {
+    const namedPipe = isNamedPipePath(this.socketPath);
+    mkdirSync(namedPipe ? this.store.rootDir : dirname(this.socketPath), { recursive: true, mode: 0o700 });
+    if (!namedPipe && existsSync(this.socketPath)) {
       try {
         unlinkSync(this.socketPath);
       } catch {
@@ -184,7 +186,7 @@ export class OarDaemon {
       this.server!.once("error", reject);
       this.server!.listen(this.socketPath, () => {
         try {
-          chmodSync(this.socketPath, 0o600);
+          if (!namedPipe) chmodSync(this.socketPath, 0o600);
         } catch {
           // ignore
         }
@@ -192,7 +194,7 @@ export class OarDaemon {
       });
     });
 
-    writeFileSync(`${this.socketPath}.pid`, String(process.pid), { mode: 0o600 });
+    writeFileSync(oarPidPath(this.socketPath, this.store.rootDir), String(process.pid), { mode: 0o600 });
     this.running = true;
     this.lifecycleEpoch += 1;
     this.events.append({ ts: new Date().toISOString(), event: "daemon_start", pid: process.pid });
@@ -225,14 +227,14 @@ export class OarDaemon {
       this.server.close(() => resolve());
     });
     this.server = null;
-    if (existsSync(this.socketPath)) {
+    if (!isNamedPipePath(this.socketPath) && existsSync(this.socketPath)) {
       try {
         unlinkSync(this.socketPath);
       } catch {
         // ignore
       }
     }
-    const pidPath = `${this.socketPath}.pid`;
+    const pidPath = oarPidPath(this.socketPath, this.store.rootDir);
     if (existsSync(pidPath)) {
       try {
         unlinkSync(pidPath);

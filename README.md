@@ -45,7 +45,7 @@ The CLI, daemon, and vault work on macOS, Linux, and Windows. Checked on 2026-09
 | Ubuntu | GitHub `ubuntu-latest`, `bun test` + style check | pass ([run 35945289044](https://github.com/JIMyungSik/omo-account-router/actions/runs/35945289044)) |
 | Windows | GitHub `windows-latest`, same commands | pass (same run) |
 
-`scripts/install.sh` and the LaunchAgent are macOS only. On Linux or Windows, build with Bun or Node 22 and run `oar daemon start` yourself. The default Argo secrets path is under `~/Library/Application Support`; on other systems set `OAR_ARGO_SECRETS_PATH` if that file exists.
+`scripts/install.sh` installs on macOS (LaunchAgent) and Linux (systemd user unit); `scripts/install.ps1` installs on Windows (`oar.cmd` launcher + logon task, extensions copied instead of symlinked; not yet exercised on a real Windows host). Each installer ends by printing live remaining usage; `oar usage --watch` keeps it refreshing on every OS. Without a systemd user session, run `oar daemon start` yourself. On Windows the daemon listens on a named pipe instead of a socket file. The default Argo secrets path is under `~/Library/Application Support`; on other systems set `OAR_ARGO_SECRETS_PATH` if that file exists.
 
 ---
 
@@ -412,7 +412,7 @@ credential into every live auth path. Do not paste or manually copy tokens.
 | `oar` | Status snapshot + freshly fetched remote remaining % |
 | `oar status` | Profiles + active `*`, after refreshing remote usage |
 | `oar panel [--refresh] [--watch N] [--json] [--xbar] [--no-remote]` | Full dashboard; fresh remote usage unless `--no-remote` |
-| `oar usage [provider] [profile] [--refresh]` | Fetch and show remaining % table |
+| `oar usage [provider] [profile] [--watch [sec]]` | Fetch and show remaining % table; `--watch` redraws every `sec` (default 30, min 10), no daemon needed |
 | `oar recommend [--refresh] [--json] [provider...]` | Ranked accounts by remaining % |
 | `oar subscriptions list` | Configured monthly plan costs |
 | `oar subscriptions set <p> <profile> --monthly-usd <n>` | Record plan cost |
@@ -432,7 +432,7 @@ credential into every live auth path. Do not paste or manually copy tokens.
 | `oar test <p> <profile> [--live]` | Health check |
 | `oar doctor` | Paths, engine, daemon tips |
 | `oar daemon start\|stop\|status` | Daemon lifecycle |
-| `oar install` | Runs `scripts/install.sh` |
+| `oar install` | Runs `scripts/install.sh` (macOS/Linux) or `scripts/install.ps1` (Windows) |
 | `oar guide second-account` | Second-account howto |
 
 Environment: `OAR_HOME`, `OAR_SOCK`, `OAR_AUTH_PATH`, `OAR_ACTIVATE_ALL=1`, `OAR_QUOTA_POLL_SEC`, `OAR_SINKS`, `OAR_ARGO_SINK`, `OAR_CODEX_SINK`, `OAR_ARGO_SECRETS_PATH`, `OAR_CODEX_HOME`, `OAR_CODEX_AUTH_PATH`

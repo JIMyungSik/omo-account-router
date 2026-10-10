@@ -3,15 +3,18 @@
 #
 # Usage:
 #   scripts/install.sh [--skip-build] [--skip-launchagent] [--import-auth] [--force] [--from <auth.json>]
+#   (macOS and Linux; on Windows run scripts/install.ps1)
 #
 # Steps:
 #   1. bun install
 #   2. bun run build
 #   3. symlink ~/.local/bin/oar -> bin/oar-wrapper.sh
 #   4. ensure ~/.omo/agent/extensions/oar.js -> extensions/oar-senpi.js symlink
-#   5. install + load the com.victor.oar-daemon LaunchAgent (RunAtLoad + KeepAlive)
+#   5. autostart the daemon: LaunchAgent on macOS (com.victor.oar-daemon),
+#      systemd user unit on Linux (oar-daemon.service); --skip-launchagent skips it
 #   6. optionally `oar import-auth --all` from the default auth.json
 #      (never overwrites existing vault profiles unless --force)
+#   7. print live remaining usage (`oar usage`); `oar usage --watch` keeps it live
 #
 # Idempotent: safe to re-run.
 set -euo pipefail
@@ -23,6 +26,18 @@ LAUNCH_AGENTS_DIR="$HOME_DIR/Library/LaunchAgents"
 PLIST_LABEL="com.victor.oar-daemon"
 PLIST_TEMPLATE="$ROOT/packaging/$PLIST_LABEL.plist"
 PLIST_TARGET="$LAUNCH_AGENTS_DIR/$PLIST_LABEL.plist"
+SYSTEMD_UNIT="oar-daemon.service"
+SYSTEMD_TEMPLATE="$ROOT/packaging/$SYSTEMD_UNIT"
+SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME_DIR/.config}/systemd/user"
+
+case "$(uname -s)" in
+  Darwin) OS=macos ;;
+  Linux) OS=linux ;;
+  *)
+    echo "install.sh: unsupported OS $(uname -s). On Windows run scripts/install.ps1 from PowerShell." >&2
+    exit 1
+    ;;
+esac
 
 SKIP_BUILD=0
 SKIP_LAUNCHAGENT=0
@@ -38,7 +53,7 @@ while [ $# -gt 0 ]; do
     --force) FORCE_IMPORT=1 ;;
     --from) shift; FROM_AUTH_JSON="$1" ;;
     -h|--help)
-      sed -n '2,17p' "${BASH_SOURCE[0]}"
+      sed -n '2,19p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)
@@ -92,7 +107,23 @@ else
   echo "    skipped: $HOME_DIR/.omo/agent not found (OMO not installed for this user yet)"
 fi
 
-if [ "$SKIP_LAUNCHAGENT" -eq 0 ]; then
+if [ "$SKIP_LAUNCHAGENT" -eq 0 ] && [ "$OS" = linux ]; then
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    echo "==> install systemd user unit ($SYSTEMD_UNIT)"
+    mkdir -p "$SYSTEMD_DIR"
+    sed \
+      -e "s#__OAR_ROOT__#$ROOT#g" \
+      -e "s#__BUN_BIN__#$BUN_BIN#g" \
+      -e "s#__HOME__#$HOME_DIR#g" \
+      "$SYSTEMD_TEMPLATE" > "$SYSTEMD_DIR/$SYSTEMD_UNIT"
+    systemctl --user daemon-reload
+    systemctl --user enable --now "$SYSTEMD_UNIT"
+    echo "    installed + started $SYSTEMD_DIR/$SYSTEMD_UNIT"
+    echo "    logs: journalctl --user -u $SYSTEMD_UNIT"
+  else
+    echo "==> skipped systemd unit (no systemd user session); the daemon is started on demand by oar daemon start"
+  fi
+elif [ "$SKIP_LAUNCHAGENT" -eq 0 ]; then
   echo "==> install LaunchAgent ($PLIST_LABEL)"
   mkdir -p "$LAUNCH_AGENTS_DIR"
   sed \
@@ -128,6 +159,12 @@ echo "==> bootstrap multi-profile auto failover"
 if [ -x "$LOCAL_BIN/oar" ]; then
   "$LOCAL_BIN/oar" daemon start >/dev/null 2>&1 || true
   "$LOCAL_BIN/oar" bootstrap-auto >/dev/null 2>&1 || true
+fi
+
+echo "==> live remaining usage"
+if [ -x "$LOCAL_BIN/oar" ]; then
+  "$LOCAL_BIN/oar" usage || echo "    usage lookup failed (run: oar usage)"
+  echo "    keep it live: oar usage --watch   (or: oar panel --watch)"
 fi
 
 echo "==> done"

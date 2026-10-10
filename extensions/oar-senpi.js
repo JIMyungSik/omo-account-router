@@ -71,6 +71,12 @@ function registerOarExtension(pi, { requestFn, bootstrapFn, now, setTimeoutFn, c
     await syncModels(ctx);
   });
 
+  // A pin that has to compact first only applies on an idle session, so retry the
+  // moment the agent settles rather than waiting for the next timer tick.
+  pi.on("agent_settled", async (_event, ctx) => {
+    await syncModels(ctx);
+  });
+
   pi.on("session_shutdown", async (_event, ctx) => {
     try {
       await syncModels(ctx);

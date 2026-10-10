@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -7,8 +8,24 @@ export function defaultOarRoot(env: NodeJS.ProcessEnv = process.env): string {
   return join(homedir(), ".oar");
 }
 
-export function oarSocketPath(root = defaultOarRoot()): string {
+const WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\";
+
+/** Node on Windows can only listen on named pipes, never on a filesystem path. */
+export function isNamedPipePath(socketPath: string): boolean {
+  return socketPath.startsWith(WINDOWS_PIPE_PREFIX);
+}
+
+export function oarSocketPath(root = defaultOarRoot(), platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") {
+    const id = createHash("sha1").update(root.toLowerCase()).digest("hex").slice(0, 12);
+    return `${WINDOWS_PIPE_PREFIX}oar-${id}`;
+  }
   return join(root, "oar.sock");
+}
+
+/** Named pipes have no sibling file, so the pid file lives under the OAR root. */
+export function oarPidPath(socketPath: string, root = defaultOarRoot()): string {
+  return isNamedPipePath(socketPath) ? join(root, "oar.pid") : `${socketPath}.pid`;
 }
 
 export function oarStatePath(root = defaultOarRoot()): string {

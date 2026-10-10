@@ -45,7 +45,7 @@ CLI, 데몬, vault는 macOS, Linux, Windows에서 동작합니다. 2026-09-24, B
 | Ubuntu | GitHub `ubuntu-latest`, `bun test` + style | pass ([run 35945289044](https://github.com/JIMyungSik/omo-account-router/actions/runs/35945289044)) |
 | Windows | GitHub `windows-latest`, 같은 명령 | pass (같은 run) |
 
-`scripts/install.sh`와 LaunchAgent는 macOS 전용입니다. Linux/Windows는 Bun 또는 Node 22로 빌드한 뒤 `oar daemon start`로 때웁니다. Argo 시크릿 기본 경로는 `~/Library/Application Support` 아래이므로, 다른 OS에서는 파일이 있으면 `OAR_ARGO_SECRETS_PATH`를 지정합니다.
+`scripts/install.sh`는 macOS(LaunchAgent)와 Linux(systemd 사용자 유닛)를, `scripts/install.ps1`은 Windows(`oar.cmd` 런처 + 로그온 작업, 확장은 심볼릭 링크 대신 복사)를 설치합니다. Windows 스크립트는 실제 Windows 호스트에서는 아직 돌려 보지 못했습니다. 설치가 끝나면 실시간 잔여 사용량을 출력하고, `oar usage --watch`로 모든 OS에서 계속 갱신해 볼 수 있습니다. systemd 사용자 세션이 없으면 `oar daemon start`를 직접 실행합니다. Windows에서 daemon은 소켓 파일 대신 named pipe를 씁니다. Argo 시크릿 기본 경로는 `~/Library/Application Support` 아래이므로, 다른 OS에서는 파일이 있으면 `OAR_ARGO_SECRETS_PATH`를 지정합니다.
 
 ---
 
@@ -408,7 +408,7 @@ credential을 모든 live auth 경로에 반영합니다. 토큰을 직접 복�
 | `oar` | status + 원격 잔여 한도 즉시 조회 |
 | `oar status` | 원격 한도 갱신 후 프로필 + 활성 `*` |
 | `oar panel [--refresh] [--watch N] [--json] [--xbar] [--no-remote]` | 대시보드 표. `--no-remote` 외에는 최신 원격 한도 조회 |
-| `oar usage [provider] [profile] [--refresh]` | 원격 잔여 % 조회 및 표시 |
+| `oar usage [provider] [profile] [--watch [sec]]` | 원격 잔여 % 조회 및 표시. `--watch`는 `sec`초(기본 30, 최소 10)마다 다시 그림, daemon 불필요 |
 | `oar recommend [--refresh] [--json] [provider...]` | 잔여 % 기준 순위 표 |
 | `oar subscriptions list` | 설정된 월 구독료 |
 | `oar subscriptions set <p> <profile> --monthly-usd <n>` | 월 비용 기록 |

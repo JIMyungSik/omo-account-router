@@ -27,6 +27,15 @@ else
   echo "    not installed"
 fi
 
+SYSTEMD_UNIT_FILE="${XDG_CONFIG_HOME:-$HOME_DIR/.config}/systemd/user/oar-daemon.service"
+if [ -f "$SYSTEMD_UNIT_FILE" ]; then
+  echo "==> remove systemd user unit"
+  systemctl --user disable --now oar-daemon.service >/dev/null 2>&1 || true
+  rm -f "$SYSTEMD_UNIT_FILE"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  echo "    removed $SYSTEMD_UNIT_FILE"
+fi
+
 echo "==> remove $LOCAL_BIN/oar symlink"
 if [ -L "$LOCAL_BIN/oar" ]; then
   rm -f "$LOCAL_BIN/oar"

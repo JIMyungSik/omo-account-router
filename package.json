@@ -1,8 +1,8 @@
 {
   "name": "@carjms/oar-cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
-  "description": "OAR (@carjms/oar-cli) — local multi-account hot-switch for OMO/Senpi. Command: oar",
+  "description": "OAR (@carjms/oar-cli) \u2014 local multi-account hot-switch for OMO/Senpi. Command: oar",
   "bin": {
     "oar": "bin/oar.js"
   },

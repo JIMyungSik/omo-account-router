@@ -37,6 +37,7 @@ function applyAuthStaleHints(rows, store) {
 import { createConnection } from "node:net";
 
 // src/paths.ts
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 function defaultOarRoot(env = process.env) {
@@ -44,7 +45,12 @@ function defaultOarRoot(env = process.env) {
     return env.OAR_HOME;
   return join(homedir(), ".oar");
 }
-function oarSocketPath(root = defaultOarRoot()) {
+var WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\";
+function oarSocketPath(root = defaultOarRoot(), platform = process.platform) {
+  if (platform === "win32") {
+    const id = createHash("sha1").update(root.toLowerCase()).digest("hex").slice(0, 12);
+    return `${WINDOWS_PIPE_PREFIX}oar-${id}`;
+  }
   return join(root, "oar.sock");
 }
 function oarStatePath(root = defaultOarRoot()) {
@@ -151,6 +157,17 @@ function positionalArgs(args, valueFlags = new Set) {
     out.push(token);
   }
   return out;
+}
+function extractWatchFlag(args, opts) {
+  const idx = args.indexOf("--watch");
+  if (idx < 0)
+    return { intervalSec: 0, args: [...args] };
+  const next = args[idx + 1];
+  const hasValue = next !== undefined && !next.startsWith("--");
+  const parsed = hasValue ? Number(next) : Number.NaN;
+  const sec = Number.isFinite(parsed) && parsed > 0 ? parsed : opts.defaultSec;
+  const rest = args.filter((_, i) => i !== idx && !(hasValue && i === idx + 1));
+  return { intervalSec: Math.max(sec, opts.minSec), args: rest };
 }
 
 // src/provider-alias.ts
@@ -545,6 +562,16 @@ function writeImportAccountSetting(account, root = defaultOarRoot()) {
   writeFileSync(prefPath(root), JSON.stringify({ account }, null, 2), { encoding: "utf8", mode: 384 });
 }
 
+// src/model-pin.ts
+function parseModelSelector(selector) {
+  const idx = selector.indexOf("/");
+  const provider = idx > 0 ? selector.slice(0, idx).trim() : "";
+  const model = idx > 0 ? selector.slice(idx + 1).trim() : "";
+  if (!provider || !model)
+    throw new Error(`invalid model ${selector}; use <provider>/<model-id>`);
+  return { provider, model };
+}
+
 // src/report-results.ts
 var REPORT_RESULTS = [
   "SUCCESS",
@@ -588,6 +615,7 @@ function formatSinkResultLines(sinks) {
 }
 
 // src/paths.ts
+import { createHash as createHash2 } from "node:crypto";
 import { existsSync as existsSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join3 } from "node:path";
@@ -596,8 +624,19 @@ function defaultOarRoot2(env = process.env) {
     return env.OAR_HOME;
   return join3(homedir2(), ".oar");
 }
-function oarSocketPath2(root = defaultOarRoot2()) {
+var WINDOWS_PIPE_PREFIX2 = "\\\\.\\pipe\\";
+function isNamedPipePath(socketPath) {
+  return socketPath.startsWith(WINDOWS_PIPE_PREFIX2);
+}
+function oarSocketPath2(root = defaultOarRoot2(), platform = process.platform) {
+  if (platform === "win32") {
+    const id = createHash2("sha1").update(root.toLowerCase()).digest("hex").slice(0, 12);
+    return `${WINDOWS_PIPE_PREFIX2}oar-${id}`;
+  }
   return join3(root, "oar.sock");
+}
+function oarPidPath(socketPath, root = defaultOarRoot2()) {
+  return isNamedPipePath(socketPath) ? join3(root, "oar.pid") : `${socketPath}.pid`;
 }
 function unique(paths) {
   const out = [];
@@ -3294,6 +3333,23 @@ COMMANDS
       Run the daemon's proactive quota check immediately. Normally the daemon
       runs it every OAR_QUOTA_POLL_SEC seconds (default 60; 0 disables).
 
+  oar model set <provider>/<model-id> [--thinking off|minimal|low|medium|high|xhigh]
+      Switch EVERY OMO session (running and newly started) to this model.
+      Sessions pick it up on their next turn or within ~30s when idle, and apply
+      it once, so a later manual /model change in a session sticks. Before the
+      switch a session with real context is compacted once, so a large context
+      cannot stop the new model from taking effect. Tune or disable that with
+      OAR_MODEL_PIN_PRECOMPACT=0 and OAR_MODEL_PIN_PRECOMPACT_MIN_TOKENS. It also
+      overrides the promotional window while set. Running sessions need an OAR
+      extension that includes this feature (restart omo sessions started before
+      the update).
+
+  oar model status [--json]
+      Show the pinned model, if any.
+
+  oar model clear
+      Stop applying the pin to new sessions. Sessions keep their current model.
+
   oar schedule configure [--timezone TZ] [--start HH:MM] [--end HH:MM]
                          [--provider id] [--model id] [--concurrency N]
                          [--max-attempts N]
@@ -3374,8 +3430,9 @@ COMMANDS
   oar guide second-account
       Step-by-step for logging in a second account without clobbering the live slot.
 
-  oar install [-- <install.sh args>]
-      Run scripts/install.sh (symlink oar, daemon setup). Pass extra args after --.
+  oar install [-- <install args>]
+      Run scripts/install.sh (macOS/Linux) or scripts/install.ps1 (Windows): link oar,
+      set up the daemon, then print live remaining usage. Pass extra args after --.
 
   oar panel [--watch [sec]] [--json] [--xbar] [--hours N] [--refresh] [--no-remote]
       Rich dashboard: accounts, events, remote usage (openai-codex / xai).
@@ -3383,9 +3440,11 @@ COMMANDS
       --hours N      Event window (default 24). --refresh  Bypass usage cache.
       --no-remote    Skip remote usage fetches.
 
-  oar usage [provider] [profile] [--refresh]
+  oar usage [provider] [profile] [--watch [sec]]
       Always fetch and show remote quota for openai-codex and xai (5H/WK/Grok %).
       OK = request ok. Omit args to list all supported accounts.
+      --watch [sec]  Live view: re-fetch and redraw every sec (default 30, min 10).
+                     Works on macOS, Linux and Windows; needs no daemon. Ctrl+C to stop.
 
   oar recommend [--refresh] [--json] [provider...]
       Rank profiles by eligibility + remote remaining %. Optional provider filter.
@@ -3414,7 +3473,7 @@ COMMANDS
 
 ENVIRONMENT
   OAR_HOME   State root and vault (default ~/.oar)
-  OAR_SOCK   Unix socket path (default under OAR_HOME)
+  OAR_SOCK   Unix socket path (default under OAR_HOME; a named pipe on Windows)
   Codex sink path: OAR_CODEX_AUTH_PATH > OAR_CODEX_HOME > CODEX_HOME > ~/.codex
   Argo sink path:  OAR_ARGO_SECRETS_PATH or ~/Library/Application Support/com.beyondworks.argo/...
   Disable sinks:   OAR_SINKS=0 / OAR_ARGO_SINK=0 / OAR_CODEX_SINK=0 (restart daemon)
@@ -3448,6 +3507,7 @@ EXAMPLES
   oar recommend xai openai-codex
   oar auto xai on
   oar schedule configure
+  oar model set xai/grok-4.5
   oar queue add --repo ~/proj --prompt "fix the flaky test"
 `;
 }
@@ -3599,6 +3659,9 @@ async function syncQuotaObservations(observations) {
     }
   }
 }
+function listUsageTargets(store) {
+  return store.listAccounts().filter((a) => isCodexProvider(a.provider) || isXaiProvider(a.provider)).map((a) => ({ provider: a.provider, profile: a.profile }));
+}
 async function syncRemoteUsageToDaemon(rows) {
   await syncQuotaObservations(quotaObservations(rows));
 }
@@ -3675,7 +3738,7 @@ function printStatus(data, opts) {
 async function daemonStart() {
   const root = process.env.OAR_HOME ?? defaultOarRoot2();
   const sock = process.env.OAR_SOCK ?? oarSocketPath2(root);
-  if (existsSync9(sock)) {
+  if (isNamedPipePath(sock) || existsSync9(sock)) {
     try {
       const client = new OarClient({ socketPath: sock });
       const pong = await client.request({ protocol: 1, action: "ping" });
@@ -3710,7 +3773,7 @@ async function daemonStart() {
 }
 async function daemonStop() {
   const sock = process.env.OAR_SOCK ?? oarSocketPath2();
-  const pidPath = `${sock}.pid`;
+  const pidPath = oarPidPath(sock);
   if (!existsSync9(pidPath)) {
     console.log("oar-daemon not running (no pid file)");
     return;
@@ -3737,6 +3800,18 @@ async function daemonStatus() {
 function suggestAccounts(provider) {
   try {} catch {}
   return provider ? `Try: oar accounts ${provider}   or   oar import-auth ${provider} <profile>` : `Try: oar accounts   or   oar import-auth --all`;
+}
+function printModelPin(data, json) {
+  if (json) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  if (!data.active) {
+    console.log("model pin: none");
+    return;
+  }
+  console.log(`model pin: ${data.modelSelector}${data.thinking ? ` (thinking ${data.thinking})` : ""}`);
+  console.log(`set at:    ${data.setAt}`);
 }
 function printPromotionStatus(data, json) {
   if (json) {
@@ -3823,6 +3898,14 @@ async function runCli(argv) {
         console.log(formatUsageTable(rows));
       }
     } catch (error) {
+      const root = process.env.OAR_HOME ?? defaultOarRoot2();
+      const store = new OarStore({ rootDir: root });
+      const targets = listUsageTargets(store);
+      if (targets.length > 0) {
+        const rows = await fetchRemoteUsageForAccounts(store, targets, { root, force: true });
+        console.log(formatUsageTable(rows));
+        console.log("");
+      }
       console.log(usage());
       console.error(`
 (daemon tip: ${error instanceof Error ? error.message : error})`);
@@ -4141,11 +4224,15 @@ ${suggestAccounts(provider)}`);
       return;
     }
     case "install": {
-      const scriptPath = join8(__dirname2, "..", "scripts", "install.sh");
+      const windows = process.platform === "win32";
+      const scriptName = windows ? "install.ps1" : "install.sh";
+      const scriptPath = join8(__dirname2, "..", "scripts", scriptName);
       if (!existsSync9(scriptPath)) {
-        throw new Error(`install script not found at ${scriptPath}. Run scripts/install.sh directly from a full checkout.`);
+        throw new Error(`install script not found at ${scriptPath}. Run scripts/${scriptName} directly from a full checkout.`);
       }
-      const result = spawnSync(scriptPath, rest, { stdio: "inherit" });
+      const result = windows ? spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, ...rest], {
+        stdio: "inherit"
+      }) : spawnSync(scriptPath, rest, { stdio: "inherit" });
       if (result.status !== 0) {
         process.exitCode = result.status ?? 1;
       }
@@ -4277,25 +4364,45 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       return;
     }
     case "usage": {
-      rejectUnknownFlags(rest, new Set(["--refresh"]));
-      await warnIfDaemonDown("usage");
-      const args = rest.filter((a) => !a.startsWith("--"));
+      const watch = extractWatchFlag(rest, { defaultSec: 30, minSec: 10 });
+      rejectUnknownFlags(watch.args, new Set(["--refresh"]));
+      const daemonUp = await warnIfDaemonDown("usage");
+      const args = watch.args.filter((a) => !a.startsWith("--"));
       const root = process.env.OAR_HOME ?? defaultOarRoot2();
       const store = new OarStore({ rootDir: root });
       const provider = args[0];
       const profile = args[1];
-      const targets = provider && profile ? [{ provider, profile }] : store.listAccounts().filter((a) => isCodexProvider(a.provider) || isXaiProvider(a.provider)).map((a) => ({ provider: a.provider, profile: a.profile }));
+      const targets = provider && profile ? [{ provider, profile }] : listUsageTargets(store);
       if (targets.length === 0) {
         console.log("no openai-codex / xai accounts in vault");
         return;
       }
-      const rows = await fetchRemoteUsageForAccounts(store, targets, {
-        root,
-        force: true
-      });
-      rows.sort((a, b) => a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider));
-      await syncRemoteUsageToDaemon(rows);
-      console.log(formatUsageTable(rows));
+      const renderUsage = async () => {
+        const rows = await fetchRemoteUsageForAccounts(store, targets, {
+          root,
+          force: true
+        });
+        rows.sort((a, b) => a.provider === b.provider ? a.profile.localeCompare(b.profile) : a.provider.localeCompare(b.provider));
+        if (daemonUp)
+          await syncRemoteUsageToDaemon(rows);
+        return formatUsageTable(rows);
+      };
+      if (watch.intervalSec > 0) {
+        for (;; ) {
+          let frame;
+          try {
+            frame = await renderUsage();
+          } catch (error) {
+            frame = `usage fetch failed: ${error instanceof Error ? error.message : error}`;
+          }
+          process.stdout.write("\x1B[2J\x1B[H");
+          console.log(frame);
+          console.log(`
+updated ${new Date().toLocaleTimeString()}  \xB7  refreshing every ${watch.intervalSec}s  \xB7  Ctrl+C to stop`);
+          await new Promise((r) => setTimeout(r, watch.intervalSec * 1000));
+        }
+      }
+      console.log(await renderUsage());
       return;
     }
     case "recommend":
@@ -4488,6 +4595,47 @@ watching every ${intervalSec}s  \xB7  Ctrl+C to stop`);
       if (sub === "status")
         return daemonStatus();
       throw new Error("usage: oar daemon start|stop|status");
+    }
+    case "model": {
+      const sub = rest[0];
+      if (sub === "set") {
+        const valueFlags = new Set(["--thinking"]);
+        rejectUnknownFlags(rest.slice(1), new Set(["--json", ...valueFlags]), valueFlags);
+        const selectors = positionalArgs(rest.slice(1), valueFlags);
+        if (selectors.length !== 1)
+          throw new Error("usage: oar model set <provider>/<model-id> [--thinking level]");
+        const { provider, model } = parseModelSelector(selectors[0]);
+        const thinkingIdx = rest.indexOf("--thinking");
+        const thinking = thinkingIdx >= 0 ? rest[thinkingIdx + 1] : undefined;
+        const res = await req({
+          protocol: 1,
+          action: "model-pin-set",
+          provider,
+          model,
+          ...thinking ? { thinking } : {}
+        });
+        if (!res.ok)
+          throw new Error(res.error);
+        printModelPin(res.data, rest.includes("--json"));
+        return;
+      }
+      if (sub === "status") {
+        rejectUnknownFlags(rest.slice(1), new Set(["--json"]));
+        const res = await req({ protocol: 1, action: "model-pin-status" });
+        if (!res.ok)
+          throw new Error(res.error);
+        printModelPin(res.data, rest.includes("--json"));
+        return;
+      }
+      if (sub === "clear") {
+        rejectUnknownFlags(rest.slice(1), new Set([]));
+        const res = await req({ protocol: 1, action: "model-pin-clear" });
+        if (!res.ok)
+          throw new Error(res.error);
+        printModelPin(res.data, false);
+        return;
+      }
+      throw new Error("usage: oar model set|status|clear");
     }
     case "schedule": {
       const sub = rest[0];
