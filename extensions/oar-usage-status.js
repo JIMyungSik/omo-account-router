@@ -1,12 +1,13 @@
 /**
  * OMO/Senpi footer: live Grok + Codex remaining % from `oar panel --json`.
  *
- * Install (also done by scripts/install.sh):
+ * Install (also done by scripts/install.sh on macOS/Linux and scripts/install.ps1 on Windows):
  *   ln -sf .../extensions/oar-usage-status.js ~/.omo/agent/extensions/oar-usage-status.js
  *
  * Toggle: /oar-usage
  */
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -16,8 +17,13 @@ const STATUS_KEY = "oar-usage";
 const INTERVAL_MS = 60_000;
 const FETCH_TIMEOUT_MS = 15_000;
 
+const IS_WINDOWS = process.platform === "win32";
+
+/** OAR_BIN, else the installer's launcher, else whatever `oar` is on PATH (npm -g). */
 function oarBin() {
-  return process.env.OAR_BIN || join(homedir(), ".local/bin/oar");
+  if (process.env.OAR_BIN) return process.env.OAR_BIN;
+  const local = join(homedir(), ".local", "bin", IS_WINDOWS ? "oar.cmd" : "oar");
+  return existsSync(local) ? local : "oar";
 }
 
 function isCodexProvider(provider) {
@@ -87,10 +93,13 @@ export default function (pi) {
     if (!enabled || !ctx?.hasUI || inFlight) return;
     inFlight = true;
     try {
-      const { stdout } = await execFileAsync(oarBin(), ["panel", "--json"], {
+      // Windows cannot spawn .cmd launchers without a shell, so quote the path for it.
+      const bin = IS_WINDOWS ? `"${oarBin()}"` : oarBin();
+      const { stdout } = await execFileAsync(bin, ["panel", "--json"], {
         timeout: FETCH_TIMEOUT_MS,
         env: process.env,
         encoding: "utf8",
+        shell: IS_WINDOWS,
       });
       const snap = JSON.parse(stdout);
       const text = formatOarUsageStatus(snap);

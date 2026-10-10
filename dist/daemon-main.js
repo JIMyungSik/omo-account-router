@@ -2,9 +2,80 @@
 // @bun
 
 // src/daemon.ts
-import { chmodSync as chmodSync5, existsSync as existsSync13, mkdirSync as mkdirSync7, unlinkSync, writeFileSync as writeFileSync6 } from "node:fs";
+import { chmodSync as chmodSync5, existsSync as existsSync14, mkdirSync as mkdirSync7, unlinkSync as unlinkSync2, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer } from "node:net";
 import { dirname as dirname8 } from "node:path";
+
+// src/paths.ts
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+function defaultOarRoot(env = process.env) {
+  if (env.OAR_HOME)
+    return env.OAR_HOME;
+  return join(homedir(), ".oar");
+}
+var WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\";
+function isNamedPipePath(socketPath) {
+  return socketPath.startsWith(WINDOWS_PIPE_PREFIX);
+}
+function oarPidPath(socketPath, root = defaultOarRoot()) {
+  return isNamedPipePath(socketPath) ? join(root, "oar.pid") : `${socketPath}.pid`;
+}
+function oarStatePath(root = defaultOarRoot()) {
+  return join(root, "state.json");
+}
+function oarVaultDir(root = defaultOarRoot()) {
+  return join(root, "vault");
+}
+function oarEventsPath(root = defaultOarRoot()) {
+  return join(root, "events.jsonl");
+}
+function oarPromotionPath(root = defaultOarRoot()) {
+  return join(root, "promotion.json");
+}
+function oarModelPinPath(root = defaultOarRoot()) {
+  return join(root, "model-pin.json");
+}
+function oarQueuePath(root = defaultOarRoot()) {
+  return join(root, "queue.json");
+}
+function oarQueueDir(root = defaultOarRoot()) {
+  return join(root, "queue");
+}
+function unique(paths) {
+  const out = [];
+  for (const p of paths) {
+    if (!out.includes(p))
+      out.push(p);
+  }
+  return out;
+}
+function resolveActiveAuthPaths(env = process.env, home = homedir()) {
+  if (env.OAR_AUTH_PATH)
+    return unique([env.OAR_AUTH_PATH]);
+  const envDirs = [
+    env.OAR_AUTH_DIR,
+    env.OMO_CODING_AGENT_DIR,
+    env.SENPI_CODING_AGENT_DIR,
+    env.PI_CODING_AGENT_DIR
+  ].filter((v) => typeof v === "string" && v.length > 0);
+  const known = knownAuthJsonCandidates(home);
+  const existing = known.filter((p) => existsSync(p));
+  const selected = envDirs.length > 0 ? envDirs.map((dir) => join(dir, "auth.json")) : [];
+  const targets = unique([...selected, ...existing]);
+  if (targets.length > 0)
+    return targets;
+  return [join(home, ".omo", "agent", "auth.json")];
+}
+function knownAuthJsonCandidates(home) {
+  return unique([
+    join(home, ".omo", "agent", "auth.json"),
+    join(home, ".omo", "auth.json"),
+    join(home, ".senpi", "agent", "auth.json"),
+    join(home, ".senpi", "remote-agent", "auth.json")
+  ]);
+}
 
 // src/provider-alias.ts
 var PROVIDER_ALIASES = {
@@ -543,21 +614,21 @@ import {
 import { dirname as dirname2 } from "node:path";
 
 // src/senpi-install.ts
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync as existsSync2, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir as homedir2 } from "node:os";
+import { dirname, join as join2 } from "node:path";
 var KNOWN_OMO = "/opt/homebrew/lib/node_modules/omo-ai";
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 function fromOmoRoot(omoRoot) {
-  const omoPkg = join(omoRoot, "package.json");
-  const senpiRoot = join(omoRoot, "node_modules", "@code-yeongyu", "senpi");
-  const senpiPkg = join(senpiRoot, "package.json");
-  const authStoragePath = join(senpiRoot, "dist", "core", "auth-storage.js");
-  const pluginRoot = join(omoRoot, "plugin");
-  if (!existsSync(omoPkg) || !existsSync(senpiPkg) || !existsSync(authStoragePath))
+  const omoPkg = join2(omoRoot, "package.json");
+  const senpiRoot = join2(omoRoot, "node_modules", "@code-yeongyu", "senpi");
+  const senpiPkg = join2(senpiRoot, "package.json");
+  const authStoragePath = join2(senpiRoot, "dist", "core", "auth-storage.js");
+  const pluginRoot = join2(omoRoot, "plugin");
+  if (!existsSync2(omoPkg) || !existsSync2(senpiPkg) || !existsSync2(authStoragePath))
     return null;
   const omo = readJson(omoPkg);
   const senpi = readJson(senpiPkg);
@@ -577,8 +648,8 @@ function findSenpiInstall() {
     candidates.push(dirname(require2.resolve("omo-ai/package.json")));
   } catch {}
   candidates.push(KNOWN_OMO);
-  const homebrew = join(homedir(), ".nvm", "versions");
-  if (existsSync(homebrew)) {}
+  const homebrew = join2(homedir2(), ".nvm", "versions");
+  if (existsSync2(homebrew)) {}
   for (const root of candidates) {
     const found = fromOmoRoot(root);
     if (found)
@@ -674,67 +745,6 @@ function subjectFromCredential(cred) {
     return;
   const subject = decodeJwtPayload(cred.access)?.sub;
   return typeof subject === "string" && subject.length > 0 ? subject : undefined;
-}
-
-// src/paths.ts
-import { existsSync as existsSync2 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
-function defaultOarRoot(env = process.env) {
-  if (env.OAR_HOME)
-    return env.OAR_HOME;
-  return join2(homedir2(), ".oar");
-}
-function oarStatePath(root = defaultOarRoot()) {
-  return join2(root, "state.json");
-}
-function oarVaultDir(root = defaultOarRoot()) {
-  return join2(root, "vault");
-}
-function oarEventsPath(root = defaultOarRoot()) {
-  return join2(root, "events.jsonl");
-}
-function oarPromotionPath(root = defaultOarRoot()) {
-  return join2(root, "promotion.json");
-}
-function oarQueuePath(root = defaultOarRoot()) {
-  return join2(root, "queue.json");
-}
-function oarQueueDir(root = defaultOarRoot()) {
-  return join2(root, "queue");
-}
-function unique(paths) {
-  const out = [];
-  for (const p of paths) {
-    if (!out.includes(p))
-      out.push(p);
-  }
-  return out;
-}
-function resolveActiveAuthPaths(env = process.env, home = homedir2()) {
-  if (env.OAR_AUTH_PATH)
-    return unique([env.OAR_AUTH_PATH]);
-  const envDirs = [
-    env.OAR_AUTH_DIR,
-    env.OMO_CODING_AGENT_DIR,
-    env.SENPI_CODING_AGENT_DIR,
-    env.PI_CODING_AGENT_DIR
-  ].filter((v) => typeof v === "string" && v.length > 0);
-  const known = knownAuthJsonCandidates(home);
-  const existing = known.filter((p) => existsSync2(p));
-  const selected = envDirs.length > 0 ? envDirs.map((dir) => join2(dir, "auth.json")) : [];
-  const targets = unique([...selected, ...existing]);
-  if (targets.length > 0)
-    return targets;
-  return [join2(home, ".omo", "agent", "auth.json")];
-}
-function knownAuthJsonCandidates(home) {
-  return unique([
-    join2(home, ".omo", "agent", "auth.json"),
-    join2(home, ".omo", "auth.json"),
-    join2(home, ".senpi", "agent", "auth.json"),
-    join2(home, ".senpi", "remote-agent", "auth.json")
-  ]);
 }
 
 // src/auth-slot.ts
@@ -1665,13 +1675,62 @@ class PromotionStore {
   }
 }
 
+// src/model-pin.ts
+import { randomUUID } from "node:crypto";
+import { existsSync as existsSync9, readFileSync as readFileSync6, unlinkSync } from "node:fs";
+function modelPinStatusView(pin) {
+  return pin ? { active: true, modelSelector: `${pin.provider}/${pin.model}`, ...pin } : { active: false };
+}
+
+class ModelPinStore {
+  rootDir;
+  path;
+  constructor(opts) {
+    this.rootDir = opts?.rootDir ?? defaultOarRoot();
+    this.path = oarModelPinPath(this.rootDir);
+  }
+  get() {
+    if (!existsSync9(this.path))
+      return;
+    try {
+      const parsed = JSON.parse(readFileSync6(this.path, "utf8"));
+      if (!parsed?.id || !parsed.provider || !parsed.model)
+        return;
+      return {
+        id: parsed.id,
+        provider: parsed.provider,
+        model: parsed.model,
+        ...parsed.thinking ? { thinking: parsed.thinking } : {},
+        setAt: parsed.setAt ?? new Date(0).toISOString()
+      };
+    } catch {
+      return;
+    }
+  }
+  set(input, nowMs = Date.now()) {
+    const pin = {
+      id: randomUUID(),
+      provider: input.provider,
+      model: input.model,
+      ...input.thinking ? { thinking: input.thinking } : {},
+      setAt: new Date(nowMs).toISOString()
+    };
+    atomicWriteJson2(this.path, pin, 384);
+    return pin;
+  }
+  clear() {
+    if (existsSync9(this.path))
+      unlinkSync(this.path);
+  }
+}
+
 // src/queue-manager.ts
-import { existsSync as existsSync11 } from "node:fs";
+import { existsSync as existsSync12 } from "node:fs";
 import { join as join7, resolve } from "node:path";
 
 // src/queue-runner.ts
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync as appendFileSync2, existsSync as existsSync9, mkdirSync as mkdirSync5, statSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { appendFileSync as appendFileSync2, existsSync as existsSync10, mkdirSync as mkdirSync5, statSync, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname6, join as join5 } from "node:path";
 var OAR_RESULT_DONE = "OAR_RESULT: DONE";
 var OAR_RESULT_INCOMPLETE_PREFIX = "OAR_RESULT: INCOMPLETE:";
@@ -1723,7 +1782,7 @@ function buildOmoArgv(opts) {
 function inspectRepositoryPath(repository) {
   if (!repository)
     return { ok: false, error: "repository is required" };
-  if (!existsSync9(repository))
+  if (!existsSync10(repository))
     return { ok: false, error: `repository not found: ${repository}` };
   try {
     if (!statSync(repository).isDirectory()) {
@@ -1757,7 +1816,7 @@ function inspectRepository(repository) {
 }
 function addIsolatedWorktree(opts) {
   mkdirSync5(dirname6(opts.worktreeDir), { recursive: true, mode: 448 });
-  if (existsSync9(opts.worktreeDir)) {
+  if (existsSync10(opts.worktreeDir)) {
     return { ok: false, error: `worktree path already exists: ${opts.worktreeDir}` };
   }
   const added = spawnSync("git", ["-C", opts.repository, "worktree", "add", "--detach", opts.worktreeDir, "HEAD"], { encoding: "utf8" });
@@ -2006,7 +2065,7 @@ function createOmoQueueRunner(command = { bin: "omo" }) {
 }
 
 // src/queue-store.ts
-import { existsSync as existsSync10, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync11, readFileSync as readFileSync7 } from "node:fs";
 import { join as join6 } from "node:path";
 var QUEUE_ISOLATION_STRATEGIES = ["worktree", "none"];
 var DEFAULT_QUEUE_ISOLATION = "worktree";
@@ -2262,11 +2321,11 @@ class QueueStore {
     return interrupted;
   }
   load() {
-    if (!existsSync10(this.path)) {
+    if (!existsSync11(this.path)) {
       return { version: 1, tasks: [], updatedAt: new Date(0).toISOString() };
     }
     try {
-      const parsed = JSON.parse(readFileSync6(this.path, "utf8"));
+      const parsed = JSON.parse(readFileSync7(this.path, "utf8"));
       if (parsed?.version !== 1 || !Array.isArray(parsed.tasks)) {
         return { version: 1, tasks: [], updatedAt: new Date(0).toISOString() };
       }
@@ -2514,7 +2573,7 @@ class QueueManager {
       let cwd = resolve(task.repository);
       if (isolation === "worktree") {
         const worktreeDir = task.worktreeDir ?? join7(baseDir, "work");
-        if (!task.worktreeDir || !existsSync11(worktreeDir)) {
+        if (!task.worktreeDir || !existsSync12(worktreeDir)) {
           const isolated = this.isolateWorktree({ repository: resolve(task.repository), worktreeDir });
           if (!isolated.ok) {
             finishSetupFailure(isolated.error);
@@ -2966,7 +3025,7 @@ class OarRouter {
 }
 
 // src/usage/cache.ts
-import { existsSync as existsSync12, mkdirSync as mkdirSync6, readFileSync as readFileSync7, renameSync as renameSync4, writeFileSync as writeFileSync5, chmodSync as chmodSync4 } from "node:fs";
+import { existsSync as existsSync13, mkdirSync as mkdirSync6, readFileSync as readFileSync8, renameSync as renameSync4, writeFileSync as writeFileSync5, chmodSync as chmodSync4 } from "node:fs";
 import { dirname as dirname7, join as join8 } from "node:path";
 function usageCachePath(root = defaultOarRoot()) {
   return join8(root, "usage-cache.json");
@@ -2976,10 +3035,10 @@ function cacheKey(provider, profile) {
 }
 function loadUsageCache(root = defaultOarRoot()) {
   const path = usageCachePath(root);
-  if (!existsSync12(path))
+  if (!existsSync13(path))
     return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
   try {
-    const parsed = JSON.parse(readFileSync7(path, "utf8"));
+    const parsed = JSON.parse(readFileSync8(path, "utf8"));
     if (parsed?.version !== 1 || !parsed.entries) {
       return { version: 1, updatedAt: new Date(0).toISOString(), entries: {} };
     }
@@ -3022,7 +3081,7 @@ function putCachedUsage(entry, root = defaultOarRoot()) {
 }
 
 // src/import-all.ts
-import { readFileSync as readFileSync8 } from "node:fs";
+import { readFileSync as readFileSync9 } from "node:fs";
 function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -3047,7 +3106,7 @@ function isStoredCredential(value) {
 function parseAuthJsonFile(authPath) {
   let raw;
   try {
-    raw = readFileSync8(authPath, "utf8");
+    raw = readFileSync9(authPath, "utf8");
   } catch {
     throw new Error(`unable to read ${authPath}`);
   }
@@ -3791,6 +3850,7 @@ class OarDaemon {
   now;
   useWallPromotionTimer;
   promotionStore;
+  modelPinStore;
   queueStore;
   queueManager;
   queueListeners = new Set;
@@ -3812,6 +3872,7 @@ class OarDaemon {
     this.now = opts.now ?? Date.now;
     this.useWallPromotionTimer = opts.now == null;
     this.promotionStore = new PromotionStore({ rootDir: opts.store.rootDir });
+    this.modelPinStore = new ModelPinStore({ rootDir: opts.store.rootDir });
     this.queueStore = new QueueStore({ rootDir: opts.store.rootDir });
     this.queueManager = new QueueManager({
       store: this.queueStore,
@@ -3875,10 +3936,11 @@ class OarDaemon {
     return this.leases;
   }
   async start() {
-    mkdirSync7(dirname8(this.socketPath), { recursive: true, mode: 448 });
-    if (existsSync13(this.socketPath)) {
+    const namedPipe = isNamedPipePath(this.socketPath);
+    mkdirSync7(namedPipe ? this.store.rootDir : dirname8(this.socketPath), { recursive: true, mode: 448 });
+    if (!namedPipe && existsSync14(this.socketPath)) {
       try {
-        unlinkSync(this.socketPath);
+        unlinkSync2(this.socketPath);
       } catch {}
     }
     this.server = createServer((socket) => this.handleSocket(socket));
@@ -3886,12 +3948,13 @@ class OarDaemon {
       this.server.once("error", reject);
       this.server.listen(this.socketPath, () => {
         try {
-          chmodSync5(this.socketPath, 384);
+          if (!namedPipe)
+            chmodSync5(this.socketPath, 384);
         } catch {}
         resolve();
       });
     });
-    writeFileSync6(`${this.socketPath}.pid`, String(process.pid), { mode: 384 });
+    writeFileSync6(oarPidPath(this.socketPath, this.store.rootDir), String(process.pid), { mode: 384 });
     this.running = true;
     this.lifecycleEpoch += 1;
     this.events.append({ ts: new Date().toISOString(), event: "daemon_start", pid: process.pid });
@@ -3924,15 +3987,15 @@ class OarDaemon {
       this.server.close(() => resolve());
     });
     this.server = null;
-    if (existsSync13(this.socketPath)) {
+    if (!isNamedPipePath(this.socketPath) && existsSync14(this.socketPath)) {
       try {
-        unlinkSync(this.socketPath);
+        unlinkSync2(this.socketPath);
       } catch {}
     }
-    const pidPath = `${this.socketPath}.pid`;
-    if (existsSync13(pidPath)) {
+    const pidPath = oarPidPath(this.socketPath, this.store.rootDir);
+    if (existsSync14(pidPath)) {
       try {
-        unlinkSync(pidPath);
+        unlinkSync2(pidPath);
       } catch {}
     }
     this.events.append({ ts: new Date().toISOString(), event: "daemon_stop", pid: process.pid });
@@ -4632,6 +4695,25 @@ class OarDaemon {
           return { ok: false, error: error instanceof Error ? error.message : String(error) };
         }
       }
+      case "model-pin-set": {
+        if (typeof req.provider !== "string" || !req.provider.trim() || typeof req.model !== "string" || !req.model.trim()) {
+          return { ok: false, error: "provider and model are required" };
+        }
+        const pin = this.modelPinStore.set({ provider: req.provider.trim(), model: req.model.trim(), thinking: req.thinking }, this.now());
+        this.events.append({
+          ts: pin.setAt,
+          event: "model-pin-set",
+          reason: `${pin.provider}/${pin.model}`
+        });
+        return { ok: true, data: modelPinStatusView(pin) };
+      }
+      case "model-pin-status":
+        return { ok: true, data: modelPinStatusView(this.modelPinStore.get()) };
+      case "model-pin-clear": {
+        this.modelPinStore.clear();
+        this.events.append({ ts: new Date(this.now()).toISOString(), event: "model-pin-clear" });
+        return { ok: true, data: modelPinStatusView(undefined) };
+      }
       case "schedule-status":
         return { ok: true, data: promotionStatusView(this.promotionStore.get(), this.now()) };
       case "schedule-off": {
@@ -4700,7 +4782,8 @@ class OarDaemon {
 }
 
 // src/paths.ts
-import { existsSync as existsSync14 } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync as existsSync15 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join9 } from "node:path";
 function defaultOarRoot2(env = process.env) {
@@ -4708,7 +4791,12 @@ function defaultOarRoot2(env = process.env) {
     return env.OAR_HOME;
   return join9(homedir4(), ".oar");
 }
-function oarSocketPath(root = defaultOarRoot2()) {
+var WINDOWS_PIPE_PREFIX2 = "\\\\.\\pipe\\";
+function oarSocketPath(root = defaultOarRoot2(), platform = process.platform) {
+  if (platform === "win32") {
+    const id = createHash("sha1").update(root.toLowerCase()).digest("hex").slice(0, 12);
+    return `${WINDOWS_PIPE_PREFIX2}oar-${id}`;
+  }
   return join9(root, "oar.sock");
 }
 function unique2(paths) {
@@ -4729,7 +4817,7 @@ function resolveActiveAuthPaths2(env = process.env, home = homedir4()) {
     env.PI_CODING_AGENT_DIR
   ].filter((v) => typeof v === "string" && v.length > 0);
   const known = knownAuthJsonCandidates2(home);
-  const existing = known.filter((p) => existsSync14(p));
+  const existing = known.filter((p) => existsSync15(p));
   const selected = envDirs.length > 0 ? envDirs.map((dir) => join9(dir, "auth.json")) : [];
   const targets = unique2([...selected, ...existing]);
   if (targets.length > 0)
@@ -4748,11 +4836,11 @@ function knownAuthJsonCandidates2(home) {
 // src/store.ts
 import {
   chmodSync as chmodSync6,
-  existsSync as existsSync15,
+  existsSync as existsSync16,
   mkdirSync as mkdirSync8,
-  readFileSync as readFileSync9,
+  readFileSync as readFileSync10,
   renameSync as renameSync5,
-  unlinkSync as unlinkSync2,
+  unlinkSync as unlinkSync3,
   writeFileSync as writeFileSync7
 } from "node:fs";
 import { dirname as dirname9, join as join10 } from "node:path";
@@ -4813,14 +4901,14 @@ class OarStore {
   renameVaultFile(from, to, profile) {
     const oldPath = join10(this.vaultDir, `${from}__${profile}.json`);
     const nextPath = join10(this.vaultDir, `${to}__${profile}.json`);
-    if (existsSync15(oldPath) && !existsSync15(nextPath))
+    if (existsSync16(oldPath) && !existsSync16(nextPath))
       renameSync5(oldPath, nextPath);
   }
   load() {
-    if (!existsSync15(this.statePath))
+    if (!existsSync16(this.statePath))
       return emptyState();
     try {
-      const parsed = JSON.parse(readFileSync9(this.statePath, "utf8"));
+      const parsed = JSON.parse(readFileSync10(this.statePath, "utf8"));
       if (parsed?.version !== 1)
         return emptyState();
       return {
@@ -4865,11 +4953,11 @@ class OarStore {
     const canonical = resolveProvider(provider);
     const vaultPath = this.vaultPath(canonical, profile);
     const legacyPath = join10(this.vaultDir, `${provider}__${profile}.json`);
-    if (existsSync15(vaultPath)) {
-      unlinkSync2(vaultPath);
+    if (existsSync16(vaultPath)) {
+      unlinkSync3(vaultPath);
     }
-    if (legacyPath !== vaultPath && existsSync15(legacyPath))
-      unlinkSync2(legacyPath);
+    if (legacyPath !== vaultPath && existsSync16(legacyPath))
+      unlinkSync3(legacyPath);
     this.state.accounts = this.state.accounts.filter((a) => !(resolveProvider(a.provider) === canonical && a.profile === profile));
     const policy = this.state.providers[canonical] ?? this.state.providers[provider];
     if (policy?.preferred === profile) {
@@ -4940,10 +5028,10 @@ class OarStore {
   }
   getVaultCredential(provider, profile) {
     const path = this.vaultPath(provider, profile);
-    if (!existsSync15(path))
+    if (!existsSync16(path))
       return;
     try {
-      return JSON.parse(readFileSync9(path, "utf8"));
+      return JSON.parse(readFileSync10(path, "utf8"));
     } catch {
       return;
     }
