@@ -222,7 +222,8 @@ function createModelPinController({
   clearTimeoutFn = clearTimeout,
   refreshMs = DEFAULT_REFRESH_MS,
   env = process.env,
-  precompact
+  precompact,
+  startedAt = Date.now()
 } = {}) {
   let disposed = false;
   let timer;
@@ -260,10 +261,13 @@ function createModelPinController({
     const pin = res?.ok ? res.data : undefined;
     if (disposed || pin?.active !== true || !pin.id || !pin.provider || !pin.model)
       return false;
+    const setAt = Date.parse(pin.setAt);
+    if (Number.isFinite(setAt) && setAt < startedAt)
+      return false;
     if (appliedPinId(ctx.sessionManager?.getEntries?.() ?? []) === pin.id)
-      return true;
+      return false;
     if (failedPinId === pin.id)
-      return true;
+      return false;
     const current = ctx.model;
     const alreadyThere = current?.provider === pin.provider && current?.id === pin.model;
     if (!alreadyThere) {
@@ -363,6 +367,7 @@ function createPromotionController({
   let ctxRef;
   let chain = Promise.resolve();
   let lastZeroAt;
+  let lastSeen;
   function persist(pi, data) {
     if (typeof pi.appendEntry !== "function")
       return;
@@ -440,7 +445,14 @@ function createPromotionController({
     }
   }
   async function restoreOriginal(pi, ctx, { original, promotional }) {
-    if (sameModel(snapshotSessionModel(pi, ctx), original)) {
+    const current = snapshotSessionModel(pi, ctx);
+    if (!sameModel(current, original) && !sameModel(current, promotional)) {
+      if (latestPromotionRecord(ctx.sessionManager?.getEntries?.() ?? [])?.phase !== "restored") {
+        persist(pi, { phase: "restored", original, promotional });
+      }
+      return;
+    }
+    if (sameModel(current, original)) {
       if (latestPromotionRecord(ctx.sessionManager?.getEntries?.() ?? [])?.phase !== "restored") {
         persist(pi, { phase: "restored", original, promotional });
       }
@@ -498,8 +510,11 @@ function createPromotionController({
     const promo = { provider: data.provider, id: data.model };
     const recorded = latestPromotionRecord(ctx.sessionManager?.getEntries?.() ?? []);
     const current = snapshotSessionModel(pi, ctx);
+    const key = want ? `${promo.provider}/${promo.id}` : "";
+    const changed = lastSeen !== undefined && (lastSeen.want !== want || lastSeen.key !== key);
+    lastSeen = { want, key };
     if (want) {
-      if (!promo.provider || !promo.id) {
+      if (!promo.provider || !promo.id || !changed) {
         arm(nextBoundary);
         return;
       }

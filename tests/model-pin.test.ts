@@ -85,6 +85,27 @@ describe("model pin controller", () => {
     expect(s.entries).toHaveLength(0);
   });
 
+  test("applies only to sessions alive when the pin was set, and stops claiming it afterwards", async () => {
+    const startedAt = Date.parse("2026-10-11T01:00:00Z");
+    const before = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
+    const late = createModelPinController({
+      requestFn: async () => pinStatus({ setAt: "2026-10-11T00:00:00Z" }),
+      startedAt,
+    });
+    expect(await late.sync(before.pi, before.ctx)).toBe(false);
+    expect(before.ctx.model).toEqual({ provider: "xai", id: "grok-4.5" });
+    expect(before.entries).toHaveLength(0);
+
+    const live = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
+    const alive = createModelPinController({
+      requestFn: async () => pinStatus({ setAt: "2026-10-11T02:00:00Z" }),
+      startedAt,
+    });
+    expect(await alive.sync(live.pi, live.ctx)).toBe(true);
+    expect(live.ctx.model).toEqual({ provider: "opengateway", id: "deepseek/x" });
+    expect(await alive.sync(live.pi, live.ctx)).toBe(false);
+  });
+
   test("unknown model is not recorded as applied and is not retried", async () => {
     const s = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" }, false);
     let calls = 0;
