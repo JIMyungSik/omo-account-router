@@ -101,10 +101,10 @@ export function appliedPinId(entries) {
 }
 
 /**
- * `oar model set` pins one model for every OMO session. Each session applies a
- * given pin id once (persisted in the session), so later manual /model changes
- * stick until the next `oar model set`. Sessions started after the pin pick it
- * up too, until `oar model clear`.
+ * `oar model set` switches the OMO sessions alive at that moment, once. A session
+ * applies a given pin id once (persisted in the session) and ignores a pin that
+ * was set before it started, so nothing forces a model afterwards and later
+ * manual /model changes stick.
  *
  * Before the switch the session is compacted once, so a big context cannot stop
  * the new model from taking effect.
@@ -116,6 +116,7 @@ export function createModelPinController({
   refreshMs = DEFAULT_REFRESH_MS,
   env = process.env,
   precompact,
+  startedAt = Date.now(),
 } = {}) {
   let disposed = false;
   let timer;
@@ -149,8 +150,10 @@ export function createModelPinController({
     }
     const pin = res?.ok ? res.data : undefined;
     if (disposed || pin?.active !== true || !pin.id || !pin.provider || !pin.model) return false;
-    if (appliedPinId(ctx.sessionManager?.getEntries?.() ?? []) === pin.id) return true;
-    if (failedPinId === pin.id) return true;
+    const setAt = Date.parse(pin.setAt);
+    if (Number.isFinite(setAt) && setAt < startedAt) return false;
+    if (appliedPinId(ctx.sessionManager?.getEntries?.() ?? []) === pin.id) return false;
+    if (failedPinId === pin.id) return false;
 
     const current = ctx.model;
     const alreadyThere = current?.provider === pin.provider && current?.id === pin.model;
@@ -190,7 +193,7 @@ export function createModelPinController({
   }
 
   return {
-    /** Resolves true while a pin is active, so callers can skip competing model overrides. */
+    /** Resolves true on the sync that applies (or is about to apply) a pin, so callers skip competing overrides then. */
     sync: enqueue,
     dispose() {
       disposed = true;

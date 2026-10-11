@@ -551,12 +551,13 @@ oar schedule off
 ```
 
 OMO sessions that load the OAR extension, including child sessions, switch to
-the promotional model inside the window and restore **that session's** previous
-model and thinking outside it, after disable, and on resume. Loaded sessions
-switch at the wall-clock boundary, not only on the next prompt, and re-check on
-every agent turn. After a window ends, a later manual model choice is kept; the
-next window captures that current model. Failures leave the original model in
-place. Already-open sessions need the updated extension loaded; OAR does not
+the promotional model when the window opens (or its model changes) under a
+running session and restore **that session's** previous model and thinking when
+it closes, after disable, and on resume. The switch happens once, at that
+wall-clock boundary; a session that starts mid-window is not switched, and a
+model you pick afterwards is never forced back. If you picked another model
+during the window, the close leaves it alone, and the next window captures that
+current model. Failures leave the original model in place. Already-open sessions need the updated extension loaded; OAR does not
 hot-inject into a running process. Per-session `pi.setModel` is used — OMO
 category defaults are not rewritten.
 

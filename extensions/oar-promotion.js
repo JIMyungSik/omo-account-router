@@ -53,6 +53,7 @@ export function createPromotionController({
   let ctxRef;
   let chain = Promise.resolve();
   let lastZeroAt;
+  let lastSeen;
 
   function persist(pi, data) {
     if (typeof pi.appendEntry !== "function") return;
@@ -129,7 +130,15 @@ export function createPromotionController({
   }
 
   async function restoreOriginal(pi, ctx, { original, promotional }) {
-    if (sameModel(snapshotSessionModel(pi, ctx), original)) {
+    const current = snapshotSessionModel(pi, ctx);
+    if (!sameModel(current, original) && !sameModel(current, promotional)) {
+      // The user picked another model during the window; restoring would undo that choice.
+      if (latestPromotionRecord(ctx.sessionManager?.getEntries?.() ?? [])?.phase !== "restored") {
+        persist(pi, { phase: "restored", original, promotional });
+      }
+      return;
+    }
+    if (sameModel(current, original)) {
       if (latestPromotionRecord(ctx.sessionManager?.getEntries?.() ?? [])?.phase !== "restored") {
         persist(pi, { phase: "restored", original, promotional });
       }
@@ -188,8 +197,14 @@ export function createPromotionController({
     const recorded = latestPromotionRecord(ctx.sessionManager?.getEntries?.() ?? []);
     const current = snapshotSessionModel(pi, ctx);
 
+    // The switch happens at the instant the schedule changes under a live session, never on
+    // session start or on a later tick, so a model the user picks afterwards is not overridden.
+    const key = want ? `${promo.provider}/${promo.id}` : "";
+    const changed = lastSeen !== undefined && (lastSeen.want !== want || lastSeen.key !== key);
+    lastSeen = { want, key };
+
     if (want) {
-      if (!promo.provider || !promo.id) {
+      if (!promo.provider || !promo.id || !changed) {
         arm(nextBoundary);
         return;
       }

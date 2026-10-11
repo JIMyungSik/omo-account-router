@@ -135,13 +135,14 @@ COMMANDS
       runs it every OAR_QUOTA_POLL_SEC seconds (default 60; 0 disables).
 
   oar model set <provider>/<model-id> [--thinking off|minimal|low|medium|high|xhigh]
-      Switch EVERY OMO session (running and newly started) to this model.
-      Sessions pick it up on their next turn or within ~30s when idle, and apply
-      it once, so a later manual /model change in a session sticks. Before the
+      Switch every OMO session that is running right now to this model, once.
+      Sessions pick it up on their next turn or within ~30s when idle. Nothing
+      forces the model afterwards: sessions started later ignore the pin, and a
+      later manual /model change in a session sticks. Before the
       switch a session with real context is compacted once, so a large context
       cannot stop the new model from taking effect. Tune or disable that with
-      OAR_MODEL_PIN_PRECOMPACT=0 and OAR_MODEL_PIN_PRECOMPACT_MIN_TOKENS. It also
-      overrides the promotional window while set. Running sessions need an OAR
+      OAR_MODEL_PIN_PRECOMPACT=0 and OAR_MODEL_PIN_PRECOMPACT_MIN_TOKENS. Running
+      sessions need an OAR
       extension that includes this feature (restart omo sessions started before
       the update).
 
@@ -149,7 +150,7 @@ COMMANDS
       Show the pinned model, if any.
 
   oar model clear
-      Stop applying the pin to new sessions. Sessions keep their current model.
+      Forget the pin. Sessions keep their current model.
 
   oar schedule configure [--timezone TZ] [--start HH:MM] [--end HH:MM]
                          [--provider id] [--model id] [--concurrency N]

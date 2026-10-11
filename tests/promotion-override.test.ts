@@ -101,14 +101,20 @@ function createTimers() {
   };
 }
 
+const ASTRA = { provider: "chatgpt-subscription", id: "gpt-6-astra" };
+const GROK = { provider: "xai", id: "grok-4.5" };
+
 describe("promotional session override", () => {
-  test("applies and restores model and thinking at the window boundary", async () => {
+  test("switches at the window boundary it witnesses and restores at the end", async () => {
     const session = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
-    let inWindow = true;
+    let inWindow = false;
     const controller = createPromotionController({
       requestFn: async () => status(inWindow),
     });
+    await controller.sync(session.pi, session.ctx);
+    expect(session.ctx.model).toEqual(GROK);
 
+    inWindow = true;
     await controller.sync(session.pi, session.ctx);
     expect(session.ctx.model).toEqual(PROMO);
     expect(latestPromotionRecord(session.entries)?.phase).toBe("applied");
@@ -120,29 +126,42 @@ describe("promotional session override", () => {
 
     inWindow = false;
     await controller.sync(session.pi, session.ctx);
-    expect(session.ctx.model).toEqual({ provider: "xai", id: "grok-4.5" });
+    expect(session.ctx.model).toEqual(GROK);
     expect(session.pi.getThinkingLevel()).toBe("high");
     expect(latestPromotionRecord(session.entries)?.phase).toBe("restored");
     expect(isActivePromotionRecord(latestPromotionRecord(session.entries))).toBe(false);
   });
 
+  test("a session started inside the window is never switched", async () => {
+    const session = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
+    const controller = createPromotionController({ requestFn: async () => status(true) });
+    for (let i = 0; i < 3; i += 1) await controller.sync(session.pi, session.ctx);
+    expect(session.ctx.model).toEqual(GROK);
+    expect(session.entries).toHaveLength(0);
+  });
+
   test("disable restores the original model", async () => {
     const session = createSession({ provider: "xai", id: "grok-4.5", thinking: "medium" });
-    let enabled = true;
+    let enabled = false;
     const controller = createPromotionController({
       requestFn: async () => status(true, enabled),
     });
     await controller.sync(session.pi, session.ctx);
+    enabled = true;
+    await controller.sync(session.pi, session.ctx);
     expect(session.ctx.model).toEqual(PROMO);
     enabled = false;
     await controller.sync(session.pi, session.ctx);
-    expect(session.ctx.model).toEqual({ provider: "xai", id: "grok-4.5" });
+    expect(session.ctx.model).toEqual(GROK);
     expect(session.pi.getThinkingLevel()).toBe("medium");
   });
 
   test("resume uses persisted original instead of the restored promotional model", async () => {
     const parent = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
-    const apply = createPromotionController({ requestFn: async () => status(true) });
+    let inWindow = false;
+    const apply = createPromotionController({ requestFn: async () => status(inWindow) });
+    await apply.sync(parent.pi, parent.ctx);
+    inWindow = true;
     await apply.sync(parent.pi, parent.ctx);
     expect(parent.ctx.model).toEqual(PROMO);
 
@@ -154,12 +173,12 @@ describe("promotional session override", () => {
     resumed.entries.push(...parent.entries);
     const restore = createPromotionController({ requestFn: async () => status(false) });
     await restore.sync(resumed.pi, resumed.ctx);
-    expect(resumed.ctx.model).toEqual({ provider: "xai", id: "grok-4.5" });
+    expect(resumed.ctx.model).toEqual(GROK);
     expect(resumed.pi.getThinkingLevel()).toBe("high");
   });
 
   test("child sessions keep their own original model and thinking", async () => {
-    let inWindow = true;
+    let inWindow = false;
     const requestFn = async () => status(inWindow);
     const parent = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
     const child = createSession({
@@ -171,13 +190,17 @@ describe("promotional session override", () => {
     const childCtl = createPromotionController({ requestFn });
     await parentCtl.sync(parent.pi, parent.ctx);
     await childCtl.sync(child.pi, child.ctx);
+
+    inWindow = true;
+    await parentCtl.sync(parent.pi, parent.ctx);
+    await childCtl.sync(child.pi, child.ctx);
     expect(parent.ctx.model).toEqual(PROMO);
     expect(child.ctx.model).toEqual(PROMO);
 
     inWindow = false;
     await parentCtl.sync(parent.pi, parent.ctx);
     await childCtl.sync(child.pi, child.ctx);
-    expect(parent.ctx.model).toEqual({ provider: "xai", id: "grok-4.5" });
+    expect(parent.ctx.model).toEqual(GROK);
     expect(parent.pi.getThinkingLevel()).toBe("high");
     expect(child.ctx.model).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5" });
     expect(child.pi.getThinkingLevel()).toBe("low");
@@ -185,10 +208,13 @@ describe("promotional session override", () => {
 
   test("setModel failure cannot erase the original model", async () => {
     const session = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
-    session.pi.failSetModel();
-    const controller = createPromotionController({ requestFn: async () => status(true) });
+    let inWindow = false;
+    const controller = createPromotionController({ requestFn: async () => status(inWindow) });
     await controller.sync(session.pi, session.ctx);
-    expect(session.ctx.model).toEqual({ provider: "xai", id: "grok-4.5" });
+    session.pi.failSetModel();
+    inWindow = true;
+    await controller.sync(session.pi, session.ctx);
+    expect(session.ctx.model).toEqual(GROK);
     expect(session.pi.getThinkingLevel()).toBe("high");
     expect(latestPromotionRecord(session.entries)?.phase).toBe("apply_failed");
     expect(latestPromotionRecord(session.entries)?.original).toEqual({
@@ -213,7 +239,7 @@ describe("promotional session override", () => {
     });
 
     await controller.sync(session.pi, session.ctx);
-    expect(session.ctx.model).toEqual({ provider: "xai", id: "grok-4.5" });
+    expect(session.ctx.model).toEqual(GROK);
     expect(clock.timers).toHaveLength(1);
     expect(clock.timers[0]?.ms).toBe(1_000);
 
@@ -226,7 +252,7 @@ describe("promotional session override", () => {
     nowMs = 3_000;
     inWindow = false;
     await clock.fireFirst();
-    expect(session.ctx.model).toEqual({ provider: "xai", id: "grok-4.5" });
+    expect(session.ctx.model).toEqual(GROK);
     expect(latestPromotionRecord(session.entries)?.phase).toBe("restored");
     controller.dispose();
     expect(clock.timers).toHaveLength(0);
@@ -234,10 +260,12 @@ describe("promotional session override", () => {
 
   test("after restore a later manual model is kept and recaptured on the next window", async () => {
     const session = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
-    let inWindow = true;
+    let inWindow = false;
     const controller = createPromotionController({
       requestFn: async () => status(inWindow),
     });
+    await controller.sync(session.pi, session.ctx);
+    inWindow = true;
     await controller.sync(session.pi, session.ctx);
     inWindow = false;
     await controller.sync(session.pi, session.ctx);
@@ -266,6 +294,71 @@ describe("promotional session override", () => {
     });
   });
 
+  test("a manual model picked after the switch is never forced back", async () => {
+    const session = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
+    let inWindow = false;
+    const controller = createPromotionController({ requestFn: async () => status(inWindow) });
+    await controller.sync(session.pi, session.ctx);
+    inWindow = true;
+    await controller.sync(session.pi, session.ctx);
+    expect(session.ctx.model).toEqual(PROMO);
+
+    await session.pi.setModel(ASTRA);
+    for (let i = 0; i < 3; i += 1) await controller.sync(session.pi, session.ctx);
+    expect(session.ctx.model).toEqual(ASTRA);
+    expect(latestPromotionRecord(session.entries)?.phase).toBe("applied");
+  });
+
+  test("a new promotional model replaces live sessions once, then leaves them alone", async () => {
+    const sonnet = { provider: "anthropic", id: "claude-sonnet-5-5" };
+    let promo = PROMO;
+    const requestFn = async () => ({
+      ok: true,
+      data: { enabled: true, inWindow: true, provider: promo.provider, model: promo.id },
+    });
+    const a = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
+    const b = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
+    const aCtl = createPromotionController({ requestFn });
+    const bCtl = createPromotionController({ requestFn });
+    await aCtl.sync(a.pi, a.ctx);
+    await bCtl.sync(b.pi, b.ctx);
+    expect(a.ctx.model).toEqual(GROK);
+
+    promo = sonnet;
+    await aCtl.sync(a.pi, a.ctx);
+    await bCtl.sync(b.pi, b.ctx);
+    expect(a.ctx.model).toEqual(sonnet);
+    expect(b.ctx.model).toEqual(sonnet);
+
+    await a.pi.setModel(ASTRA);
+    await aCtl.sync(a.pi, a.ctx);
+    await aCtl.sync(a.pi, a.ctx);
+    expect(a.ctx.model).toEqual(ASTRA);
+    expect(b.ctx.model).toEqual(sonnet);
+  });
+
+  test("window exit does not restore over a manual pick, and the next window recaptures it", async () => {
+    const session = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
+    let inWindow = false;
+    const controller = createPromotionController({ requestFn: async () => status(inWindow) });
+    await controller.sync(session.pi, session.ctx);
+    inWindow = true;
+    await controller.sync(session.pi, session.ctx);
+    await session.pi.setModel(ASTRA);
+    session.pi.setThinkingLevel("low");
+
+    inWindow = false;
+    await controller.sync(session.pi, session.ctx);
+    expect(session.ctx.model).toEqual(ASTRA);
+    expect(session.pi.getThinkingLevel()).toBe("low");
+    expect(latestPromotionRecord(session.entries)?.phase).toBe("restored");
+
+    inWindow = true;
+    await controller.sync(session.pi, session.ctx);
+    expect(session.ctx.model).toEqual(PROMO);
+    expect(latestPromotionRecord(session.entries)?.original).toMatchObject(ASTRA);
+  });
+
   test("serializes concurrent sync so the first capture wins", async () => {
     const session = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
     let releaseFirst: (() => void) | undefined;
@@ -277,7 +370,7 @@ describe("promotional session override", () => {
       requestFn: async () => {
         calls += 1;
         if (calls === 1) await firstGate;
-        return status(true);
+        return status(calls > 1);
       },
     });
     const first = controller.sync(session.pi, session.ctx);
@@ -299,7 +392,7 @@ describe("promotional session override", () => {
     const handlers = new Map<string, (...args: unknown[]) => unknown>();
     const session = createSession({ provider: "xai", id: "grok-4.5", thinking: "high" });
     let nowMs = 1_000;
-    let inWindow = true;
+    let inWindow = false;
     const clock = createTimers();
     createOarExtension({
       now: () => nowMs,
@@ -336,6 +429,10 @@ describe("promotional session override", () => {
     expect(handlers.has("before_provider_request")).toBe(true);
 
     await handlers.get("session_start")?.({}, session.ctx);
+    expect(session.ctx.model).toEqual(GROK);
+
+    inWindow = true;
+    await handlers.get("turn_start")?.({}, session.ctx);
     expect(session.ctx.model).toEqual(PROMO);
     expect(session.entries.some((entry) => entry.customType === PROMOTION_ENTRY_TYPE)).toBe(true);
 
@@ -344,7 +441,7 @@ describe("promotional session override", () => {
     expect(session.ctx.model).toEqual(PROMO);
 
     await handlers.get("turn_start")?.({}, session.ctx);
-    expect(session.ctx.model).toEqual({ provider: "xai", id: "grok-4.5" });
+    expect(session.ctx.model).toEqual(GROK);
 
     inWindow = true;
     nowMs = 2_000;
@@ -353,7 +450,7 @@ describe("promotional session override", () => {
 
     inWindow = false;
     await handlers.get("before_agent_start")?.({}, session.ctx);
-    expect(session.ctx.model).toEqual({ provider: "xai", id: "grok-4.5" });
+    expect(session.ctx.model).toEqual(GROK);
 
     await handlers.get("session_shutdown")?.({}, session.ctx);
     expect(clock.timers).toHaveLength(0);
